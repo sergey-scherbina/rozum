@@ -1,6 +1,6 @@
 feature/ucc-ssc-public 2026-08-08T17:13:53Z
 agent: claude-opus-5
-heartbeat: 2026-08-14T15:43:50Z
+heartbeat: 2026-08-14T15:54:20Z
 status: blocked
 done-so-far: slice 1 matches the Rust routes on ALL 1884 cells present on disk (status + every field), and /view matches byte-for-byte on a live and a revoked token, headers included. Commit 05e70a5 fixed four gaps in /view that status-parity had hidden: it served index.html instead of view.html (580KB vs 27KB, both 200), never injected window._VIEW_TOKEN (a 200 carrying a console that could not call anything), answered 200 instead of 404 for a missing file, and answered an expired link with raw JSON instead of the styled page. Also aligned Content-Type on every JSON answer (unstated, the runtime guessed text/plain for a JSON body) and put `ok: false` back in the 400 body.
 next: the switch lives in the gateway on branch feature/matrix-task-info-single-source (dc8b029): ROZUM_UCC_SSC_ORIGIN picks which implementation registers the two routes; unset = today's behaviour exactly, unreachable .ssc = 502 (never a silent fallback to Rust). Both branches are committed and unmerged, and NOTHING live has been switched — the deployment decisions (install the binary, set the variable, supervise the .ssc process) are the operator's.
@@ -40,10 +40,16 @@ FILED 2026-08-14: the build blocker had NEVER BEEN REPORTED. Their INBOX held fi
   routed to their BUGS.md as `open`, the char one is closed by the merge, and
   `serve-binds-all-interfaces` is still `new` at 1d — inside their own 14d gate, so it is queued,
   not ignored.
-  STILL UNFILED: query percent-decoding (branch `fix/query-percent-decoding`). Not a blocker for
-  this slice and NOT re-measured today, so it is not filed — a report written from memory is the
-  thing their INBOX doc warns about. Measuring it needs a server bound and curled, which is the
-  one thing `serve-binds-all-interfaces` says not to do casually.
+  FILED TOO (2026-08-14, second one): `query-not-percent-decoded-on-build-rust`, landed 5a723adea.
+  It IS a blocker for this slice and my earlier note calling it 'not a blocker' was wrong — the
+  commit timestamps settle it: `fix/query-percent-decoding` 18:33:04 lands twenty seconds before
+  `84e5595` 18:33:25 ("equal to the Rust handler on 200 real cells"), and
+  `fix/http-response-status` 19:38:02 before `d54cedb` 19:38:17. The slice was developed against a
+  toolchain carrying BOTH. Measured today rather than remembered: one GET, one file — `run`
+  answers `m=[mlx-community:Qwen3.5-4B-MLX-4bit] q=[a b c]`, `build-rust` answers
+  `m=[mlx-community%3AQwen3.5-4B-MLX-4bit] q=[a+b%20c]`. A String-returning handler still compiles
+  under the broken lowering, which is what made the measurement possible at all today.
+  SO: three upstream blockers, not two. All three now visible to them.
 blocker-before-any-switch: the .ssc server binds ALL interfaces (`*:8412`) while the Rust
   console binds `127.0.0.1`. Reachable from the LAN only because the host firewall refuses
   the connection today — that is not the protection to rely on. `serve(port)` must take a
