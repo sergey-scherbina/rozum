@@ -135,10 +135,9 @@ single-writer daemon). Each item below is its own spec+build later — listed to
     were mostly constructions: the compiler found ONE non-exhaustive match. The wildcards were the
     real question and reviewing them turned up a second defect — the upstream Anthropic shim was
     flattening `stop_sequence` into `end_turn` on the way in.
-  - [ ] **stop-sequence-which-one** — Anthropic's `stop_sequence` field (WHICH string matched) is
-    still `null`. Carrying it costs either `StopReason`'s `Copy` (call sites rely on it) or a new
-    field on `ChatEvent::Done`, which has **38 exhaustive destructuring sites** — measured. Clients
-    branch on `stop_reason`, so this is a detail, not a blocker.
+  - [x] **stop-sequence-which-one — DONE 2026-08-14 as BUG-041.** Losing `Copy` cost THREE compile
+    errors, not the wide change the entry priced — and the field turned out to be absent from the
+    non-streaming body altogether, not merely null.
   - **`frequency_penalty` / `presence_penalty`** (OpenAI) — internally there is only
     `repeat_penalty`, and it is a DIFFERENT function (HF convention: divide positive logits /
     multiply negative ones, over a recent window) rather than OpenAI's additive-per-occurrence

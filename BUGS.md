@@ -5,6 +5,32 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-041 — Anthropic's `stop_sequence` field was missing entirely, so a client with several could not tell which fired
+
+- **Status:** FIXED 2026-08-14 — `StopReason::StopSequence(String)`; both the streaming
+  `message_delta` and the non-streaming body carry the string, and the upstream shim reads it.
+- **Severity:** P3, and it completes BUG-040 rather than standing alone.
+
+Two findings, and the first is about my own estimate.
+
+**Losing `Copy` cost three compile errors, not the wide change I priced it at.** BUG-040 deferred
+this on the grounds that `StopReason` is `Copy` and "83 call sites rely on it"; the alternative — a
+field on `ChatEvent::Done` — was measured at 38 exhaustive destructuring sites. The compiler
+answered in one run: **three** errors, each a single `.clone()`, in `consume_tokens`, the Anthropic
+upstream shim, and the cascade. That is the second estimate I made by reading this week that the
+compiler cut down (BUG-040 was the first), and the lesson is the same both times: price a refactor
+by compiling it, not by grepping it.
+
+**The field was not merely null — it was absent.** Anthropic's Message object always carries
+`stop_sequence` (null when no stop string fired), and our non-streaming body omitted the key
+entirely. The wire golden shows it as the one changed line: `"stop_reason":"end_turn"` gained
+`,"stop_sequence":null` on every `/v1/messages` answer, not only on stop-sequence ones. A client
+reading `body.stop_sequence` got `undefined` where the spec promises `null` — a distinction that
+matters in exactly the languages most clients are written in.
+
+The streaming half had the key with a hardcoded `null`, which was correct until a stop string could
+actually fire and then quietly wrong.
+
 ## BUG-040 — a stop-sequence hit and a natural end were the same answer, in both directions
 
 - **Status:** FIXED 2026-08-14 — `StopReason::StopSequence`; `/v1/messages` reports Anthropic's
