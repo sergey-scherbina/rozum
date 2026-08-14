@@ -255,6 +255,30 @@ async fn render_all() -> String {
             body_text(resp).await
         ));
     }
+
+    // ── The seventh case: OpenAI Chat streaming WITH `stream_options.include_usage` ──────────
+    //
+    // Its own case rather than a variant of the loop, because the whole point is the CONTRAST with
+    // the plain streaming case above: same request otherwise, and the difference is a `usage` key
+    // on every chunk plus one extra chunk at the end. A client that does not ask must keep getting
+    // the frames it always got, and the two blocks sitting side by side is how that stays true
+    // (BUG-033).
+    let seen = Arc::new(StdMutex::new(None));
+    let state = test_state(seen.clone());
+    let req: crate::oai_api::OaiChatReq = serde_json::from_value(json!({
+        "model": "asked-for-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true,
+        "stream_options": {"include_usage": true},
+    }))
+    .unwrap();
+    let resp = oai_chat_handler(axum::extract::State(state), axum::Json(req)).await;
+    out.push_str(&format!(
+        "=== /v1/chat/completions stream=true include_usage=true\n--- request\n{}--- response\n{}\n",
+        seen.lock().unwrap().clone().unwrap_or_default(),
+        body_text(resp).await
+    ));
+
     out
 }
 

@@ -42,6 +42,17 @@ pub(crate) struct OaiChatReq {
     /// dialect ever filled it (BUG-032). Absent from `/v1/responses` on purpose: the Responses API
     /// does not define `seed`, so adding it there would invent a parameter rather than honour one.
     pub(crate) seed: Option<u64>,
+    /// `{"include_usage": true}` — the client asking for token counts in the STREAM. Unread until
+    /// BUG-033, when this endpoint was the only one of the three that reported no usage while
+    /// streaming at all.
+    #[serde(default)]
+    pub(crate) stream_options: Option<StreamOptions>,
+}
+
+#[derive(Deserialize, Default)]
+pub(crate) struct StreamOptions {
+    #[serde(default)]
+    pub(crate) include_usage: bool,
 }
 
 #[derive(Deserialize)]
@@ -233,7 +244,23 @@ pub(crate) struct OaiToolState {
 }
 
 pub(crate) fn oai_chunk(completion_id: &str, model: &str, delta: Value, finish_reason: Option<&str>) -> Event {
-    let data = json!({
+    oai_chunk_with_usage(completion_id, model, delta, finish_reason, false)
+}
+
+/// A chunk, plus the `usage` key when the client asked for usage in the stream.
+///
+/// OpenAI's shape is specific: with `stream_options.include_usage`, EVERY ordinary chunk carries
+/// `"usage": null` and one extra chunk at the end carries the real numbers with an empty `choices`.
+/// The null is not decoration — it is how a client tells "this build does not report usage" from
+/// "this chunk is not the one that does" (BUG-033).
+pub(crate) fn oai_chunk_with_usage(
+    completion_id: &str,
+    model: &str,
+    delta: Value,
+    finish_reason: Option<&str>,
+    include_usage: bool,
+) -> Event {
+    let mut data = json!({
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": now_secs(),
@@ -244,6 +271,26 @@ pub(crate) fn oai_chunk(completion_id: &str, model: &str, delta: Value, finish_r
             "finish_reason": finish_reason,
         }]
     });
+    if include_usage {
+        data["usage"] = Value::Null;
+    }
+    Event::default().data(data.to_string())
+}
+
+/// The extra final chunk: no choices, the whole request's token counts.
+pub(crate) fn oai_usage_chunk(completion_id: &str, model: &str, input: u32, output: u32) -> Event {
+    let data = json!({
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": now_secs(),
+        "model": model,
+        "choices": [],
+        "usage": {
+            "prompt_tokens": input,
+            "completion_tokens": output,
+            "total_tokens": input + output,
+        }
+    });
     Event::default().data(data.to_string())
 }
 
@@ -252,6 +299,7 @@ pub(crate) fn oai_sse_stream(
     cancel: CancellationToken,
     model: String,
     lease: Option<ChatLease>,
+    include_usage: bool,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let completion_id = new_id("chatcmpl");
     async_stream::stream! {
@@ -264,18 +312,18 @@ pub(crate) fn oai_sse_stream(
                 Ok(ChatEvent::TextDelta { text }) => {
                     // Send role on first delta
                     if !role_sent {
-                        yield Ok(oai_chunk(&completion_id, &model,
-                            json!({"role": "assistant", "content": ""}), None));
+                        yield Ok(oai_chunk_with_usage(&completion_id, &model,
+                            json!({"role": "assistant", "content": ""}), None, include_usage));
                         role_sent = true;
                     }
-                    yield Ok(oai_chunk(&completion_id, &model,
-                        json!({"content": text}), None));
+                    yield Ok(oai_chunk_with_usage(&completion_id, &model,
+                        json!({"content": text}), None, include_usage));
                 }
 
                 Ok(ChatEvent::ToolUseStart { id, name }) => {
                     if !role_sent {
-                        yield Ok(oai_chunk(&completion_id, &model,
-                            json!({"role": "assistant", "content": null}), None));
+                        yield Ok(oai_chunk_with_usage(&completion_id, &model,
+                            json!({"role": "assistant", "content": null}), None, include_usage));
                         role_sent = true;
                     }
                     let index = tool.as_ref().map(|t| t.index + 1).unwrap_or(0);
@@ -288,7 +336,7 @@ pub(crate) fn oai_sse_stream(
                             "function": { "name": name, "arguments": "" }
                         }]
                     });
-                    yield Ok(oai_chunk(&completion_id, &model, delta, None));
+                    yield Ok(oai_chunk_with_usage(&completion_id, &model, delta, None, include_usage));
                     tool = Some(OaiToolState { index, id, name, args: String::new() });
                 }
 
@@ -300,7 +348,7 @@ pub(crate) fn oai_sse_stream(
                                 "function": { "arguments": input_json_delta }
                             }]
                         });
-                        yield Ok(oai_chunk(&completion_id, &model, delta, None));
+                        yield Ok(oai_chunk_with_usage(&completion_id, &model, delta, None, include_usage));
                         if let Some(ref mut t) = tool {
                             t.args.push_str(&input_json_delta);
                         }
@@ -311,14 +359,19 @@ pub(crate) fn oai_sse_stream(
                     // Tool args complete; stop_reason will come with Done
                 }
 
-                Ok(ChatEvent::Done { stop_reason, .. }) => {
+                Ok(ChatEvent::Done { stop_reason, input_tokens, output_tokens }) => {
                     let finish = match stop_reason {
                         StopReason::ToolUse => "tool_calls",
                         StopReason::MaxTokens => "length",
                         StopReason::Cancelled => "stop",
                         StopReason::EndTurn => "stop",
                     };
-                    yield Ok(oai_chunk(&completion_id, &model, json!({}), Some(finish)));
+                    yield Ok(oai_chunk_with_usage(&completion_id, &model, json!({}), Some(finish), include_usage));
+                    // The extra chunk, and ONLY when asked for: a client that never sent
+                    // `stream_options` must keep receiving exactly the frames it always has.
+                    if include_usage {
+                        yield Ok(oai_usage_chunk(&completion_id, &model, input_tokens, output_tokens));
+                    }
                     break;
                 }
 
@@ -425,6 +478,29 @@ pub(crate) async fn oai_collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_in_the_stream_is_opt_in_and_absence_means_no() {
+        // BUG-033. The default is the load-bearing half: a client that never sent `stream_options`
+        // must keep receiving exactly the frames it always received, so "absent" and
+        // "include_usage: false" both have to mean no.
+        let parse = |v: serde_json::Value| -> OaiChatReq { serde_json::from_value(v).unwrap() };
+        let base = serde_json::json!({"model": "m", "messages": [], "stream": true});
+
+        let mut asked = base.clone();
+        asked["stream_options"] = serde_json::json!({"include_usage": true});
+        assert!(parse(asked).stream_options.is_some_and(|o| o.include_usage));
+
+        let mut declined = base.clone();
+        declined["stream_options"] = serde_json::json!({"include_usage": false});
+        assert!(!parse(declined).stream_options.is_some_and(|o| o.include_usage));
+
+        // Absent entirely, and present-but-empty (a client that sent the object and nothing in it).
+        assert!(parse(base.clone()).stream_options.is_none());
+        let mut empty = base;
+        empty["stream_options"] = serde_json::json!({});
+        assert!(!parse(empty).stream_options.is_some_and(|o| o.include_usage));
+    }
 
     #[test]
     fn a_client_seed_survives_parsing_and_an_absent_one_stays_absent() {

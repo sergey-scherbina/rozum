@@ -96,3 +96,20 @@ event: message_stop
 data: {"type":"message_stop"}
 
 
+=== /v1/chat/completions stream=true include_usage=true
+--- request
+  msg user: hi
+  tools: []
+  sampling: temperature=None top_p=None top_k=None max_tokens=None seed=None schema=false reasoning=None
+--- response
+data: {"id":"chatcmpl-X","object":"chat.completion.chunk","created":0,"model":"asked-for-model","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-X","object":"chat.completion.chunk","created":0,"model":"asked-for-model","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-X","object":"chat.completion.chunk","created":0,"model":"asked-for-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null}
+
+data: {"id":"chatcmpl-X","object":"chat.completion.chunk","created":0,"model":"asked-for-model","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}
+
+data: [DONE]
+
+

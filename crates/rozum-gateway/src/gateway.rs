@@ -580,6 +580,17 @@ struct OaiWire {
     req: OaiChatReq,
 }
 
+impl OaiWire {
+    /// Did the client ask for token counts inside the stream (`stream_options.include_usage`)?
+    /// Absent means no, and no must mean the frames are exactly what they always were (BUG-033).
+    fn include_usage(&self) -> bool {
+        self.req
+            .stream_options
+            .as_ref()
+            .is_some_and(|o| o.include_usage)
+    }
+}
+
 impl WireDialect for OaiWire {
     const ENDPOINT: &'static str = "/v1/chat/completions";
     const ERROR_KIND: &'static str = "backend_error";
@@ -625,7 +636,14 @@ impl WireDialect for OaiWire {
         lease: ChatLease,
     ) -> Response {
         if self.stream_mode() {
-            Sse::new(oai_sse_stream(chat_stream, cancel, model, Some(lease))).into_response()
+            Sse::new(oai_sse_stream(
+                chat_stream,
+                cancel,
+                model,
+                Some(lease),
+                self.include_usage(),
+            ))
+            .into_response()
         } else {
             oai_collect(chat_stream, cancel, &model, Some(lease)).await
         }
@@ -1887,7 +1905,7 @@ mod tests {
         let req = ChatRequest::simple("ping");
         let stream = backend.chat(req).await.unwrap();
         let cancel = CancellationToken::new();
-        let sse = oai_sse_stream(stream, cancel, "hello".to_owned(), None);
+        let sse = oai_sse_stream(stream, cancel, "hello".to_owned(), None, false);
         futures::pin_mut!(sse);
         // Must have at least one event + [DONE]
         let events: Vec<_> = sse.collect().await;
