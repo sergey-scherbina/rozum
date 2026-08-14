@@ -5475,7 +5475,7 @@ fn run_meetings_uninstall() {
     println!("uninstalled launchd meeting service ({})", path.display());
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn run_meetings_install() {
     let (program, args) = meetings_service_spec();
     let (env, secret, bind) = meetings_console_env();
@@ -5510,7 +5510,7 @@ fn run_meetings_install() {
     print_console_hint(&secret, &bind);
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn run_meetings_uninstall() {
     let _ = std::process::Command::new("systemctl")
         .args([
@@ -5526,6 +5526,68 @@ fn run_meetings_uninstall() {
         .args(["--user", "daemon-reload"])
         .status();
     println!("uninstalled systemd meeting service ({})", path.display());
+}
+
+#[cfg(target_os = "windows")]
+fn run_meetings_install() {
+    let (program, args) = meetings_service_spec();
+    let (env, secret, bind) = meetings_console_env();
+    let launcher = rozum::service::meetings_windows_launcher_path();
+    let xml = rozum::service::meetings_windows_task_xml_path();
+    ensure_meetings_log_dir();
+    write_windows_task_files(
+        "meetings install",
+        &program,
+        &args,
+        &env,
+        "rozum meeting daemon",
+        &launcher,
+        &xml,
+        &rozum::service::meetings_windows_log_path(),
+    );
+    let st = std::process::Command::new("schtasks")
+        .args([
+            "/Create",
+            "/TN",
+            rozum::service::MEETINGS_WINDOWS_TASK,
+            "/XML",
+            &xml.to_string_lossy(),
+            "/F",
+        ])
+        .status();
+    report_status(
+        st,
+        &format!(
+            "installed scheduled meeting task {} → {}",
+            rozum::service::MEETINGS_WINDOWS_TASK,
+            xml.display()
+        ),
+    );
+    let st = std::process::Command::new("schtasks")
+        .args(["/Run", "/TN", rozum::service::MEETINGS_WINDOWS_TASK])
+        .status();
+    report_status(st, "started the scheduled meeting task");
+    print_console_hint(&secret, &bind);
+}
+
+#[cfg(target_os = "windows")]
+fn run_meetings_uninstall() {
+    let _ = std::process::Command::new("schtasks")
+        .args(["/End", "/TN", rozum::service::MEETINGS_WINDOWS_TASK])
+        .status();
+    let _ = std::process::Command::new("schtasks")
+        .args(["/Delete", "/TN", rozum::service::MEETINGS_WINDOWS_TASK, "/F"])
+        .status();
+    let xml = rozum::service::meetings_windows_task_xml_path();
+    let launcher = rozum::service::meetings_windows_launcher_path();
+    let _ = std::fs::remove_file(&xml);
+    let _ = std::fs::remove_file(&launcher);
+    println!(
+        "uninstalled scheduled meeting task {} ({}, {})",
+        rozum::service::MEETINGS_WINDOWS_TASK,
+        xml.display(),
+        launcher.display()
+    );
 }
 
 async fn run_gateway_status(json: bool) {
@@ -8296,7 +8358,7 @@ fn status_service() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn install_service(program: &str, args: &[String], env: &[(String, String)]) {
     let unit = rozum::service::systemd_unit(program, args, env);
     let path = rozum::service::systemd_unit_path();
@@ -8323,7 +8385,7 @@ fn install_service(program: &str, args: &[String], env: &[(String, String)]) {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn uninstall_service() {
     let path = rozum::service::systemd_unit_path();
     let _ = std::process::Command::new("systemctl")
@@ -8336,7 +8398,7 @@ fn uninstall_service() {
     eprintln!("uninstalled systemd --user service ({})", path.display());
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn start_service() {
     let st = std::process::Command::new("systemctl")
         .args(["--user", "start", rozum::service::SYSTEMD_UNIT])
@@ -8344,7 +8406,7 @@ fn start_service() {
     report_status(st, "started systemd --user service");
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn stop_service() {
     let st = std::process::Command::new("systemctl")
         .args(["--user", "stop", rozum::service::SYSTEMD_UNIT])
@@ -8352,11 +8414,148 @@ fn stop_service() {
     report_status(st, "stopped systemd --user service");
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn status_service() {
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "status", rozum::service::SYSTEMD_UNIT])
         .status();
+}
+
+// ── Windows: the same five verbs against Task Scheduler ─────────────────────────
+//
+// UNVERIFIED ON WINDOWS. `schtasks` is invoked exactly as documented; nothing here has run on a
+// Windows box. Until 2026-08-14 this file had no Windows arm at all and `not(target_os = "macos")`
+// sent it down the SYSTEMD path — so `rozum service install` on Windows wrote a systemd unit into
+// `%APPDATA%` and then failed to spawn `systemctl`. That compiled, and CI was green, because the
+// wrongness was in what it DID and not in whether it built.
+
+/// Write the launcher + task XML, or exit with the reason. Shared by the gateway and the meeting
+/// daemon, which differ only in their names, files and log.
+#[cfg(target_os = "windows")]
+fn write_windows_task_files(
+    what: &str,
+    program: &str,
+    args: &[String],
+    env: &[(String, String)],
+    description: &str,
+    launcher: &std::path::Path,
+    xml: &std::path::Path,
+    log: &std::path::Path,
+) {
+    let cmd = match rozum::service::windows_launcher_cmd(program, args, env, log) {
+        Ok(c) => c,
+        Err(e) => {
+            // Refusing beats installing a service whose arguments are not the ones asked for.
+            eprintln!("rozum {what}: cannot generate the launcher — {e}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(dir) = launcher.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(launcher, cmd) {
+        eprintln!("rozum {what}: write {}: {e}", launcher.display());
+        std::process::exit(1);
+    }
+    let task = rozum::service::windows_task_xml(description, launcher);
+    if let Err(e) = std::fs::write(xml, rozum::service::utf16le_with_bom(&task)) {
+        eprintln!("rozum {what}: write {}: {e}", xml.display());
+        std::process::exit(1);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn install_service(program: &str, args: &[String], env: &[(String, String)]) {
+    let launcher = rozum::service::windows_launcher_path();
+    let xml = rozum::service::windows_task_xml_path();
+    let _ = rozum::share::ensure_dir(); // the service.log dir
+    write_windows_task_files(
+        "service",
+        program,
+        args,
+        env,
+        "rozum local LLM gateway",
+        &launcher,
+        &xml,
+        &rozum::service::windows_log_path(),
+    );
+    // `/F` overwrites an existing registration, which is what makes install idempotent — the
+    // launchd arm gets that from its `unload` first, and systemd from `enable --now`.
+    let st = std::process::Command::new("schtasks")
+        .args([
+            "/Create",
+            "/TN",
+            rozum::service::WINDOWS_TASK,
+            "/XML",
+            &xml.to_string_lossy(),
+            "/F",
+        ])
+        .status();
+    report_status(
+        st,
+        &format!("installed scheduled task {} → {}", rozum::service::WINDOWS_TASK, xml.display()),
+    );
+    // Registering it only arms the logon trigger; the other two arms start it now, so this does too.
+    let st = std::process::Command::new("schtasks")
+        .args(["/Run", "/TN", rozum::service::WINDOWS_TASK])
+        .status();
+    report_status(st, "started the scheduled task");
+}
+
+#[cfg(target_os = "windows")]
+fn uninstall_service() {
+    let _ = std::process::Command::new("schtasks")
+        .args(["/End", "/TN", rozum::service::WINDOWS_TASK])
+        .status();
+    let _ = std::process::Command::new("schtasks")
+        .args(["/Delete", "/TN", rozum::service::WINDOWS_TASK, "/F"])
+        .status();
+    let xml = rozum::service::windows_task_xml_path();
+    let launcher = rozum::service::windows_launcher_path();
+    let _ = std::fs::remove_file(&xml);
+    let _ = std::fs::remove_file(&launcher);
+    eprintln!(
+        "uninstalled scheduled task {} ({}, {})",
+        rozum::service::WINDOWS_TASK,
+        xml.display(),
+        launcher.display()
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn start_service() {
+    if !rozum::service::windows_task_xml_path().exists() {
+        eprintln!("rozum service: not installed — run `rozum service install --model …` first");
+        std::process::exit(1);
+    }
+    let st = std::process::Command::new("schtasks")
+        .args(["/Run", "/TN", rozum::service::WINDOWS_TASK])
+        .status();
+    report_status(st, "started the scheduled task");
+}
+
+#[cfg(target_os = "windows")]
+fn stop_service() {
+    let st = std::process::Command::new("schtasks")
+        .args(["/End", "/TN", rozum::service::WINDOWS_TASK])
+        .status();
+    report_status(st, "stopped the scheduled task");
+}
+
+#[cfg(target_os = "windows")]
+fn status_service() {
+    let st = std::process::Command::new("schtasks")
+        .args(["/Query", "/TN", rozum::service::WINDOWS_TASK, "/V", "/FO", "LIST"])
+        .status();
+    if !matches!(st, Ok(s) if s.success()) {
+        eprintln!(
+            "rozum service: not installed (schtasks found no {})",
+            rozum::service::WINDOWS_TASK
+        );
+    }
 }
 
 /// A [`rozum::gateway::BackendBuilder`] over this binary's backend-selection
