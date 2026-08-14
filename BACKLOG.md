@@ -141,9 +141,9 @@ single-writer daemon). Each item below is its own spec+build later — listed to
     penalties. Mapping one onto the other would be an approximation presented as a parameter.
     Decide: implement them properly, or state in the API docs that they are unsupported. Do not
     quietly alias them.
-  - **`repeat_penalty` has the opposite problem** — an internal knob **no dialect can set**, which
-    is exactly the shape `seed` had before BUG-032. Either give it a wire path or write down that it
-    is engine-internal, so the next person does not find a third dead field.
+  - **`repeat_penalty` has the opposite problem** — **DONE 2026-08-14 as BUG-036**, wired as
+    `repetition_penalty` on both OpenAI dialects. It went deeper than "unset": two of the three MLX
+    batching-admission counters were reporting on paths no client could trigger.
   - **structured output on `/v1/responses`** — **DONE 2026-08-14 as BUG-034.** It was the closest to
     a real bug of the set, and it was one: `text.format` was unparsed while Chat's `response_format`
     worked, so the same capability existed on one OpenAI dialect and not the other. One parser now

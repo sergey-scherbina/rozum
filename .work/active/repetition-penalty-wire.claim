@@ -1,6 +1,0 @@
-feature/repetition-penalty-wire 2026-08-14T18:13:32Z
-agent: nadia-ucc
-heartbeat: 2026-08-14T18:13:32Z
-status: not-started
-done-so-far:
-next: BUG-036 — repeat_penalty is plumbed into MLX (incl. a batching branch) but no dialect can set it; accept repetition_penalty on the two OpenAI dialects

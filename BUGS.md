@@ -5,6 +5,34 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-036 — `repeat_penalty` was implemented all the way down to the Metal sampler, and no client could reach it
+
+- **Status:** FIXED 2026-08-14 — both OpenAI dialects accept `repetition_penalty` (the vLLM/TGI
+  spelling, which is what OpenAI-compatible local servers speak and the same reason `top_k` is
+  already accepted). Not added to `/v1/messages`: Anthropic defines no such parameter.
+- **Severity:** P3 as a feature, and it is filed for the shape rather than the impact — it is the
+  third field in a week found implemented at one end and unreachable at the other.
+
+`SamplingParams::repeat_penalty` is honoured by `sampler::sample` (HF convention: divide positive
+logits, multiply negative ones, over a recent-token window) and threaded through the MLX backend to
+`set_sampler`. **No wire dialect ever set it**, exactly as with `seed` before BUG-032.
+
+**How deep the dead code went, and the part worth reading.** The MLX batching admission is
+
+```rust
+!constrained && !has_penalty && !has_seed
+```
+
+with a counter behind each reason. **Two of the three conditions could not occur**, because no
+client could set a penalty or a seed — so `serial_penalty` and `serial_seed` were statistics about
+paths the code could not take, sitting in the stats pane looking like measurements.
+
+**A consequence of BUG-032 I did not name when I fixed it, corrected here:** now that a client CAN
+send a seed, such a request leaves the batched decode path for the serial one. That is right —
+reproducibility needs a per-sequence RNG and batching cannot give one — but it is a throughput cost
+that the commit should have stated and did not. The same is true of a penalty, and it is now in the
+field's doc comment where a client can find it.
+
 ## BUG-035 — the `nadia` gate tests race on a process-wide env var, so the workspace suite is flaky
 
 - **Status:** FIXED 2026-08-14 — one `GATE_ENV_LOCK` across every test that touches those
