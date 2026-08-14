@@ -1,6 +1,0 @@
-feature/wire-unknown-fields 2026-08-14T18:52:38Z
-agent: nadia-ucc
-heartbeat: 2026-08-14T18:52:38Z
-status: not-started
-done-so-far:
-next: BUG-038 — capture unmatched request fields per dialect and log each novel shape ONCE; it also answers the two verify-first questions (thinking, previous_response_id) with real traffic

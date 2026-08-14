@@ -5,6 +5,38 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-038 — the gateway could not tell you it had ignored your parameter
+
+- **Status:** FIXED 2026-08-14 — every request field this gateway does not act on is captured and
+  named in `gateway.jsonl` as `wire_fields_ignored`, once per novel shape per endpoint.
+- **Severity:** P2, and it is the reason the seven bugs above existed rather than an eighth of them.
+
+BUG-031 … BUG-037 all had one mechanism: **`serde` drops a field no struct declares, in silence.**
+The client gets a 200, the parameter does nothing, and nothing anywhere says so — no error, no log
+line, no metric. Every one of them was found by eye, one at a time, by putting three dialects' parsed
+requests side by side. That does not scale and it does not survive the next API revision.
+
+Each dialect now carries `#[serde(flatten)] unknown: Map<String, Value>` and reports it. Three
+properties, each deliberate:
+
+- **Once per shape, not per request.** An agent sends the same shape thousands of times an hour; a
+  line each would bury the signal. The key is the endpoint plus the sorted field list, so a NEW
+  parameter — a client upgrading, a spec growing — is exactly one new line.
+- **Bounded** (`SHAPE_MEMORY = 256`): the key comes from what a client sends, so a caller with
+  random field names must not grow it forever.
+- **It does not warn, refuse, or 400.** Ignoring an unknown field is correct HTTP behaviour, and
+  some clients send bookkeeping fields on purpose (`store`, `metadata`, `user`). The defect was
+  never the ignoring — it was the silence.
+
+**It also answers the two questions the sweep could not.** Whether codex sends
+`previous_response_id`, and whether Claude Code sends Anthropic's `thinking`, were unanswerable by
+reading code — an undeclared field left no trace. The next real request answers both, in the log,
+with no further guessing.
+
+**What proves the capture is inert:** the wire golden did not move. `#[serde(flatten)]` changes how
+serde deserializes a struct, so the risk was that the KNOWN fields would start parsing differently;
+seven frozen cases say they do not.
+
 ## BUG-037 — stop sequences did not exist anywhere: a client asking to stop at a marker generated straight past it
 
 - **Status:** FIXED 2026-08-14 — `SamplingParams::stop`, parsed from OpenAI's `stop` and
