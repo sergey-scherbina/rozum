@@ -70,12 +70,16 @@ fn summarize(req: &ChatRequest) -> String {
     let names: Vec<&str> = req.tools.iter().map(|t| t.name.as_str()).collect();
     out.push_str(&format!("  tools: [{}]\n", names.join(", ")));
     let s = &req.sampling;
+    // `seed` is here because it was NOT, and that omission mirrored the one in the code: this gate
+    // printed every sampling knob except the single field no dialect was filling (BUG-032). A
+    // golden can only catch what it prints.
     out.push_str(&format!(
-        "  sampling: temperature={:?} top_p={:?} top_k={:?} max_tokens={:?} schema={} reasoning={:?}\n",
+        "  sampling: temperature={:?} top_p={:?} top_k={:?} max_tokens={:?} seed={:?} schema={} reasoning={:?}\n",
         s.temperature,
         s.top_p,
         s.top_k,
         s.max_tokens,
+        s.seed,
         s.response_schema.is_some(),
         s.reasoning_effort,
     ));
@@ -190,7 +194,9 @@ async fn render_all() -> String {
                 "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
             }}],
             "response_format": {"type": "json_object"},
-            "temperature": 0.3, "top_p": 0.9, "top_k": 40, "max_tokens": 64,
+            // `seed` for the same reason `top_p`/`top_k` are on the Anthropic case: the golden's
+            // job is to show what a client asking for a knob actually gets.
+            "temperature": 0.3, "top_p": 0.9, "top_k": 40, "max_tokens": 64, "seed": 4242,
             "stream": stream,
         }))
         .unwrap();

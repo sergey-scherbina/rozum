@@ -3,7 +3,7 @@
   msg system: be brief
   msg user: hi
   tools: [read_file]
-  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) schema=true reasoning=None
+  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) seed=Some(4242) schema=true reasoning=None
 --- response
 {"id":"chatcmpl-X","object":"chat.completion","created":0,"model":"asked-for-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}
 === /v1/responses stream=false
@@ -11,7 +11,7 @@
   msg system: be brief
   msg user: hi
   tools: [read_file]
-  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) schema=false reasoning=Some("low")
+  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) seed=None schema=false reasoning=Some("low")
 --- response
 {"id":"resp-X","object":"response","created_at":0,"status":"completed","model":"asked-for-model","output":[{"type":"message","id":"msg-X","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9},"error":null,"incomplete_details":null,"metadata":{},"parallel_tool_calls":true}
 === /v1/messages stream=false
@@ -19,7 +19,7 @@
   msg system: be brief
   msg user: hi
   tools: [read_file]
-  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) schema=false reasoning=None
+  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) seed=None schema=false reasoning=None
 --- response
 {"id":"msg-X","type":"message","role":"assistant","model":"asked-for-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":2}}
 === /v1/chat/completions stream=true
@@ -27,7 +27,7 @@
   msg system: be brief
   msg user: hi
   tools: [read_file]
-  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) schema=true reasoning=None
+  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) seed=Some(4242) schema=true reasoning=None
 --- response
 data: {"id":"chatcmpl-X","object":"chat.completion.chunk","created":0,"model":"asked-for-model","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
 
@@ -43,7 +43,7 @@ data: [DONE]
   msg system: be brief
   msg user: hi
   tools: [read_file]
-  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) schema=false reasoning=Some("low")
+  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) seed=None schema=false reasoning=Some("low")
 --- response
 event: response.created
 data: {"response":{"id":"resp-X","object":"response","created_at":0,"status":"in_progress","model":"asked-for-model","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"error":null,"incomplete_details":null,"metadata":{},"parallel_tool_calls":true},"type":"response.created","sequence_number":0}
@@ -75,7 +75,7 @@ data: {"response":{"id":"resp-X","object":"response","created_at":0,"status":"co
   msg system: be brief
   msg user: hi
   tools: [read_file]
-  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) schema=false reasoning=None
+  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) seed=None schema=false reasoning=None
 --- response
 event: message_start
 data: {"type":"message_start","message":{"id":"msg-X","type":"message","role":"assistant","model":"asked-for-model","content":[],"stop_reason":null,"usage":{"input_tokens":0,"output_tokens":0}}}

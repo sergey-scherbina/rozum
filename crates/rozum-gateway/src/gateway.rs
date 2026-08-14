@@ -606,6 +606,11 @@ impl WireDialect for OaiWire {
                 top_p: self.req.top_p,
                 max_tokens: self.req.max_tokens,
                 top_k: self.req.top_k,
+                // A client seed now reaches `apply_determinism`, which fills the seed from
+                // `ROZUM_SAMPLING_SEED` only when it is unset — so the client wins, exactly as that
+                // function's comment has always claimed. Until BUG-032 no endpoint parsed one, so
+                // the branch was unreachable and the comment described nothing.
+                seed: self.req.seed,
                 response_schema: parse_response_format(&self.req.response_format),
                 ..Default::default()
             },

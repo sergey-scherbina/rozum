@@ -38,6 +38,10 @@ pub(crate) struct OaiChatReq {
     pub(crate) top_p: Option<f32>,
     pub(crate) max_tokens: Option<u32>,
     pub(crate) top_k: Option<u32>,
+    /// OpenAI's reproducibility knob, and the one field `SamplingParams` had a home for while no
+    /// dialect ever filled it (BUG-032). Absent from `/v1/responses` on purpose: the Responses API
+    /// does not define `seed`, so adding it there would invent a parameter rather than honour one.
+    pub(crate) seed: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -416,4 +420,32 @@ pub(crate) async fn oai_collect(
         }
     });
     axum::Json(body).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_client_seed_survives_parsing_and_an_absent_one_stays_absent() {
+        // BUG-032. `SamplingParams` has carried a `seed` field all along and no dialect ever filled
+        // it, so `apply_determinism`'s "a caller that genuinely sent its own seed keeps it"
+        // described a branch no HTTP client could reach. The distinction below is the whole
+        // mechanism: `None` is what lets `ROZUM_SAMPLING_SEED` fill in, and `Some` is what
+        // overrides it — inventing a default here would silently take the env's turn away.
+        let req: OaiChatReq = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "seed": 4242,
+        }))
+        .expect("a documented OpenAI body must parse");
+        assert_eq!(req.seed, Some(4242));
+
+        let bare: OaiChatReq = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .unwrap();
+        assert_eq!(bare.seed, None);
+    }
 }
