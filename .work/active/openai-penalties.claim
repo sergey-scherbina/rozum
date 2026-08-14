@@ -1,0 +1,7 @@
+feature/openai-penalties 2026-08-14T21:40:19Z
+agent: nadia-ucc
+heartbeat: 2026-08-14T21:40:19Z
+status: not-started
+note: OPERATOR DECISION 2026-08-14 — implement honestly, not as an alias on repeat_penalty.
+done-so-far:
+next: additive count-based penalties in the sampler; decide counting scope (generated only) and accept the serial-path cost
