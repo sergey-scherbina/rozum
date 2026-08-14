@@ -25,7 +25,8 @@ properly, and guessing at it from a mac is how the first version got platform-sh
 
 ## BUG-043 — I broke CI twice in one day and did not notice, because I never looked at it
 
-- **Status:** FIXED 2026-08-15 (both breakages repaired in the same change that finished BUG-042).
+- **Status:** FIXED 2026-08-15. macOS went green on the first repair; Windows needed a SECOND one,
+  because the first fix was still wrong — see below.
 - **Severity:** P1 as a process defect. Every board entry today quoted "13 workspace suites green"
   — true, and it was the wrong axis twice.
 
@@ -39,6 +40,21 @@ lesson already in this repo as `cargo check hides test rot`, applied to features
 **Windows, red from 08:55.** `the_residency_ledger_did_not_move_on_the_machine_this_runs_on` — the
 test I wrote to prove the Windows path port moved nothing — asserted against a forward-slash
 LITERAL, which is not what `PathBuf` yields on Windows. A unix-shaped test guarding a Windows port.
+
+**And the first fix for it was ALSO wrong, which is the part worth keeping.** Replacing the literal
+with joins made the separator right and left the assertion demanding the UNIX LAYOUT on Windows —
+where `%LOCALAPPDATA%` outranks `HOME` by the rule I had just written in `rozum_paths`. CI said so
+exactly:
+
+```
+left:  "C:\Users\runneradmin\AppData\Local\rozum\gateway"
+right: "/Users/somebody\.local\state\rozum\gateway"
+```
+
+So the test was demanding that my own port be wrong. It now pins `LOCALAPPDATA` as well as `HOME`
+and asserts each platform's own layout — deterministic on both rather than dependent on the runner.
+Swept the rest of the workspace for the same shape: two more path literals in assertions, both
+verified safe (no joins on either side, so no separator can differ).
 
 **Its neighbour was collateral, and the mechanism is worth keeping.** A test that fails while
 holding `POISON_ENV_LOCK` POISONS it, and every later test that `.unwrap()`s the lock dies of the

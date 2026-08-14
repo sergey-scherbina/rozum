@@ -1396,9 +1396,13 @@ mod tests {
         let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev_state = std::env::var_os("XDG_STATE_HOME");
         let prev_home = std::env::var_os("HOME");
+        let prev_local = std::env::var_os("LOCALAPPDATA");
         unsafe {
             std::env::remove_var("XDG_STATE_HOME");
             std::env::set_var("HOME", "/Users/somebody");
+            // Set on Windows too, because there it OUTRANKS `HOME` by design — pinning it is what
+            // makes the expectation below deterministic rather than dependent on the runner.
+            std::env::set_var("LOCALAPPDATA", "/Local");
         }
         let dir = gateway_dir();
         unsafe {
@@ -1410,10 +1414,19 @@ mod tests {
                 Some(v) => std::env::set_var("HOME", v),
                 None => std::env::remove_var("HOME"),
             }
+            match prev_local {
+                Some(v) => std::env::set_var("LOCALAPPDATA", v),
+                None => std::env::remove_var("LOCALAPPDATA"),
+            }
         }
-        // Built by JOINS, not from a literal: on Windows the separator is `\`, so a forward-slash
-        // literal fails there — which is exactly what happened. The test written to prove the
-        // Windows port moved nothing was itself unix-shaped and turned CI red on Windows for a day.
+        // Each platform's OWN layout, built by joins. Two mistakes were made here in one day and
+        // they are worth naming: a forward-slash LITERAL (wrong separator on Windows), and then
+        // asserting the unix layout everywhere — but `%LOCALAPPDATA%` outranking `HOME` on Windows
+        // is the documented rule in `rozum_paths`, so the second assertion was demanding that the
+        // port I had just written be wrong.
+        #[cfg(windows)]
+        let want = PathBuf::from("/Local").join("rozum").join("gateway");
+        #[cfg(not(windows))]
         let want = PathBuf::from("/Users/somebody")
             .join(".local")
             .join("state")

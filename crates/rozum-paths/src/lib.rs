@@ -148,9 +148,18 @@ mod tests {
             std::env::set_var("HOME", "/Users/someone");
         }
         assert_eq!(home_dir(), Some(PathBuf::from("/Users/someone")));
+        // Joins, not a literal: `/` is not the separator everywhere, and this crate exists BECAUSE
+        // of the platform that spells it differently. Windows takes `%LOCALAPPDATA%` ahead of
+        // `HOME`, so the home-based layout is asserted where it is the rule.
+        #[cfg(not(windows))]
         assert_eq!(
             state_dir(),
-            Some(PathBuf::from("/Users/someone/.local/state/rozum")),
+            Some(
+                PathBuf::from("/Users/someone")
+                    .join(".local")
+                    .join("state")
+                    .join("rozum")
+            ),
         );
     }
 
