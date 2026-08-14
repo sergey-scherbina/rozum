@@ -120,13 +120,14 @@ impl Default for AnthropicSseState {
     }
 }
 
-fn anthropic_stop_reason(s: &str) -> StopReason {
+fn anthropic_stop_reason(s: &str, matched: Option<&str>) -> StopReason {
     match s {
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::MaxTokens,
         // Upstream Anthropic distinguishes this and we were flattening it into `end_turn` on the
-        // way in — found while adding the variant, not by looking for it.
-        "stop_sequence" => StopReason::StopSequence,
+        // way in — found while adding the variant, not by looking for it. The string itself rides
+        // in a sibling field, so this signature takes it (empty when the upstream omitted it).
+        "stop_sequence" => StopReason::StopSequence(matched.unwrap_or_default().to_string()),
         _ => StopReason::EndTurn,
     }
 }
@@ -180,7 +181,8 @@ fn parse_anthropic_event(v: &Value, state: &mut AnthropicSseState) -> Vec<ChatEv
         }
         Some("message_delta") => {
             if let Some(sr) = v["delta"]["stop_reason"].as_str() {
-                state.stop_reason = anthropic_stop_reason(sr);
+                // The upstream sends the pair in one delta: which KIND, and which string.
+                state.stop_reason = anthropic_stop_reason(sr, v["delta"]["stop_sequence"].as_str());
             }
             if let Some(o) = v["usage"]["output_tokens"].as_u64() {
                 state.out_tokens = o as u32;
@@ -190,7 +192,9 @@ fn parse_anthropic_event(v: &Value, state: &mut AnthropicSseState) -> Vec<ChatEv
             events.push(ChatEvent::Done {
                 input_tokens: state.in_tokens,
                 output_tokens: state.out_tokens,
-                stop_reason: state.stop_reason,
+                // Cloned since `StopReason` began carrying which stop string fired; the state is
+                // reused for the rest of the stream.
+                stop_reason: state.stop_reason.clone(),
             });
         }
         _ => {}
@@ -425,11 +429,19 @@ mod stop_reason_tests {
         // The other direction, found while adding the variant rather than by looking for it:
         // upstream Anthropic distinguishes these and this shim was collapsing the distinction on
         // the way IN, so a proxied answer lost the same information the serializer now preserves.
-        assert_eq!(anthropic_stop_reason("stop_sequence"), StopReason::StopSequence);
-        assert_eq!(anthropic_stop_reason("tool_use"), StopReason::ToolUse);
-        assert_eq!(anthropic_stop_reason("max_tokens"), StopReason::MaxTokens);
-        assert_eq!(anthropic_stop_reason("end_turn"), StopReason::EndTurn);
+        assert_eq!(
+            anthropic_stop_reason("stop_sequence", Some("\nHuman:")),
+            StopReason::StopSequence("\nHuman:".into()),
+        );
+        // An upstream that names the kind but omits the string still parses — empty, not a guess.
+        assert_eq!(
+            anthropic_stop_reason("stop_sequence", None),
+            StopReason::StopSequence(String::new()),
+        );
+        assert_eq!(anthropic_stop_reason("tool_use", None), StopReason::ToolUse);
+        assert_eq!(anthropic_stop_reason("max_tokens", None), StopReason::MaxTokens);
+        assert_eq!(anthropic_stop_reason("end_turn", None), StopReason::EndTurn);
         // Anything unknown stays the safe default rather than becoming a new guess.
-        assert_eq!(anthropic_stop_reason("something_new"), StopReason::EndTurn);
+        assert_eq!(anthropic_stop_reason("something_new", None), StopReason::EndTurn);
     }
 }

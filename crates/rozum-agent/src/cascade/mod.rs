@@ -759,7 +759,7 @@ fn outcome_events(o: &TurnOutcome, marker: Option<&str>) -> Vec<ChatEvent> {
     evs.push(ChatEvent::Done {
         input_tokens: o.input_tokens,
         output_tokens: o.output_tokens,
-        stop_reason: o.stop_reason.unwrap_or(StopReason::EndTurn),
+        stop_reason: o.stop_reason.clone().unwrap_or(StopReason::EndTurn),
     });
     evs
 }

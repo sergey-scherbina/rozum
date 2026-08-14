@@ -201,17 +201,20 @@ impl ChatRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StopReason {
     EndTurn,
     MaxTokens,
     ToolUse,
     Cancelled,
-    /// A client-supplied stop string was generated (BUG-037's label half). A UNIT variant on
-    /// purpose: carrying the matched string here would cost `StopReason` its `Copy`, which 83 call
-    /// sites rely on. Which string matched is a detail of the EVENT, not of the reason — see
-    /// `stop-reason-sequence` in `BACKLOG.md` for what carrying it would take.
-    StopSequence,
+    /// A client-supplied stop string was generated, and WHICH one — Anthropic's `stop_sequence`
+    /// field wants the string, not just the fact.
+    ///
+    /// Carrying it here costs the enum its `Copy`, and that was the reason to defer it (BUG-040).
+    /// Priced by the compiler instead of by reading: the alternative — a field on
+    /// `ChatEvent::Done` — has 38 exhaustive destructuring sites, and this has far fewer. The data
+    /// belongs with the reason anyway: "it stopped" and "it stopped on THIS" are one fact.
+    StopSequence(String),
 }
 
 #[derive(Debug)]

@@ -258,7 +258,8 @@ pub fn is_runaway_loop(ids: &[u32]) -> bool {
     (1..=REPEAT_MAX_PERIOD).any(|p| (p..REPEAT_WINDOW).all(|i| tail[i] == tail[i - p]))
 }
 
-/// Where the emittable text ends, and whether a stop string COMPLETED there.
+/// Where the emittable text ends, and WHICH stop string completed there (by index, so the caller
+/// can name it — Anthropic's `stop_sequence` field wants the string).
 ///
 /// Two jobs in one pass, because they are the same question asked at different confidence:
 /// - a stop string is present → cut there, drop everything after it, end the turn;
@@ -272,16 +273,16 @@ pub fn is_runaway_loop(ids: &[u32]) -> bool {
 ///
 /// An empty `stops` returns `(text.len(), false)` — the exact no-op that keeps every request which
 /// asked for nothing byte-identical.
-pub fn stop_boundary(text: &str, stops: &[String]) -> (usize, bool) {
+pub fn stop_boundary(text: &str, stops: &[String]) -> (usize, Option<usize>) {
     let mut cut = text.len();
-    let mut completed = false;
+    let mut matched: Option<usize> = None;
     let mut hold = 0usize;
 
-    for s in stops.iter().filter(|s| !s.is_empty()) {
+    for (idx, s) in stops.iter().enumerate().filter(|(_, s)| !s.is_empty()) {
         if let Some(i) = text.find(s.as_str()) {
-            if !completed || i < cut {
+            if matched.is_none() || i < cut {
                 cut = i;
-                completed = true;
+                matched = Some(idx);
             }
             continue;
         }
@@ -300,10 +301,10 @@ pub fn stop_boundary(text: &str, stops: &[String]) -> (usize, bool) {
         }
     }
 
-    if completed {
-        return (cut, true);
+    if matched.is_some() {
+        return (cut, matched);
     }
-    (text.len().saturating_sub(hold), false)
+    (text.len().saturating_sub(hold), None)
 }
 
 /// A process-unique tool-call id. The Anthropic/OpenAI contract requires each
@@ -379,7 +380,7 @@ where
                 // Stop strings apply to what the client SEES — for harmony that is the `final`
                 // channel, not the marker-bearing raw run. `full_text` is deliberately left alone
                 // here: harmony's tool calls are parsed out of channels, not out of this string.
-                let (cut, hit_stop) = stop_boundary(&ft, stops);
+                let (cut, hit) = stop_boundary(&ft, stops);
                 let ft = ft[..cut].to_string();
                 if ft.len() > emitted.len() && ft.starts_with(&emitted) {
                     let delta = ft[emitted.len()..].to_string();
@@ -389,8 +390,8 @@ where
                         break;
                     }
                 }
-                if hit_stop {
-                    stop_reason = StopReason::StopSequence;
+                if let Some(i) = hit {
+                    stop_reason = StopReason::StopSequence(stops[i].clone());
                     break;
                 }
             }
@@ -400,7 +401,7 @@ where
             // The client's stop strings bound what may be EMITTED, not what has been generated:
             // `full_text` keeps everything until a stop actually completes, so a held-back tail
             // that turns out to be ordinary text is still there for the tool-call parse below.
-            let (cut, hit_stop) = stop_boundary(stable, stops);
+            let (cut, hit) = stop_boundary(stable, stops);
             let visible = &stable[..cut];
             if !tool_seen {
                 if let Some(pos) = visible.find(TOOL_OPEN) {
@@ -419,11 +420,11 @@ where
                     }
                 }
             }
-            if hit_stop {
+            if let Some(i) = hit {
                 // Now it is decided: everything from the stop string on is dropped, including from
                 // the text the tool parser will read.
                 full_text = visible.to_string();
-                stop_reason = StopReason::StopSequence;
+                stop_reason = StopReason::StopSequence(stops[i].clone());
                 break;
             }
         }
@@ -550,7 +551,10 @@ where
     let _ = emit(Ok(ChatEvent::Done {
         input_tokens: prompt_len as u32,
         output_tokens,
-        stop_reason,
+        // Cloned rather than moved: the event carries one copy to the client and the caller gets
+        // the other. `StopReason` stopped being `Copy` when it started carrying WHICH stop string
+        // fired, and this is the one place in the workspace that noticed.
+        stop_reason: stop_reason.clone(),
     }));
     stop_reason
 }
@@ -670,7 +674,7 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "answer: 42", "everything from the stop string on is dropped");
-        assert_eq!(stop, StopReason::StopSequence, "and the caller can tell WHY it stopped");
+        assert_eq!(stop, StopReason::StopSequence("\nHuman:".into()), "and WHICH string did it");
         assert!(matches!(events.last(), Some(ChatEvent::Done { .. })), "the turn still finishes properly");
     }
 
@@ -696,7 +700,7 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "done", "the half-arrived boundary was held, not streamed");
-        assert_eq!(stop, StopReason::StopSequence);
+        assert_eq!(stop, StopReason::StopSequence("\nHuman:".into()));
     }
 
     #[test]
@@ -876,19 +880,20 @@ mod tests {
     #[test]
     fn no_stop_strings_is_exactly_a_no_op() {
         // The property every request that asked for nothing depends on.
-        assert_eq!(stop_boundary("anything at all", &[]), (15, false));
-        assert_eq!(stop_boundary("", &[]), (0, false));
+        assert_eq!(stop_boundary("anything at all", &[]), (15, None));
+        assert_eq!(stop_boundary("", &[]), (0, None));
         // An empty stop string is not a boundary — it would match everywhere and stop instantly.
-        assert_eq!(stop_boundary("abc", &["".to_string()]), (3, false));
+        assert_eq!(stop_boundary("abc", &["".to_string()]), (3, None));
     }
 
     #[test]
     fn a_present_stop_string_cuts_there_and_ends_the_turn() {
         let stops = vec!["END".to_string()];
-        assert_eq!(stop_boundary("hello ENDtrailing", &stops), (6, true));
+        assert_eq!(stop_boundary("hello ENDtrailing", &stops), (6, Some(0)));
         // Earliest wins when several are present, whichever list order they came in.
         let two = vec!["ZZ".to_string(), "b".to_string()];
-        assert_eq!(stop_boundary("aabZZ", &two), (2, true));
+        // …and it names the one that matched, not merely that one did: here the SECOND.
+        assert_eq!(stop_boundary("aabZZ", &two), (2, Some(1)));
     }
 
     #[test]
@@ -896,12 +901,12 @@ mod tests {
         // The case that cannot be fixed after the fact: "Fin" must not reach the client while
         // "Finish" is still possible. Emit up to the tail, keep the tail.
         let stops = vec!["Finish".to_string()];
-        assert_eq!(stop_boundary("all done Fin", &stops), (9, false));
-        assert_eq!(stop_boundary("all done Finis", &stops), (9, false));
+        assert_eq!(stop_boundary("all done Fin", &stops), (9, None));
+        assert_eq!(stop_boundary("all done Finis", &stops), (9, None));
         // …and once it completes, the same text cuts at the same place, now for good.
-        assert_eq!(stop_boundary("all done Finish", &stops), (9, true));
+        assert_eq!(stop_boundary("all done Finish", &stops), (9, Some(0)));
         // A tail that merely looks similar is not held.
-        assert_eq!(stop_boundary("all done Fun", &stops), (12, false));
+        assert_eq!(stop_boundary("all done Fun", &stops), (12, None));
     }
 
     #[test]
@@ -910,13 +915,13 @@ mod tests {
         let stops = vec!["конец".to_string()];
         let text = "почти ко";
         let (cut, done) = stop_boundary(text, &stops);
-        assert!(!done);
+        assert!(done.is_none());
         assert!(text.is_char_boundary(cut), "cut {cut} is inside a character of {text:?}");
         assert_eq!(&text[..cut], "почти ");
         // Full match, multi-byte: cut at the character boundary where it starts.
         let full = "почти конец!";
         let (c2, d2) = stop_boundary(full, &stops);
-        assert!(d2);
+        assert!(d2.is_some());
         assert_eq!(&full[..c2], "почти ");
     }
 

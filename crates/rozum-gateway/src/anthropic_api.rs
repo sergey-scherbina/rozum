@@ -213,6 +213,17 @@ pub(crate) fn anthropic_event(ev_type: &str, data: Value) -> Event {
     Event::default().event(ev_type).data(data.to_string())
 }
 
+/// The `stop_sequence` field: the string that fired, or `null` for every other reason.
+///
+/// Anthropic sends both — `stop_reason: "stop_sequence"` names the KIND and `stop_sequence` names
+/// the one — and a client that configured several needs the second to know which fired.
+pub(crate) fn anthropic_stop_sequence(stop: &StopReason) -> Value {
+    match stop {
+        StopReason::StopSequence(s) => Value::String(s.clone()),
+        _ => Value::Null,
+    }
+}
+
 pub(crate) fn anthropic_stop_reason(stop: &StopReason) -> &'static str {
     match stop {
         StopReason::EndTurn => "end_turn",
@@ -221,7 +232,7 @@ pub(crate) fn anthropic_stop_reason(stop: &StopReason) -> &'static str {
         StopReason::Cancelled => "end_turn",
         // Anthropic's own value, and the reason this variant exists: a client that branches on
         // `stop_reason` could not tell "the model finished" from "your stop sequence fired".
-        StopReason::StopSequence => "stop_sequence",
+        StopReason::StopSequence(_) => "stop_sequence",
     }
 }
 
@@ -325,9 +336,10 @@ pub(crate) fn anthropic_sse_stream(
                             json!({ "type": "content_block_stop", "index": block_index })));
                     }
                     let sr = anthropic_stop_reason(&stop_reason);
+                    let seq = anthropic_stop_sequence(&stop_reason);
                     yield Ok(anthropic_event("message_delta", json!({
                         "type": "message_delta",
-                        "delta": { "stop_reason": sr, "stop_sequence": null },
+                        "delta": { "stop_reason": sr, "stop_sequence": seq },
                         "usage": { "output_tokens": output_tokens }
                     })));
                     yield Ok(anthropic_event("message_stop", json!({ "type": "message_stop" })));
@@ -364,6 +376,9 @@ pub(crate) async fn anthropic_collect(
     let mut tool_blocks: Vec<Value> = Vec::new();
     let mut current_tool: Option<(String, String, String)> = None;
     let mut stop_reason = "end_turn";
+    // `null` unless a stop string fired — the non-streaming body carries the same pair the
+    // streaming `message_delta` does.
+    let mut stop_sequence = Value::Null;
     let mut in_tokens = 0u32;
     let mut out_tokens = 0u32;
 
@@ -395,6 +410,7 @@ pub(crate) async fn anthropic_collect(
                 output_tokens: o,
             }) => {
                 stop_reason = anthropic_stop_reason(&sr);
+                stop_sequence = anthropic_stop_sequence(&sr);
                 in_tokens = i;
                 out_tokens = o;
                 break;
@@ -422,6 +438,7 @@ pub(crate) async fn anthropic_collect(
         "model": model,
         "content": content,
         "stop_reason": stop_reason,
+        "stop_sequence": stop_sequence,
         "usage": { "input_tokens": in_tokens, "output_tokens": out_tokens }
     });
     axum::Json(body).into_response()
@@ -437,7 +454,13 @@ mod tests {
         // could not tell "the model finished" from "your stop sequence fired" — both said
         // `end_turn`. Asserted here because the wire golden cannot reach it: its stub backend
         // yields a fixed reply and never generates a stop string.
-        assert_eq!(anthropic_stop_reason(&StopReason::StopSequence), "stop_sequence");
+        let hit = StopReason::StopSequence("\nHuman:".into());
+        assert_eq!(anthropic_stop_reason(&hit), "stop_sequence");
+        // …and WHICH one, which is the half a client with several configured actually needs.
+        assert_eq!(anthropic_stop_sequence(&hit), serde_json::json!("\nHuman:"));
+        // Every other reason leaves the field null rather than inventing a value.
+        assert_eq!(anthropic_stop_sequence(&StopReason::EndTurn), Value::Null);
+        assert_eq!(anthropic_stop_sequence(&StopReason::MaxTokens), Value::Null);
         // The neighbours must not have moved.
         assert_eq!(anthropic_stop_reason(&StopReason::EndTurn), "end_turn");
         assert_eq!(anthropic_stop_reason(&StopReason::MaxTokens), "max_tokens");
