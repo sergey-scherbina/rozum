@@ -45,9 +45,13 @@ it emits. That also unblocks deleting the Rust handler, which is slice 1's remai
 
 ## BUG-030 — the meeting PWA could not be rebuilt from source, on either lane
 
-- **Status:** UNBLOCKED 2026-08-13 upstream-pending. Builds against scalascript
-  `feature/ssc-toint-on-a-char` (pushed, reported); the shared toolchain still refuses until that is
-  in their main. The deployed binary was left alone throughout.
+- **Status:** FIXED 2026-08-14, upstream, and the deployed binary is now built from source again.
+  The fix is in scalascript main as `2315f2ecf` — they rebased my `feature/ssc-toint-on-a-char`
+  (it was 21 commits behind; landing it as it stood would have been a verdict about a tree nobody
+  runs), reproduced my measurements themselves and checked the type soundness before merging. Their
+  shared toolchain was restaged at 09:18 the same morning, and `install-bins.sh rozum-meeting-ssc`
+  builds and publishes with no override: `/Users/sergiy/.local/bin/rozum-meeting-ssc` 1,708,320
+  bytes, `com.rozum.meeting-ssc` restarted and back on :8405.
 - **Severity:** P2, and quiet. `clients/meeting/build.sh` had a `SKIP` branch, so every
   `install-bins.sh` run reported success while the PWA stayed at its 2026-08-08 build. A service
   whose only artifact is the copy already running is one bad restart from being gone.
@@ -66,13 +70,36 @@ hashStr(s) = s.trim.toList.map(c => c.toInt).sum      # clients/meeting/meeting.
 Both filed with rozum's name on them; the first has a branch that makes both lanes answer 97 / 57
 for `'a'` / `'9'` and builds the PWA again (1,708,272 bytes, runs, binds its port).
 
+**The `run` half is still open upstream and is deliberately not blocking this.** Their release note
+says so in as many words — the `"ab".toList` closure "is a separate defect and is not this branch's
+business". The PWA is emitted by `build-rust`, so it is unaffected; what it means is that the same
+source still cannot be exercised on the interpreter lane, and the slice in `ucc-ssc-public` carries
+the same restriction for the same reason.
+
+**How the colours were proved unchanged**, which is the property the note below protects. The old
+deployed binary was serving :8405 while the new one was built from the same source with the port
+moved to 8455, and the two were fetched side by side: `/`, `/manage`, `/login`,
+`/manifest.webmanifest`, `/icon.svg`, `/mp/demo`, `/incidents/demo`, `/sw.js` — all eight
+byte-identical, including all 45 palette occurrences on the index, so every handle hashes to the
+colour it hashed to before. After publishing, the live page was byte-identical to the snapshot taken
+from the old binary minutes earlier. Compiling is not the claim; serving the same bytes is.
+
 **What this cost before it was looked at.** The installer's comment still described the 2026-08-08
 failure, which had been fixed upstream — a stale reason is worse than none, because it sends the
-reader after a bug that no longer exists. The comment now says what fails today and what unblocks
-it.
+reader after a bug that no longer exists. It was rewritten to say what failed *that* day, and then
+that version went stale too, within a week. So the comment is gone and `build.sh` diagnoses itself
+instead: on failure it compares the staged toolchain's digest against its own tree and says whether
+this is a restage, our source, or theirs. A fact read off the machine cannot rot the way a sentence
+about the machine does.
 
 **Do not "fix" this by rewriting `hashStr`.** The line is correct ScalaScript and the colours it
 produces are the ones every existing transcript was rendered with; changing the hash changes them.
+
+**Do not restage the toolchain in scalascript's SHARED checkout to unblock a build here.** Siblings
+measure against it, and swapping it under them attributes a verdict to the wrong tree. Stage a
+detached worktree of their `origin/main` and point `SSC_ROOT` at it — with their content-addressed
+cache that is a copy of seconds, not a build. `build.sh` prints exactly those three commands when
+it detects staleness.
 
 ## BUG-029 — install-bins.sh published the CLI dispatcher over the engine six jobs exec
 

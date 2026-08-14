@@ -1,5 +1,24 @@
 # Changelog
 
+## bug030-pwa-rebuild — the meeting PWA builds from source again, and a failing build now says which kind of failure it is
+Completed: 2026-08-14
+
+BUG-030 closed. The upstream half landed as scalascript `2315f2ecf` — they rebased the branch,
+reproduced the measurements and checked the type soundness themselves — and their shared toolchain
+was restaged the same morning, so `install-bins.sh rozum-meeting-ssc` builds and publishes with no
+override. The deployed binary is 1,708,320 bytes and :8405 is back on it.
+
+The colours were the risk, not the compile: `hashStr` feeds the per-handle palette, so a different
+`toInt` would silently recolour every transcript. Old binary on :8405 and new one on :8455, fetched
+side by side — all eight routes byte-identical, and the live page after publishing identical to the
+snapshot from the old binary minutes before.
+
+Also removes the installer comment explaining why the build fails. Two versions of it were written,
+both true when written and both false within a week, and the second cost a reader the assumption
+that the toolchain was fine. `clients/meeting/build.sh` now diagnoses itself on failure — staged
+toolchain digest vs its own tree — and says whether this is a restage, our source, or theirs.
+Verified one real failure per branch.
+
 ## install-bins-clobbers-gateway — the installer published the CLI dispatcher over the engine
 Completed: 2026-08-13
 
