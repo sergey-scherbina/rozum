@@ -124,6 +124,9 @@ fn anthropic_stop_reason(s: &str) -> StopReason {
     match s {
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::MaxTokens,
+        // Upstream Anthropic distinguishes this and we were flattening it into `end_turn` on the
+        // way in — found while adding the variant, not by looking for it.
+        "stop_sequence" => StopReason::StopSequence,
         _ => StopReason::EndTurn,
     }
 }
@@ -409,5 +412,24 @@ mod tests {
         assert_eq!(out[2]["role"], "user");
         assert_eq!(out[2]["content"][0]["type"], "tool_result");
         assert_eq!(out[2]["content"][0]["tool_use_id"], "t1");
+    }
+}
+
+#[cfg(test)]
+mod stop_reason_tests {
+    use super::anthropic_stop_reason;
+    use crate::backend::StopReason;
+
+    #[test]
+    fn an_upstream_stop_sequence_is_no_longer_flattened_into_end_turn() {
+        // The other direction, found while adding the variant rather than by looking for it:
+        // upstream Anthropic distinguishes these and this shim was collapsing the distinction on
+        // the way IN, so a proxied answer lost the same information the serializer now preserves.
+        assert_eq!(anthropic_stop_reason("stop_sequence"), StopReason::StopSequence);
+        assert_eq!(anthropic_stop_reason("tool_use"), StopReason::ToolUse);
+        assert_eq!(anthropic_stop_reason("max_tokens"), StopReason::MaxTokens);
+        assert_eq!(anthropic_stop_reason("end_turn"), StopReason::EndTurn);
+        // Anything unknown stays the safe default rather than becoming a new guess.
+        assert_eq!(anthropic_stop_reason("something_new"), StopReason::EndTurn);
     }
 }

@@ -219,6 +219,9 @@ pub(crate) fn anthropic_stop_reason(stop: &StopReason) -> &'static str {
         StopReason::MaxTokens => "max_tokens",
         StopReason::ToolUse => "tool_use",
         StopReason::Cancelled => "end_turn",
+        // Anthropic's own value, and the reason this variant exists: a client that branches on
+        // `stop_reason` could not tell "the model finished" from "your stop sequence fired".
+        StopReason::StopSequence => "stop_sequence",
     }
 }
 
@@ -427,6 +430,22 @@ pub(crate) async fn anthropic_collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stop_sequence_hit_is_reported_as_anthropic_spells_it() {
+        // The point of the `StopSequence` variant: before it, a client branching on `stop_reason`
+        // could not tell "the model finished" from "your stop sequence fired" — both said
+        // `end_turn`. Asserted here because the wire golden cannot reach it: its stub backend
+        // yields a fixed reply and never generates a stop string.
+        assert_eq!(anthropic_stop_reason(&StopReason::StopSequence), "stop_sequence");
+        // The neighbours must not have moved.
+        assert_eq!(anthropic_stop_reason(&StopReason::EndTurn), "end_turn");
+        assert_eq!(anthropic_stop_reason(&StopReason::MaxTokens), "max_tokens");
+        assert_eq!(anthropic_stop_reason(&StopReason::ToolUse), "tool_use");
+        // A cancelled turn still reports `end_turn`: Anthropic has no value for "the client hung
+        // up", and inventing one would be a wire format nobody speaks.
+        assert_eq!(anthropic_stop_reason(&StopReason::Cancelled), "end_turn");
+    }
 
     #[test]
     fn the_messages_api_sampling_knobs_survive_parsing() {

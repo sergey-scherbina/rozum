@@ -207,6 +207,11 @@ pub enum StopReason {
     MaxTokens,
     ToolUse,
     Cancelled,
+    /// A client-supplied stop string was generated (BUG-037's label half). A UNIT variant on
+    /// purpose: carrying the matched string here would cost `StopReason` its `Copy`, which 83 call
+    /// sites rely on. Which string matched is a detail of the EVENT, not of the reason — see
+    /// `stop-reason-sequence` in `BACKLOG.md` for what carrying it would take.
+    StopSequence,
 }
 
 #[derive(Debug)]

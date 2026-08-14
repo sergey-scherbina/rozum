@@ -390,7 +390,7 @@ where
                     }
                 }
                 if hit_stop {
-                    stop_reason = StopReason::EndTurn;
+                    stop_reason = StopReason::StopSequence;
                     break;
                 }
             }
@@ -423,7 +423,7 @@ where
                 // Now it is decided: everything from the stop string on is dropped, including from
                 // the text the tool parser will read.
                 full_text = visible.to_string();
-                stop_reason = StopReason::EndTurn;
+                stop_reason = StopReason::StopSequence;
                 break;
             }
         }
@@ -670,7 +670,7 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "answer: 42", "everything from the stop string on is dropped");
-        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(stop, StopReason::StopSequence, "and the caller can tell WHY it stopped");
         assert!(matches!(events.last(), Some(ChatEvent::Done { .. })), "the turn still finishes properly");
     }
 
@@ -696,7 +696,7 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "done", "the half-arrived boundary was held, not streamed");
-        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(stop, StopReason::StopSequence);
     }
 
     #[test]
@@ -721,7 +721,7 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "done\nHumble pie");
-        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(stop, StopReason::EndTurn, "released as prose: this turn ended normally");
     }
 
     #[test]

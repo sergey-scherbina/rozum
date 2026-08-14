@@ -347,6 +347,7 @@ pub fn meter(
                             StopReason::MaxTokens => "max_tokens",
                             StopReason::ToolUse => "tool_use",
                             StopReason::Cancelled => "cancelled",
+                            StopReason::StopSequence => "stop_sequence",
                         };
                     }
                     _ => {}

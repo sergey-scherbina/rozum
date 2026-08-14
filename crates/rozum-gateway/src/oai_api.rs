@@ -382,6 +382,8 @@ pub(crate) fn oai_sse_stream(
                         StopReason::MaxTokens => "length",
                         StopReason::Cancelled => "stop",
                         StopReason::EndTurn => "stop",
+                        // See the collect path: OpenAI's value for a stop-sequence hit is `stop`.
+                        StopReason::StopSequence => "stop",
                     };
                     yield Ok(oai_chunk_with_usage(&completion_id, &model, json!({}), Some(finish), include_usage));
                     // The extra chunk, and ONLY when asked for: a client that never sent
@@ -455,6 +457,10 @@ pub(crate) async fn oai_collect(
                 finish_reason = match stop_reason {
                     StopReason::ToolUse => "tool_calls",
                     StopReason::MaxTokens => "length",
+                    // OpenAI reports a stop-sequence hit as plain `stop`, the same value as a
+                    // natural end. Spelled out rather than left to the wildcard, because it is a
+                    // decision about their spec rather than an oversight.
+                    StopReason::StopSequence => "stop",
                     _ => "stop",
                 };
                 input_tokens = i;
