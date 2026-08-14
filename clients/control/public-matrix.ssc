@@ -156,15 +156,11 @@ def rowMatches(header: List[String], row: List[String], agent: String, model: St
 // to `.iter().position(…)` on a String, which does not compile; binding the argument to a typed
 // local first lowers to the string form. Measured both ways on their main — the receiver is not
 // what decides it, the ARGUMENT is.
-// AND `length` IS NOT AN INDEX, which is what this walk is arranged around. On `build-rust`
-// `String.length` answers BYTES while `substring` and `indexOf` count CHARACTERS: for `"a\u00e9\u00b7b"`
-// the lanes disagree (`run` 4, `build-rust` 6) and `substring(1, s.length)` panics with `out of
-// range for a string of 4 code units`. Reported upstream. Until it is fixed, `length` may only be
-// read where the two units provably agree.
-//
-// Here they do, and not by luck: the walk stops at the FIRST non-digit, so it can only reach the end
-// of a string whose characters are ALL digits — and such a string has exactly as many bytes as
-// characters. Every other `length` below is read only after this returned true.
+// The walk is still character-by-character rather than anything shorter, and that is not left over
+// from a defect: `toInt` is the only one-line way to say this and it ABORTS on a non-integer, which
+// is exactly what `isNumeric` feeds it. The `length`-versus-`substring` unit mismatch that this walk
+// was once also arranged around is fixed upstream (`string-length-counts-bytes-not-characters`),
+// re-measured, so the bound is now simply correct rather than correct-by-argument.
 def allDigitsFrom(s: String, i: Int): Boolean =
   if i >= s.length then true
   else
@@ -336,22 +332,25 @@ def viewRoute(req: Request): Response =
       // The local lives INSIDE the else, not above the branch: `at` is -1 when the page carries no
       // `</head>`, and `substring(-1, …)` is evaluated eagerly if it sits outside. That is a fault
       // the split-based shape could not have — worth the two extra lines.
-      // STILL `split`, and the reason changed. It used to be that `indexOf` on a String did not
-      // lower; that is fixed. What is not is `length`: on `build-rust` it answers BYTES while
-      // `substring` counts CHARACTERS, and `view.html` is 27,449 bytes of 26,332 characters, so the
-      // obvious `html.substring(at, html.length)` panics MID-REQUEST — measured here, not imagined,
-      // and it takes the worker thread with it and poisons the server for every request after.
-      // `split` never needs an index, so it cannot meet that.
+      // Insert before the FIRST `</head>`; every later one is content and survives verbatim.
       //
-      // What DID go is `joinFrom`, a hand-rolled recursive join that existed only because a
-      // three-operand concatenation would not lower. `mkString` does the same job in one line now.
-      val parts = html.split(HEAD_END).toList
+      // This is the ordinary shape, and it took four upstream fixes to be able to write it. It was
+      // `split` plus a hand-rolled recursive join, with every concatenation limited to two operands,
+      // because `indexOf` on a String lowered to `.iter().position(…)`, a three-operand chain
+      // lowered to `String + String`, and — the one that actually panicked mid-request —
+      // `String.length` answered BYTES while `substring` counted CHARACTERS. All four reported from
+      // here and all four fixed. Re-measured on their main before this rewrite rather than taken
+      // from a status field: `length` now answers 4 for `"a\u00e9\u00b7b"` on BOTH lanes (it answered 6
+      // here), and `substring(1, length)` returns the tail instead of panicking.
+      //
+      // The tail is still bound INSIDE the else: `at` is -1 when the page carries no `</head>`, and
+      // a local above the branch would be evaluated eagerly.
+      val at: Int = html.indexOf(HEAD_END)
       val patched =
-        if parts.length <= 1 then inject + html
+        if at < 0 then inject + html
         else
-          val head: String = parts(0) + inject
-          val rest: String = HEAD_END + parts.drop(1).mkString(HEAD_END)
-          head + rest
+          val tail: String = html.substring(at, html.length)
+          html.substring(0, at) + inject + tail
       Response(200, Map("Content-Type" -> "text/html; charset=utf-8", "Cache-Control" -> "no-store"), patched)
     else Response(404, Map("Content-Type" -> "text/plain; charset=utf-8"), "view.html not found")
   else
