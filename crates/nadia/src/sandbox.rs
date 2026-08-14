@@ -138,6 +138,20 @@ impl Sandbox {
     /// decide whether it is safe is a losing game.
     pub fn exec(&self, command: &str, timeout: Option<Duration>) -> Result<Exec, String> {
         let timeout = timeout.unwrap_or(self.timeout);
+        // Say it once when confinement was wanted and this platform has none. `exec` runs per
+        // command, so this is a one-time notice rather than a line per invocation — but it is not
+        // silent, because "the sandbox is on" and "the sandbox exists here" are different claims
+        // and the second one is false everywhere except macOS (BUG-044).
+        if self.confine && !cfg!(target_os = "macos") {
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "nadia: sandbox confinement was requested but this platform has none \
+                     (seatbelt is macOS-only) — commands run UNCONFINED in {}",
+                    self.root.display()
+                );
+            }
+        }
         let mut cmd = if self.confine && cfg!(target_os = "macos") {
             let mut c = Command::new("/usr/bin/sandbox-exec");
             c.arg("-p").arg(self.seatbelt_profile()).arg("/bin/bash").arg("-lc").arg(command);
@@ -282,6 +296,16 @@ mod tests {
         assert!(!std::path::Path::new("/tmp/nadia-should-not-exist.txt").exists());
     }
 
+    /// macOS ONLY, and the reason is a gap rather than a test artifact: exec confinement is
+    /// `sandbox-exec` (seatbelt), which exists on no other platform, so `confine` defaults to
+    /// false off macOS and this property is simply not true there. Ungated, this test asserted
+    /// a guarantee the platform does not make and kept the Linux CI job red from before
+    /// 2026-08-14 — and a permanently red job is one nobody reads, which is how two REAL
+    /// breakages went unnoticed the same day (BUG-043).
+    ///
+    /// The gap itself is `nadia-linux-confinement` in `BACKLOG.md`; on Linux an agent can still
+    /// delete its own workspace, which is BUG-017 unfixed there.
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_agent_cannot_delete_its_own_workspace() {
         // Measured 2026-08-04: `(subpath root)` covers the directory node itself, so an agent

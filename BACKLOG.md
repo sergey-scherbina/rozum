@@ -169,6 +169,16 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   no log line here. Both fixed bugs were found by putting the three dialects' parsed requests side by
   side in one file, not by reading any one of them.
 
+- [ ] **nadia-linux-confinement** — nadia's exec sandbox is macOS-only. The mechanism is
+  `sandbox-exec` (seatbelt), so `confine` defaults to false everywhere else and an agent on Linux
+  runs unconfined in its workspace: BUG-017 ("the jail let the agent delete its own workspace") is
+  unfixed there. Surfaced while attributing BUG-044's red CI. `exec` now says so once on stderr
+  rather than running unconfined in silence, and the test that assumed otherwise is gated to macOS.
+  A real fix is Landlock (kernel ≥ 5.13, no privileges needed, and it confines writes by path —
+  the same shape as the seatbelt profile) or bubblewrap; both want a Linux box to develop against,
+  and writing either from a mac is how the assertion this replaces got platform-shaped in the first
+  place.
+
 - [ ] **chain-per-model-executor-tools** (marginal, not urgent) — per-MODEL executor tool curation in the
   chain: a weaker link gets a smaller tool set than a strong one. Today the real levers are already pulled —
   `--lean` cuts the executor surface 33→4 tools and backend planner/verifier tiers run `tools=[]`

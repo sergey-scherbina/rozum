@@ -7,8 +7,9 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ## BUG-044 — `nadia`'s sandbox test fails on Linux, and has since before 2026-08-14
 
-- **Status:** OPEN, filed 2026-08-15 while attributing a red CI. **Not caused by this week's work:**
-  it was already failing at run `da4cc295` (07:45 on 2026-08-14), before that day's first push.
+- **Status:** FIXED 2026-08-15 — the TEST was wrong, and the gap it stumbled over is now named
+  rather than implied. **Not caused by this week's work:** it was already failing at run
+  `da4cc295` (07:45 on 2026-08-14), before that day's first push.
 - **Severity:** P2 — it is one of only two things keeping the Linux job red, and a permanently red
   job is one nobody reads, which is how the macOS and Windows breakages above went unnoticed.
 
@@ -18,10 +19,22 @@ crates/nadia/src/sandbox.rs:296: assertion `left != right` failed:
     deleting the workspace root must be refused: ""
 ```
 
-Passes on macOS, fails on Linux, so it is a platform difference in path handling rather than a
-logic error — the refusal it asserts compares a canonicalised path, and the empty string in the
-message says the comparison had nothing to compare. Needs a Linux box or a container to fix
-properly, and guessing at it from a mac is how the first version got platform-shaped.
+**It is not path handling — it is that there is no sandbox on Linux.** `Sandbox::confine` defaults
+to `cfg!(target_os = "macos")` and `exec` wraps the command in `sandbox-exec` only there, because
+the mechanism IS seatbelt and seatbelt is macOS-only. So on Linux the command runs unconfined, the
+`rm -rf` succeeds, and the test asserting refusal fails. The test was asserting a guarantee the
+platform does not make; its neighbour two functions up was already `#[cfg(target_os = "macos")]` for
+the same reason, and this one was not.
+
+Gated now, with the reason written where the next reader will hit it — but **gating a test is
+hiding a gap unless the gap is stated**, so two things go with it. `exec` now says once, on stderr,
+that confinement was wanted and this platform has none, instead of running unconfined in silence.
+And the gap has a name: `nadia-linux-confinement` in `BACKLOG.md`. On Linux an agent can still
+delete its own workspace — BUG-017, unfixed there.
+
+**Why this mattered beyond one red test:** the Linux job had been red since before 2026-08-14, and a
+permanently red job is one nobody reads. That is exactly how two real breakages of mine went
+unnoticed the same day (BUG-043). A red that is always red teaches people to stop looking.
 
 ## BUG-043 — I broke CI twice in one day and did not notice, because I never looked at it
 
