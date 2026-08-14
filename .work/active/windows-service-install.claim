@@ -1,0 +1,10 @@
+feature/windows-service-install 2026-08-14T09:08:40Z
+agent: claude-opus-5
+heartbeat: 2026-08-14T09:08:40Z
+status: not-started
+done-so-far:
+next: the last open sub-task of windows-portability. Add a Windows arm to the service module
+  (today launchd + systemd generation, then launchctl/systemctl to invoke). Read the module first
+  and establish what it actually does before choosing between a real Windows Service and a Task
+  Scheduler entry — and decide what happens to the seams the previous item left named but unsolved
+  (terminal sessions shell out to tmux, the matrix to bash; neither is on a Windows box).
