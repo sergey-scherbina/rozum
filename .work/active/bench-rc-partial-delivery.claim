@@ -1,7 +1,0 @@
-feature/bench-rc-partial-delivery 2026-08-14T07:32:44Z
-agent: claude-opus-5
-heartbeat: 2026-08-14T07:32:44Z
-status: not-started
-done-so-far:
-next: read scripts/bench/agentic.sh around the rc11 gate and establish what it does today, measured,
-  before changing it. Promoted from BACKLOG (open item, no operator input and no model slot needed).

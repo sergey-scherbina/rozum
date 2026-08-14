@@ -1,5 +1,26 @@
 # Changelog
 
+## bench-rc-partial-delivery — a manifest without source stopped being read as the model's fault
+Completed: 2026-08-14
+
+`rc=11` asked whether `Cargo.toml` exists, so a cell that wrote the manifest and lost the source
+fell through to `rc=10` — the code every board entry reads as "the model wrote wrong code". Cargo has
+no build target there, so there is no program to be wrong about. New `rc=12` for that shape,
+including root-level `.rs` with no `src/`; `greet` stays exempt because it writes no files by design.
+It matches a split `agentic_triage.py` already made (`missing_cargo_toml` vs `missing_src_rs`).
+
+The rule became a function, `classify_rc`, because that is why the bug survived: four lines inside a
+harness that needs a model, a gateway and ten minutes to reach them were never once executed.
+`scripts/bench/test-classify-rc.sh` drives 15 workdir shapes plus each precedence pair in under a
+second and is wired into CI — the first shell test in this repo to be.
+
+All four readers agree: both summarizers bucket `partial` (apart from `deliver`; "wrote nothing" and
+"wrote half" have different fixes) and the console gives 12 its own glyph in three languages instead
+of ✗. The test asserts that agreement — 28/28, and 27/28 with exit 1 when a bucket is removed.
+
+Deferred with it: the same misattribution one layer down, where file presence cannot answer it —
+`bench-rc-seeded-tasks-cannot-report-non-delivery` in `BACKLOG.md`.
+
 ## bug030-pwa-rebuild — the meeting PWA builds from source again, and a failing build now says which kind of failure it is
 Completed: 2026-08-14
 
