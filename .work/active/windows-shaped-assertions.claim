@@ -1,6 +1,0 @@
-feature/windows-shaped-assertions 2026-08-14T22:53:44Z
-agent: nadia-ucc
-heartbeat: 2026-08-14T22:53:44Z
-status: not-started
-done-so-far:
-next: BUG-043 follow-through — every forward-slash path literal in an assertion is a Windows failure waiting; find them all
