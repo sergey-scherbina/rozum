@@ -1106,9 +1106,9 @@ revive it.
   `Cargo.toml` is absent, so a run that writes the manifest and loses the source reads as rc10
   ("the model's fault") even if the source write had been lost by us. It wasn't, this time — the
   obs log settled it. But do not treat rc10 alone as proof of a model-side failure; check
-  `toolcall_parse_miss` for the window. FIXED 2026-08-14 — that shape is `rc=12` now, see
-  `CHANGELOG.md` `bench-rc-partial-delivery`; the caution stands for the SEEDED tasks, where
-  presence still cannot answer it (`bench-rc-seeded-tasks-cannot-report-non-delivery` below).
+  `toolcall_parse_miss` for the window. FIXED 2026-08-14 — that shape is `rc=12`, and the seeded
+  tasks, where presence could not answer it at all, are `rc=13`. See `CHANGELOG.md`
+  `bench-rc-partial-delivery` and `bench-rc-seeded-nondelivery`.
   *(original question, retained)* — does the `apply_patch` bridge land codex's CREATE forms
   when the driver is the frozen model?
   **Why:** `codex-opencode-create-delivery` shipped `rewrite_json_wrapped_apply_patch`
@@ -1123,22 +1123,6 @@ revive it.
   **Gotcha:** the bench opens with `gateway stop --force`; launchd brings `com.rozum.gateway` back.
   **Done when:** either an rc11 is captured with its `-patches` shape (then it is a real bridge gap
   and becomes a BUGS entry), or three reps come back clean and this closes as gpt-oss-specific.
-
-- [ ] **bench-rc-seeded-tasks-cannot-report-non-delivery** (small, found 2026-08-14 while shipping
-  rc=12) — `rc=11` ("wrote no project files") is decided by whether `Cargo.toml` is on disk, so for
-  the SEEDED tasks — `fix`, `debug`, `multibug`, which the harness pre-creates with a manifest and a
-  source file — it can never fire. An agent that reads the seeded project, writes nothing and exits
-  scores `rc=10`, the code that means "delivered a complete program and it is wrong". Same
-  misattribution rc=12 just removed, one layer down, and it is the layer where the fix/debug
-  numbers on this board come from.
-  **Why it was not fixed with rc=12:** file PRESENCE cannot answer it — the files are there because
-  we put them there. It needs a before/after: hash the seeded tree in `setup_task`, compare after
-  the run, and report "the agent changed nothing" as its own outcome.
-  **Gotcha:** "changed nothing" is not the same as "delivered nothing" — a repair attempt that
-  reverts its own edit ends byte-identical too. Say what was measured, not what it implies.
-  **Done when:** a `fix` cell where the agent touched no file reports distinguishably from one where
-  it rewrote the function and got it wrong, `classify_rc` decides it, and
-  `scripts/bench/test-classify-rc.sh` covers both.
 
 - [ ] **gpt-oss-20b (closed on the sprint 2026-08-05 — pointer only)** — the model is not on disk and
   `models list` shows one. Kept as a line so the name resolves: the sprint entry holds the findings,

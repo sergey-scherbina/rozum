@@ -1,5 +1,26 @@
 # Changelog
 
+## bench-rc-seeded-nondelivery — the three edit tasks could not tell "changed nothing" from "got it wrong"
+Completed: 2026-08-14
+
+`rc=11` and `rc=12` ask what is on disk, and for `fix`, `debug` and `multibug` the harness put a
+manifest and a source file there before the agent started. So on exactly the tasks whose numbers the
+boards quote for editing ability, an agent that wrote nothing scored `rc=10` — "delivered a complete
+program and it is wrong".
+
+`setup_task` now records `.rozum-seed` (sha256 of everything it seeded) and `rc=13` reports a workdir
+that came back byte-identical: seeded files unchanged AND nothing added. The second half matters —
+without it, leaving `src/lib.rs` alone and writing `src/main.rs` beside it reads as untouched.
+
+The code states the measurement, not a culprit: a repair that edits and reverts ends byte-identical
+too. The ignore-list can only suppress a `13`, never manufacture one, and a tampered manifest
+degrades to "cannot say".
+
+`setup_task` moved above the source guard so the test drives the real seeding path rather than a copy
+that drifts. 46/46, and both halves proved able to fail — including the console check, whose first
+version passed on one language and would have shipped a code the ru/uk consoles render as a bare
+number. The archiver keeps `.rozum-seed`, so the verdict is re-checkable from an archived cell.
+
 ## windows-spawn-seams — the gateway's process control behind one seam, and the workspace compiles for Windows
 Completed: 2026-08-14
 
