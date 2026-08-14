@@ -135,15 +135,55 @@ def rowMatches(header: List[String], row: List[String], agent: String, model: St
 // Quoting a number turns those into string comparisons, where 9 > 524.2 — which is why this
 // coerces rather than passing every field through as text. Measured against the Rust handler on
 // one real row: 14 of its fields are numeric and were arriving quoted.
-// A CSV field is a number when it parses as one — checked by ROUND-TRIP through `toInt`, not by
-// `toDouble`. `toDouble` looks like the tidier check and is wrong here: Rust prints `8.0_f64` as
-// "8", so `"8.0".toDouble.toString == "8.0"` is false and the field stayed a quoted string. Caught
-// by comparing every cell of every bench run against the Rust handler, not by reading — one cell
-// happened to have no such value.
+// A CSV field is a number when it parses as one, and the test is CANONICAL-FORM, not "parses":
+// `"007"` and `"-0"` are rejected because emitting them bare would produce invalid JSON. That used
+// to be expressed as a round-trip — `s.toInt.toString == s` — which said it in one line.
+//
+// IT CANNOT BE WRITTEN THAT WAY ANY MORE, and the reason is a fix landing upstream, not a defect.
+// `toInt` on a non-integer used to diverge between the lanes: it aborted under `run` and silently
+// answered 0 under `build-rust` (reported from here as `toint-on-a-non-integer-diverges`). They
+// closed it by making BOTH lanes abort — the right call, and it turns the round-trip into a
+// landmine: `isNumeric` is called on every CSV field, and `seconds` is `3.1`. Measured on their
+// fixed main before rewriting: `isNumeric("3.1")` panics with `String.toInt: invalid integer`.
+// Building is not working, and this file built fine.
+//
+// So the same predicate without a partial function. `toDouble` is still not the answer for the
+// reason it never was: Rust prints `8.0_f64` as "8", so a round-trip through it says `"8.0"` is not
+// numeric and the field stays a quoted string. Caught originally by comparing every cell of every
+// bench run against the Rust handler, not by reading — one cell happened to have no such value.
+//
+// `val ch: String` is load-bearing, not style. `"0123456789".indexOf(s.substring(i, i + 1))` lowers
+// to `.iter().position(…)` on a String, which does not compile; binding the argument to a typed
+// local first lowers to the string form. Measured both ways on their main — the receiver is not
+// what decides it, the ARGUMENT is.
+// AND `length` IS NOT AN INDEX, which is what this walk is arranged around. On `build-rust`
+// `String.length` answers BYTES while `substring` and `indexOf` count CHARACTERS: for `"a\u00e9\u00b7b"`
+// the lanes disagree (`run` 4, `build-rust` 6) and `substring(1, s.length)` panics with `out of
+// range for a string of 4 code units`. Reported upstream. Until it is fixed, `length` may only be
+// read where the two units provably agree.
+//
+// Here they do, and not by luck: the walk stops at the FIRST non-digit, so it can only reach the end
+// of a string whose characters are ALL digits — and such a string has exactly as many bytes as
+// characters. Every other `length` below is read only after this returned true.
+def allDigitsFrom(s: String, i: Int): Boolean =
+  if i >= s.length then true
+  else
+    val ch: String = s.substring(i, i + 1)
+    if "0123456789".indexOf(ch) < 0 then false
+    else allDigitsFrom(s, i + 1)
+
 def isInt(s: String): Boolean =
-  val a = s
-  val b = s
-  a.toInt.toString == b
+  if s.length == 0 then false
+  else
+    val first: String = s.substring(0, 1)
+    if first == "-" then
+      if allDigitsFrom(s, 1) == false then false
+      else if s.length == 1 then false
+      else s.substring(1, 2) != "0"
+    else
+      if allDigitsFrom(s, 0) == false then false
+      else if s.length == 1 then true
+      else first != "0"
 
 def isNumeric(s: String): Boolean =
   if s.length == 0 then false
@@ -259,18 +299,6 @@ def lastSegment(path: String): String =
 // that, which is how it survived a round of checking.
 val HEAD_END: String = "</head>"
 
-// `split` drops the separators, so putting the tail back means re-inserting them. Only the first
-// occurrence is a split point for us; every later one is content and must survive verbatim.
-// Every concatenation here joins exactly TWO operands. A chain of three String-typed operands is
-// lowered to `format!(..) + String`, and `String + String` does not compile in Rust; two operands
-// become a single `format!` and do. The shape is dictated by the backend, not by taste.
-def joinFrom(parts: List[String], sep: String, from: Int): String =
-  if from >= parts.length then ""
-  else
-    val here = sep + parts(from)
-    val rest = joinFrom(parts, sep, from + 1)
-    here + rest
-
 def expiredPage(): String =
   "<!doctype html><html><head><meta charset=utf-8><title>rozum \u00b7 link expired</title></head>" +
   "<body style='font:16px system-ui;text-align:center;padding:60px;background:#0f1117;color:#c9d1d9'>" +
@@ -278,23 +306,51 @@ def expiredPage(): String =
 
 def viewRoute(req: Request): Response =
   val t = lastSegment(req.path)
-  if viewTokenOk(t) then
+  // `/view/` with nothing after it is NOT an expired link, and the Rust route answers 404 with an
+  // empty body. Found by comparing the two servers on the empty token — the earlier round compared
+  // a live one and a revoked one and never asked what a bare prefix does. Both refuse either way,
+  // so this was never a hole; it was an unmeasured difference, which is its own kind of debt.
+  if t == "" then Response(404, Map(), "")
+  else if viewTokenOk(t) then
     val page = uccSiteDir() + "/view.html"
     if exists(page) then
       // The page has no other way to learn its token: it is injected as a script variable before
       // </head>. Serving the file unpatched is a 200 carrying a console that cannot call anything.
       val html = readFile(page)
       val inject = "<script>window._VIEW_TOKEN='" + t + "';</script>"
-      // Insert before the FIRST </head>, which is what the Rust route does. Written with `split`
-      // and a hand-rolled join rather than indexOf/substring: on a String receiver the backend
-      // lowers `indexOf` to `.iter().position(…)` (String has no `iter`) and lowers `a + b` on two
-      // computed Strings to `String + String`, neither of which compiles. Measured, not assumed.
+      // Insert before the FIRST `</head>`, which is what the Rust route does — every later one is
+      // content and survives verbatim.
+      //
+      // This was `split` plus a hand-rolled join, and every concatenation joined exactly TWO
+      // operands, because `indexOf` on a String lowered to `.iter().position(…)` and a three-operand
+      // chain lowered to `String + String`. Both were reported from here and both are fixed
+      // upstream, so the ordinary shape is back. Re-measured on their main before this change
+      // rather than taken from the changelog: `indexOf` answers 12 on both lanes for the same
+      // input, and a three-operand concatenation compiles and prints `abc`.
+      //
+      // The tail is bound to a local rather than written inline as a third operand, and that is the
+      // one piece of the old shape that has to stay. `a + b + c` compiles now when the operands are
+      // plain, but with a CALL on the right it still lowers to `format!(..) + String`, which wants a
+      // `&str`. Measured on their main, all four variants in one file: plain three-operand ok,
+      // rightmost-call E0308, rightmost bound to a typed local ok, two-step ok.
+      // The local lives INSIDE the else, not above the branch: `at` is -1 when the page carries no
+      // `</head>`, and `substring(-1, …)` is evaluated eagerly if it sits outside. That is a fault
+      // the split-based shape could not have — worth the two extra lines.
+      // STILL `split`, and the reason changed. It used to be that `indexOf` on a String did not
+      // lower; that is fixed. What is not is `length`: on `build-rust` it answers BYTES while
+      // `substring` counts CHARACTERS, and `view.html` is 27,449 bytes of 26,332 characters, so the
+      // obvious `html.substring(at, html.length)` panics MID-REQUEST — measured here, not imagined,
+      // and it takes the worker thread with it and poisons the server for every request after.
+      // `split` never needs an index, so it cannot meet that.
+      //
+      // What DID go is `joinFrom`, a hand-rolled recursive join that existed only because a
+      // three-operand concatenation would not lower. `mkString` does the same job in one line now.
       val parts = html.split(HEAD_END).toList
       val patched =
         if parts.length <= 1 then inject + html
         else
-          val head = parts(0) + inject
-          val rest = joinFrom(parts, HEAD_END, 1)
+          val head: String = parts(0) + inject
+          val rest: String = HEAD_END + parts.drop(1).mkString(HEAD_END)
           head + rest
       Response(200, Map("Content-Type" -> "text/html; charset=utf-8", "Cache-Control" -> "no-store"), patched)
     else Response(404, Map("Content-Type" -> "text/plain; charset=utf-8"), "view.html not found")
