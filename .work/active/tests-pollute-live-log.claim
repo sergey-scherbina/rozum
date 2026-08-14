@@ -1,6 +1,0 @@
-feature/tests-pollute-live-log 2026-08-14T18:55:56Z
-agent: nadia-ucc
-heartbeat: 2026-08-14T18:55:56Z
-status: not-started
-done-so-far:
-next: BUG-039 — cargo test appends ~5.3KB of fake events to the operator LIVE gateway.jsonl, which incident evidence reads; log_path() is a OnceLock so a test cannot redirect it
