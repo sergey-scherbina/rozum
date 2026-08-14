@@ -205,6 +205,26 @@ pub async fn check(
 mod tests {
     use super::*;
 
+    /// Serialises every test that reads or writes the gate's process-wide environment
+    /// (`NADIA_VERIFY`, `NADIA_VERIFY_ROUNDS`, `ROZUM_GATE_OWNER`).
+    ///
+    /// cargo runs a crate's tests as THREADS in one process, so without this a test that merely
+    /// CONSTRUCTS a `Report` and asks for its summary can be answered by another test's
+    /// half-applied environment. Measured before this lock existed: **2 failures in 25 runs** of
+    /// `cargo test -p nadia --lib gate:: -- --test-threads=16`, on unmodified master (BUG-035).
+    ///
+    /// Merging the racing tests into one was the earlier fix, and the comment on
+    /// `who_owns_the_gate_for_this_run` explains why. It was incomplete in a way worth naming: it
+    /// caught the tests that obviously WRITE these variables and missed the one that only READS
+    /// them, indirectly, through `Report::summary()` → `owner()`. A lock covers readers too, and a
+    /// new test only has to take it — which is why this replaces "keep merging tests together", a
+    /// strategy that ends with one test and no names.
+    static GATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn gate_env() -> std::sync::MutexGuard<'static, ()> {
+        GATE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// A run that stopped WITHOUT finishing still gets its deterministic check.
     ///
     /// Measured 2026-08-04: an RPN attempt exhausted its steps, the front-end skipped the check
@@ -246,6 +266,14 @@ mod tests {
 
     #[test]
     fn a_report_never_implies_a_pass_it_does_not_have() {
+        let _env = gate_env();
+        // ESTABLISH the precondition instead of assuming it. "Nothing was checked here" has two
+        // readings and `owner()` picks between them, so this assertion is about an unowned run —
+        // which has to be made true, not hoped for. It was neither locked nor established before,
+        // so it failed both when another test held the variable mid-flight and for any developer
+        // who happened to have `ROZUM_GATE_OWNER` exported in their shell.
+        unsafe { std::env::remove_var("ROZUM_GATE_OWNER") };
+
         let unchecked = Report::default();
         assert!(unchecked.summary().contains("не проверено"), "{}", unchecked.summary());
 
@@ -302,6 +330,7 @@ mod tests {
     /// thread scheduling teaches nothing.
     #[test]
     fn who_owns_the_gate_for_this_run() {
+        let _env = gate_env();
         unsafe { std::env::remove_var("NADIA_VERIFY") };
         unsafe { std::env::remove_var("ROZUM_GATE_OWNER") };
         unsafe { std::env::remove_var("NADIA_VERIFY_ROUNDS") };
