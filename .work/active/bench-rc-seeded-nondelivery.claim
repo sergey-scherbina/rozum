@@ -1,0 +1,10 @@
+feature/bench-rc-seeded-nondelivery 2026-08-14T08:38:27Z
+agent: claude-opus-5
+heartbeat: 2026-08-14T08:38:27Z
+status: not-started
+done-so-far:
+next: promoted from BACKLOG (bench-rc-seeded-tasks-cannot-report-non-delivery), the half deferred
+  when rc=12 shipped this morning. For the SEEDED tasks (fix/debug/multibug) the harness writes
+  Cargo.toml itself, so rc=11 can never fire and an agent that changes nothing scores rc=10 — the
+  code that means "delivered a complete program and it is wrong". Needs a before/after over the
+  seeded tree, not a presence check. No model slot, no operator input.
