@@ -659,9 +659,18 @@ Remaining:
     generation + `launchctl`/`systemctl`): install/uninstall a Windows Service (`sc.exe` / the
     `windows-service` crate) or a Task Scheduler entry. The module is already "pure generation +
     invoke", so the arm slots in beside the existing two.
-  - [ ] windows-fs-locks - Route the `.rozum/room/` single-writer advisory lock through a
-    cross-platform lock (`fs2` / `fd-lock`) instead of a raw `flock`, and confirm all room/cache
-    path handling is `PathBuf`-based (no hardcoded `/`).
+  - [x] windows-fs-locks — **DONE 2026-08-14, and two thirds of what this entry asked for did not
+    exist.** Measured before writing anything: every advisory lock in the workspace is already
+    `std::fs::File::try_lock` (std, both platforms — no `fs2`/`fd-lock` needed, and the code around
+    them already carries Windows-aware comments), and path handling is already `PathBuf`-based —
+    four `format!("{}/…")` hits in the two crates holding room and cache paths, none of them a
+    filesystem path. What WAS broken is one line the entry does not mention: **`HOME` is not a
+    Windows variable**, so every path took the fallback, and `PathBuf::from("/tmp")` on Windows is
+    `\tmp` on the current drive — shared by every account. `share::gateway_dir()` holds the
+    residency ledger (BUG-003), and a ledger two users share is not a ledger. Fixed by
+    `crates/rozum-paths` (leaf crate, no deps): `home_dir`/`state_dir`/`config_dir`/`temp_dir`, one
+    rule for the six crates that had four copies of it. Spec:
+    `docs/specs/windows-user-paths.md`.
 
 - [~] portability-shared-model-source - **STARTED 2026-06-18** (branch
   `feature/native-engine-spi-a2-a3`). Step 1 DONE: created `src/model_source.rs` — an

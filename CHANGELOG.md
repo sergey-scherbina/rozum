@@ -1,5 +1,36 @@
 # Changelog
 
+## windows-fs-locks — one rule for where this user's files are, and the variable Windows does not set
+Completed: 2026-08-14
+
+The entry asked for two things and **neither existed any more.** Every advisory lock in the
+workspace is already `std::fs::File::try_lock` — std, both platforms, no `fs2`/`fd-lock` — and the
+code around them already carries Windows-aware comments; somebody ported that deliberately and the
+board never heard. Path separators are already `PathBuf`: four `format!("{}/…")` hits in the two
+crates holding room and cache paths, and not one is a filesystem path.
+
+What was wrong is a line the entry does not mention. **`HOME` is not a Windows variable**, so every
+path in the process fell to the same fallback there — and `PathBuf::from("/tmp")` on Windows names
+`\tmp` on the current drive, a directory nobody created and every account shares. For a log file
+that is untidy; for `share::gateway_dir()` it is not, because that holds the residency ledger whose
+whole job is to stop a second model load from exhausting host RAM (BUG-003, a kernel-watchdog
+reboot). A ledger two users share is not a ledger.
+
+`crates/rozum-paths` — a leaf crate with no dependencies, the shape `rozum-stamp` set — now answers
+`home_dir` / `state_dir` / `config_dir` / `temp_dir` for the six crates that had four copies of the
+rule between them. `rozum-gateway` alone held three copies of the state directory, already differing
+in shape, while a fourth in `rozum-meeting` resolved the same `rooms.json` the gateway console reads;
+they agreed by coincidence. A crate rather than a module because `rozum-meeting` deliberately does
+not depend on `rozum-core`, and a rule that cannot be shared gets copied.
+
+Two paths deliberately did **not** move: `/tmp/rozum-agentic-*` (the bench writes those with
+`mktemp -d /tmp/…`, so `temp_dir()` — macOS `$TMPDIR` — would make the archive step find nothing,
+silently, every run) and `~/Library/LaunchAgents` (that path describes macOS, and hiding it behind a
+portable name would hide which platform the function is for).
+
+Unix behaviour is unchanged wherever `HOME` is set, and one test asserts exactly that for the
+ledger. Spec: `docs/specs/windows-user-paths.md`.
+
 ## bench-rc-seeded-nondelivery — the three edit tasks could not tell "changed nothing" from "got it wrong"
 Completed: 2026-08-14
 
