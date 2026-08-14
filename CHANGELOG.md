@@ -1,5 +1,40 @@
 # Changelog
 
+## plugin-wireprotocol — one spine behind three wire dialects, on an operator override of a decision that was two-thirds right
+Completed: 2026-08-14
+
+`architecture-spi.md` investigated a `WireProtocol` trait in Stage 3, rejected it, and wrote down
+why. The operator overrode that. Re-measuring first says the rejection was **two-thirds right**, and
+both live thirds are honoured here: each dialect keeps its own typed extractor, so axum validates
+exactly what it validated before, and each keeps its own SSE sequence, so no dialect is bent into
+another's shape. Nothing about parse or serialize was abstracted.
+
+What the earlier investigation did not weigh is what sits *between* them: acquire the model lease,
+fit the prompt to the context window, attach the elision note, estimate tokens, build the
+`ChatRequest`, run the loop-breaker, meter, apply the generation timeout, branch on `stream`. About
+45 lines, written three times, on the path every agent and the whole matrix runs through — and every
+cross-cutting change to it had to be made three times or be wrong in one place.
+
+It had already drifted, which is the argument in one line: `/v1/messages` builds its sampling from
+`temperature` and `max_tokens` alone, because `AnthropicReq` declares no `top_p` and no `top_k` —
+both defined by Anthropic's own Messages API. A client that sends them has them silently dropped.
+Left unfixed on purpose (this change is behaviour-preserving by construction) and now visible as
+data in the golden file instead of as an absence in one of three handlers.
+
+**The cost, stated plainly: +249/−205 lines of code — the seam is 44 lines LARGER than what it
+replaced.** It does not shrink the file. What it buys is that the spine exists once and cannot drift
+again, and that the next cross-cutting change is one edit instead of three. Stage 3 priced the
+indirection correctly; it only missed what was being triplicated.
+
+The gate is the part worth copying: `crates/rozum-gateway/src/testdata/wire-golden.txt`, frozen in
+its own commit **before** any handler was touched and byte-identical after. Six cases — three
+dialects × streaming/not — each recording the exact response bytes AND the request that reached the
+backend (roles, text, tool names, every sampling knob), because a mis-moved field is invisible in
+the response and would otherwise ship.
+
+Not proven: the agentic matrix has not been re-run against it. The gate is hermetic — it covers the
+mapping and the bytes, not a real model under a real agent. Specs: `docs/specs/wire-dialect-seam.md`.
+
 ## windows-service-install — Windows was not missing a service arm, it was taking the wrong one
 Completed: 2026-08-14
 

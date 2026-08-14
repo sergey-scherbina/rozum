@@ -1009,11 +1009,21 @@ revive it.
 
 **Parked because:** Its own TRIAGE already says it needs an operator decision first and rewrites the matrix-critical request/SSE path — highest risk, no payoff for the single frozen model.
 
-- [ ] **plugin-wireprotocol** — make the agent wire layer a real `WireProtocol` trait
-  (Chat / Messages / Responses impls). Supersedes the arch-spi "map, not trait" call —
-  full plugin-ization is the goal. **(See TRIAGE above — re-scope + re-decide before starting.)**
-
-**Parked because:** Its own TRIAGE already decided this out-of-scope pending an operator override.
+- [x] **plugin-wireprotocol — DONE 2026-08-14 on the operator's override, in the form the
+  re-measurement justified: the SPINE, not the extractors.** The Stage-3 rejection was two-thirds
+  right and both live thirds are honoured — each dialect keeps its own typed extractor (request
+  validation untouched) and its own SSE sequence (bytes untouched). What that investigation did not
+  weigh is what sits BETWEEN parse and serialize: lease, auto-context fit, elision note, token
+  estimate, `ChatRequest`, loop-breaker, metering, generation timeout, stream/collect branch — ~45
+  lines written three times on the path the whole matrix runs through, and already drifted
+  (`/v1/messages` accepts no `top_p`/`top_k`, both in its own API; left unfixed here on purpose and
+  recorded as data). Now `trait WireDialect` + `serve_wire`. **Costs 44 lines MORE code than it
+  replaced** — the win is that the spine cannot drift again, not brevity. Gate: a byte-level golden
+  (`crates/rozum-gateway/src/testdata/wire-golden.txt`) frozen in its own commit BEFORE any handler
+  moved, byte-identical after, covering both the response bytes and the request that reached the
+  backend. NOT re-run against the agentic matrix — that needs the model slot. Specs:
+  `docs/specs/wire-dialect-seam.md`, and `architecture-spi.md` records the supersession beside the
+  original call.
 
 - [x] **plugin-services — DONE 2026-08-09, in the narrow form the operator approved: the DECLARATION
   layer only.** `src/services.rs` declares each service once (label, binary, probe, owner, shape);
