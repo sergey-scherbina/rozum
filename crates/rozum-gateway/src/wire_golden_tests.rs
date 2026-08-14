@@ -74,13 +74,15 @@ fn summarize(req: &ChatRequest) -> String {
     // printed every sampling knob except the single field no dialect was filling (BUG-032). A
     // golden can only catch what it prints.
     out.push_str(&format!(
-        "  sampling: temperature={:?} top_p={:?} top_k={:?} max_tokens={:?} seed={:?} repeat={:?} stop={:?} schema={} reasoning={:?}\n",
+        "  sampling: temperature={:?} top_p={:?} top_k={:?} max_tokens={:?} seed={:?} repeat={:?} freq={:?} presence={:?} stop={:?} schema={} reasoning={:?}\n",
         s.temperature,
         s.top_p,
         s.top_k,
         s.max_tokens,
         s.seed,
         s.repeat_penalty,
+        s.frequency_penalty,
+        s.presence_penalty,
         s.stop,
         s.response_schema.is_some(),
         s.reasoning_effort,
@@ -200,6 +202,7 @@ async fn render_all() -> String {
             // job is to show what a client asking for a knob actually gets.
             "temperature": 0.3, "top_p": 0.9, "top_k": 40, "max_tokens": 64, "seed": 4242,
             "repetition_penalty": 1.1,
+            "frequency_penalty": 0.7, "presence_penalty": -0.3,
             // A bare string, which is one of the two shapes OpenAI accepts.
             "stop": "\nHuman:",
             "stream": stream,

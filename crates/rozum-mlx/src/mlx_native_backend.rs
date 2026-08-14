@@ -1272,6 +1272,22 @@ mod inner {
         let constrained = constrain_enabled() && !job.tools.is_empty();
         let has_penalty = s.repeat_penalty.unwrap_or(1.0) != 1.0;
         let has_seed = s.seed.is_some();
+        // OpenAI's `frequency_penalty` / `presence_penalty` are implemented in `rozum_core::sampler`
+        // — which the GGUF and x86 engines drive, and this one does NOT: MLX samples inside the
+        // vendored mlx-lm graph, so honouring them needs `SamplerOpts` in the fork (BUG-042's
+        // remaining half). Until then the request is answered without them, and it SAYS so once
+        // rather than being quietly ignored — the exact silence BUG-031…038 were about.
+        if s.frequency_penalty.unwrap_or(0.0) != 0.0 || s.presence_penalty.unwrap_or(0.0) != 0.0 {
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, Relaxed) {
+                crate::obs::log_event(serde_json::json!({
+                    "event": "sampling_unsupported",
+                    "engine": "mlx-native",
+                    "params": ["frequency_penalty", "presence_penalty"],
+                    "detail": "sampling happens in the mlx-lm graph; honouring these needs SamplerOpts in the fork",
+                }));
+            }
+        }
         if constrained { BATCH_SERIAL_CONSTRAINED.fetch_add(1, Relaxed); }
         if has_penalty { BATCH_SERIAL_PENALTY.fetch_add(1, Relaxed); }
         if has_seed { BATCH_SERIAL_SEED.fetch_add(1, Relaxed); }

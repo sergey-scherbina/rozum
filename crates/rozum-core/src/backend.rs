@@ -172,6 +172,11 @@ pub struct SamplingParams {
     /// `reasoning.effort`). Only gpt-oss's harmony render honours it; when `None` the engine
     /// falls back to `ROZUM_GPTOSS_REASONING` (default `low`). Other backends ignore it.
     pub reasoning_effort: Option<String>,
+    /// OpenAI `frequency_penalty` / `presence_penalty` (−2..2). A DIFFERENT function from
+    /// `repeat_penalty` — additive and count-based rather than multiplicative and flat — which is
+    /// why they are their own fields and not an alias for it (`crate::sampler`).
+    pub frequency_penalty: Option<f32>,
+    pub presence_penalty: Option<f32>,
     /// Strings that end the turn when generated: OpenAI's `stop`, Anthropic's `stop_sequences`
     /// (BUG-037). Applied in the engine-agnostic `consume_tokens`, so both engines honour them
     /// identically and neither had to learn about it. **Empty is a strict no-op** — the property

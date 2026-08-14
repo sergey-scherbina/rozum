@@ -60,6 +60,12 @@ pub(crate) struct OaiChatReq {
     /// to stop at a marker generated straight past it.
     #[serde(default)]
     pub(crate) stop: Value,
+    /// OpenAI's penalty pair (−2..2), on this dialect ONLY: the Responses API does not define them
+    /// and neither does Anthropic Messages, so adding them elsewhere would invent parameters.
+    /// Implemented properly rather than aliased onto `repeat_penalty`, which is a different
+    /// function (BUG-042).
+    pub(crate) frequency_penalty: Option<f32>,
+    pub(crate) presence_penalty: Option<f32>,
     /// Everything this gateway did NOT match. Not to act on — to be able to SAY it was ignored
     /// (BUG-038); the seven parameter defects before it were all invisible for want of this.
     #[serde(flatten)]

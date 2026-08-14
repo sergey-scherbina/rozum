@@ -26,6 +26,18 @@ pub struct SamplerConfig {
     pub top_p: f32,
     /// `1.0` → off (HF convention: divide positive logits / multiply negative ones).
     pub repeat_penalty: f32,
+    /// OpenAI `frequency_penalty`: subtract `penalty × count(token)` from the logit, where the
+    /// count is how often the token has already been GENERATED. `0.0` → off.
+    ///
+    /// A different function from `repeat_penalty`, not a spelling of it: additive rather than
+    /// multiplicative, proportional to the count rather than flat, and over the whole generated
+    /// run rather than a recent window. That is why it is a second field instead of an alias —
+    /// aliasing them would present an approximation as the parameter the client asked for.
+    pub frequency_penalty: f32,
+    /// OpenAI `presence_penalty`: subtract `penalty` once from any token that has appeared at all,
+    /// however often. `0.0` → off. Together with `frequency_penalty` this is OpenAI's pair:
+    /// presence discourages REUSE, frequency discourages OVERUSE.
+    pub presence_penalty: f32,
 }
 
 impl SamplerConfig {
@@ -35,6 +47,11 @@ impl SamplerConfig {
             top_k: p.top_k.unwrap_or(0) as usize,
             top_p: p.top_p.unwrap_or(1.0),
             repeat_penalty: p.repeat_penalty.unwrap_or(1.0),
+            // Clamped to OpenAI's documented range. Outside it the effect is not "stronger" but
+            // "the distribution collapses", and a client that sent 100 by mistake would get
+            // gibberish with a 200 — the failure this whole week has been about.
+            frequency_penalty: p.frequency_penalty.unwrap_or(0.0).clamp(-2.0, 2.0),
+            presence_penalty: p.presence_penalty.unwrap_or(0.0).clamp(-2.0, 2.0),
         }
     }
 }
@@ -54,14 +71,36 @@ pub fn repeat_window(recent: &[u32]) -> &[u32] {
 
 /// Sample one token id from `logits` (`[vocab]`). Repeat penalty over `recent`, then
 /// `temperature == 0` → argmax, else temperature scale → top-k → top-p (nucleus) → categorical.
-pub fn sample(logits: &[f32], cfg: &SamplerConfig, recent: &[u32], rng: &mut impl Rng) -> u32 {
+pub fn sample(logits: &[f32], cfg: &SamplerConfig, generated: &[u32], rng: &mut impl Rng) -> u32 {
     let mut l = logits.to_vec();
 
-    // 1. Repeat penalty (HF convention).
+    // 1. Repeat penalty (HF convention), over a RECENT WINDOW of the run.
+    //
+    // The window is applied here rather than by the caller: it is a property of this penalty, and
+    // while each engine chose its own slice the two could silently disagree about what "recent"
+    // meant. `generated` is now the whole run and each stage takes the scope it needs.
     if cfg.repeat_penalty != 1.0 {
-        for &t in recent {
+        for &t in repeat_window(generated) {
             if let Some(v) = l.get_mut(t as usize) {
                 *v = if *v > 0.0 { *v / cfg.repeat_penalty } else { *v * cfg.repeat_penalty };
+            }
+        }
+    }
+
+    // 1b. OpenAI's pair, over the WHOLE generated run: `logit -= frequency × count + presence`.
+    //
+    // Additive and count-based, which is what makes it a different function from the one above
+    // rather than a second spelling. Scope is the generated tokens only, NOT the prompt: the prompt
+    // is the user's own text, and penalising it would make the model avoid the words the user just
+    // used — which is the opposite of what a client asking for less repetition wants.
+    if cfg.frequency_penalty != 0.0 || cfg.presence_penalty != 0.0 {
+        let mut counts: std::collections::HashMap<u32, f32> = std::collections::HashMap::new();
+        for &t in generated {
+            *counts.entry(t).or_insert(0.0) += 1.0;
+        }
+        for (t, n) in counts {
+            if let Some(v) = l.get_mut(t as usize) {
+                *v -= cfg.frequency_penalty * n + cfg.presence_penalty;
             }
         }
     }
@@ -177,7 +216,91 @@ mod tests {
     use super::*;
 
     fn cfg(temp: f32, top_k: usize, top_p: f32, rp: f32) -> SamplerConfig {
-        SamplerConfig { temperature: temp, top_k, top_p, repeat_penalty: rp }
+        SamplerConfig {
+            temperature: temp,
+            top_k,
+            top_p,
+            repeat_penalty: rp,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+        }
+    }
+
+    fn cfg_openai(freq: f32, presence: f32) -> SamplerConfig {
+        SamplerConfig { frequency_penalty: freq, presence_penalty: presence, ..cfg(0.0, 0, 1.0, 1.0) }
+    }
+
+    /// Greedy, so the assertion is about the LOGITS the penalties produced and not about the RNG.
+    fn argmax_after(logits: &[f32], cfg: &SamplerConfig, generated: &[u32]) -> u32 {
+        let mut rng = seeded_rng(Some(1));
+        sample(logits, cfg, generated, &mut rng)
+    }
+
+    #[test]
+    fn frequency_penalty_scales_with_how_often_a_token_was_generated() {
+        // Token 0 leads by 1.0. Generated three times, a frequency penalty of 0.5 subtracts 1.5 —
+        // enough to lose the lead. This is the half `repeat_penalty` cannot express: it is flat,
+        // so it would demote a token used once exactly as hard as one used ten times.
+        let logits = [3.0f32, 2.0, 1.0];
+        assert_eq!(argmax_after(&logits, &cfg_openai(0.0, 0.0), &[0, 0, 0]), 0, "control: no penalty");
+        assert_eq!(argmax_after(&logits, &cfg_openai(0.5, 0.0), &[0, 0, 0]), 1);
+        // Once only: 0.5 off a 1.0 lead is not enough, and that difference IS the parameter.
+        assert_eq!(argmax_after(&logits, &cfg_openai(0.5, 0.0), &[0]), 0);
+    }
+
+    #[test]
+    fn presence_penalty_is_flat_however_often_the_token_appeared() {
+        // 1.5 off token 0 whether it appeared once or five times — the other half of OpenAI's pair.
+        let logits = [3.0f32, 2.0, 1.0];
+        assert_eq!(argmax_after(&logits, &cfg_openai(0.0, 1.5), &[0]), 1);
+        assert_eq!(argmax_after(&logits, &cfg_openai(0.0, 1.5), &[0, 0, 0, 0, 0]), 1);
+        // …and a token that never appeared is untouched, however large the penalty.
+        assert_eq!(argmax_after(&logits, &cfg_openai(0.0, 2.0), &[2]), 0);
+    }
+
+    #[test]
+    fn a_negative_penalty_encourages_instead_of_discouraging() {
+        // OpenAI's range is [-2, 2] and the negative half is meaningful: it makes repetition MORE
+        // likely. Token 2 trails by 2.0; generated twice with frequency -1.5 it gains 3.0.
+        let logits = [3.0f32, 2.0, 1.0];
+        assert_eq!(argmax_after(&logits, &cfg_openai(-1.5, 0.0), &[2, 2]), 2);
+    }
+
+    #[test]
+    fn out_of_range_penalties_are_clamped_rather_than_left_to_collapse_the_distribution() {
+        use crate::backend::SamplingParams;
+        let wild = SamplingParams {
+            frequency_penalty: Some(100.0),
+            presence_penalty: Some(-100.0),
+            ..Default::default()
+        };
+        let c = SamplerConfig::from_params(&wild);
+        assert_eq!(c.frequency_penalty, 2.0);
+        assert_eq!(c.presence_penalty, -2.0);
+        // In range, nothing is touched.
+        let sane = SamplingParams {
+            frequency_penalty: Some(0.7),
+            presence_penalty: Some(-0.3),
+            ..Default::default()
+        };
+        let c = SamplerConfig::from_params(&sane);
+        assert_eq!(c.frequency_penalty, 0.7);
+        assert_eq!(c.presence_penalty, -0.3);
+    }
+
+    #[test]
+    fn the_repeat_window_is_applied_by_the_sampler_now_not_by_the_caller() {
+        // Behaviour-preserving property of the signature change: `sample` takes the WHOLE run and
+        // windows it itself, so two engines cannot disagree about what "recent" means. A token far
+        // outside the window must not be demoted by `repeat_penalty`.
+        let logits = [3.0f32, 2.0];
+        let mut long = vec![0u32; REPEAT_WINDOW + 10];
+        long[0] = 0; // token 0 appears only at the very start…
+        for v in long.iter_mut().skip(1) {
+            *v = 1; // …and the window is filled with token 1
+        }
+        let c = cfg(0.0, 0, 1.0, 2.0);
+        assert_eq!(argmax_after(&logits, &c, &long), 0, "token 1 is in the window and demoted");
     }
 
     #[test]

@@ -624,6 +624,8 @@ impl WireDialect for OaiWire {
                 // the branch was unreachable and the comment described nothing.
                 seed: self.req.seed,
                 repeat_penalty: self.req.repetition_penalty,
+                frequency_penalty: self.req.frequency_penalty,
+                presence_penalty: self.req.presence_penalty,
                 stop: parse_stop(&self.req.stop),
                 response_schema: parse_response_format(&self.req.response_format),
                 ..Default::default()

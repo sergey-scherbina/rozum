@@ -375,12 +375,15 @@ mod inner {
             // Shared engine-agnostic sampler over the CPU logit slice (top-k/top-p/
             // repeat-penalty/seed) — see `crate::sampler`. Default temp 0.7 keeps GGUF's
             // historic behavior when the request omits it.
-            let cfg = crate::sampler::SamplerConfig {
-                temperature: sampling.temperature.unwrap_or(0.7),
-                top_k: sampling.top_k.unwrap_or(0) as usize,
-                top_p: sampling.top_p.unwrap_or(1.0),
-                repeat_penalty: sampling.repeat_penalty.unwrap_or(1.0),
-            };
+            // Built by `from_params`, not by hand: this was a second copy of that mapping and it
+            // went stale the moment the sampler grew OpenAI's penalty pair — it did not fail
+            // loudly either, only because a struct literal must list every field. One override
+            // remains, and it is a real difference rather than a duplicate: GGUF's historic
+            // default temperature is 0.7 where the shared mapping's is 0.0 (greedy).
+            let mut cfg = crate::sampler::SamplerConfig::from_params(&sampling);
+            if sampling.temperature.is_none() {
+                cfg.temperature = 0.7;
+            }
             let eos = model.token_eos();
 
             // The token stream: sample from the current logits, stop on EOS/EOG, then
@@ -405,7 +408,10 @@ mod inner {
                 let id = crate::sampler::sample(
                     ctx.get_logits_ith(logits_idx),
                     &cfg,
-                    crate::sampler::repeat_window(&recent),
+                    // The WHOLE run: `sample` windows it itself for the repeat penalty and counts
+                    // over all of it for OpenAI's pair, so the scope of each is the sampler's to
+                    // decide rather than each engine's.
+                    &recent,
                     &mut rng,
                 );
                 let token = LlamaToken(id as i32);
