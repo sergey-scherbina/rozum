@@ -1,0 +1,6 @@
+feature/landlock-writes-only 2026-08-14T23:57:00Z
+agent: nadia-ucc
+heartbeat: 2026-08-14T23:57:00Z
+status: not-started
+done-so-far:
+next: CI proved the ruleset handles ALL rights (reads+exec) — child died EACCES on exec; handle writes only
