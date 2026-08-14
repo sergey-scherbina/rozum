@@ -159,9 +159,10 @@ and user-visible. **Before slice 2, this needs either a frontend that fails loud
 list of which operations are safe.** `SSC_FRONT_STRICT=1` exists and turns the fallback into an
 error; whether it also makes stubs fatal is the first thing to check.
 
-**State of the branch:** `feature/ucc-ssc-public` holds the working server with the guard, the token
-gate and the CSV lookup. The cell body is not yet assembled, because assembling it needs string
-joining. It is NOT merged — a route that can answer `{Stub}` should not be on master.
+**State of the branch (as of the section this paragraph sits in, 2026-08-08 — superseded, see the
+closing section):** `feature/ucc-ssc-public` holds the working server with the guard, the token gate
+and the CSV lookup. The cell body is not yet assembled, because assembling it needs string joining.
+It is NOT merged — a route that can answer `{Stub}` should not be on master.
 
 ## Slice 1 finished on the `run` path, blocked on `build-rust` — three divergences, measured (2026-08-08)
 
@@ -188,5 +189,49 @@ source has to lower correctly, or the shipping path is closed.
 documented well enough to code against — porting more routes buys nothing but more instances of it.
 Reported upstream as `join-works-under-build-rust-not-run`, with the other two to follow.
 
-**State:** `feature/ucc-ssc-public` holds the server, unmerged. On the `run` path it is correct and
-complete; on the shipping path it does not build.
+**State (2026-08-08 — superseded below):** `feature/ucc-ssc-public` holds the server, unmerged. On
+the `run` path it is correct and complete; on the shipping path it does not build.
+
+## Slice 1 finished on BOTH paths, against two upstream fixes that are still unmerged (2026-08-13/14)
+
+The three divergences above were fixed upstream or worked around, and the slice was then finished
+and measured. What it serves today:
+
+- **`GET /control/public/matrix/cell?t=&stamp=&agent=&model=&task=&tail=`** — view-token gated.
+  Answers the matched `per-run.csv` row, `agent_log` (tail, default 200, capped at 3000),
+  `verify_out`, `triage_out`, `task_info` read from `scripts/bench/tasks.json`, and `has_logs`.
+  Absent is `null` and not `""`, because the console distinguishes "kept no logs" from "the log is
+  empty". 403 for a bad token, 400 for a path segment that could escape the results directory, 200
+  otherwise, `application/json` on all three.
+- **`GET /view/{token}`** — serves `view.html` with the token injected before the first `</head>`,
+  404 when the file is absent, and 410 with the styled expired page for a token that is not valid.
+  The token is checked BEFORE the file is read: an invalid token must not reveal whether the page
+  exists.
+
+**Verified against the Rust handlers it replaces:** all **1884 cells present on disk**, every field,
+in both switch positions; `/view` byte-for-byte on a live and on a revoked token, headers included;
+six edge cases. The switch itself is already on master — `ROZUM_UCC_SSC_ORIGIN` unset is today's
+behaviour exactly, and an unreachable `.ssc` origin answers 502 rather than falling back to Rust, so
+the switch cannot pass a test while quietly serving the old code.
+
+**One deviation, kept:** the `.ssc` runtime adds `Cache-Control: no-store` to every answer; the Rust
+routes send none on these two. Harmless on an authorized read, and it is the only header that
+differs.
+
+**Why it still cannot ship, and it is not this repo's to fix.** The slice was developed against a
+toolchain carrying two fixes that are not in scalascript's `main`, and the commit timestamps say so
+plainly — each upstream fix lands twenty seconds before the slice commit it unblocked:
+
+| upstream fix | what it unblocked here |
+|---|---|
+| `fix/query-percent-decoding` 18:33:04 | `84e5595` 18:33:25 — equal to the Rust handler on 200 real cells |
+| `fix/http-response-status` 19:38:02 | `d54cedb` 19:38:17 — refuses with a status, matches completely |
+
+Without the first, a model spec arrives as `mlx-community%3AQwen3.5-4B-MLX-4bit` and matches no CSV
+row: the route answers "no such cell" where the Rust one answers with the row — wrong data, not an
+error. Without the second, the file does not compile at all: `route` is declared
+`handler: Request => Response` and lowered to a callback returning `String`.
+
+Filed upstream 2026-08-14 as `route-handler-lowered-to-string`, with a 22-line repro and both lanes
+measured; the percent-decoding one has a pushed branch and **no report yet** — it has not been
+re-measured since, and a report written from memory is what their own INBOX doc warns against.
