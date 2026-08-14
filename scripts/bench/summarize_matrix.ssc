@@ -141,7 +141,7 @@ def summarize(cells: List[Cell]): Unit =
   }
 
   println("")
-  println("▶ DRIVERS  (over curated tier only)  —  fail modes: deliver=wrote no files (rc11), partial=manifest without src (rc12), wrong=verify red (rc10), timeout (124), broke=runner/infra (rc1/2)")
+  println("▶ DRIVERS  (over curated tier only)  —  fail modes: deliver=wrote no files (rc11), partial=manifest without src (rc12), untouched=seeded tree unchanged (rc13), wrong=verify red (rc10), timeout (124), broke=runner/infra (rc1/2)")
   agents.foreach { a =>
     val rows = cells.filter(c => tierOf(c.model) == "capable" && c.agent == a)
     val fails = rows.filter(c => !c.pass)
@@ -150,11 +150,13 @@ def summarize(cells: List[Cell]): Unit =
     // "wrote nothing" and "wrote half" point at different fixes. Mirrors summarize_matrix.py —
     // these two are byte-identical by contract, and a bucket added to one of them is a bug.
     val partial = fails.filter(c => c.rc == "12").length
+    // rc=13 = the seeded tree came back byte-identical. Only the seeded tasks can produce it.
+    val untouched = fails.filter(c => c.rc == "13").length
     val wrong = fails.filter(c => c.rc == "10").length
     val tout = fails.filter(c => c.rc == "124" || c.timeout).length
     val broke = fails.filter(c => NONCAP_RC.contains(c.rc)).length
-    val other = fails.length - deliver - partial - wrong - tout - broke
-    val modes = List(("deliver", deliver), ("partial", partial), ("wrong", wrong), ("timeout", tout), ("broke", broke), ("other", other)).filter(kv => kv._2 > 0).map(kv => kv._1 + " " + kv._2.toString)
+    val other = fails.length - deliver - partial - untouched - wrong - tout - broke
+    val modes = List(("deliver", deliver), ("partial", partial), ("untouched", untouched), ("wrong", wrong), ("timeout", tout), ("broke", broke), ("other", other)).filter(kv => kv._2 > 0).map(kv => kv._1 + " " + kv._2.toString)
     val modeStr = if modes.isEmpty then "" else "   fails: " + modes.mkString(", ")
     println("    " + rightPad(a, 9) + " " + leftPad(passOf(rows).toString, 3) + "/" + rightPad(rows.length.toString, 3) + " " + pct(passOf(rows), rows.length) + modeStr)
   }

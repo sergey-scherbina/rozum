@@ -540,7 +540,17 @@ pub(crate) fn archive_matrix_cells(result_dir: &PathBuf) {
         let dest = cells_root.join(agent).join(&safe_model).join(task);
         if dest.exists() { continue; } // already archived
         let _ = std::fs::create_dir_all(&dest);
-        for file in ["agent.log", "verify.out", "triage.out", "agentic.meta", "cargo.err"] {
+        // `.rozum-seed` is the sha256 of what `setup_task` seeded, and it is what makes `rc=13`
+        // ("the workdir came back byte-identical") re-checkable months later instead of a number
+        // the reader has to take on trust. It costs a few hundred bytes per cell.
+        for file in [
+            "agent.log",
+            "verify.out",
+            "triage.out",
+            "agentic.meta",
+            "cargo.err",
+            ".rozum-seed",
+        ] {
             let src = entry.path().join(file);
             if src.exists() { let _ = std::fs::copy(&src, dest.join(file)); }
         }

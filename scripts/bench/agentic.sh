@@ -53,10 +53,16 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 cd "$repo"
 
-# ── classification, defined FIRST so it can be tested without a benchmark ─────────────────────
+# ── what a cell IS, defined FIRST so it can be tested without running one ──────────────────────
 #
-# Everything from `set -uo pipefail` to here is inert. `classify_rc` is defined next, and the
-# SOURCE GUARD below it stops a `source scripts/bench/agentic.sh` from going any further — the
+# `setup_task` says what a cell STARTS as and `classify_rc` says what it ENDS as; between them they
+# define the measurement, and neither needs a model, a gateway or ten minutes to answer. They live
+# above the guard so a test can drive them directly — including `setup_task` itself, so the seeded
+# baseline the classification depends on is the harness's own and not a copy in the test that
+# drifts.
+#
+# Everything from `set -uo pipefail` to here is inert. The
+# SOURCE GUARD below them stops a `source scripts/bench/agentic.sh` from going any further — the
 # configuration that follows exits when there is no rozum binary or no agent CLI on PATH, and the
 # run itself starts at the bottom of the file. `scripts/bench/test-classify-rc.sh` relies on this:
 # it sources this file and calls `classify_rc` against temp directories, so the rule is EXECUTED by
@@ -68,6 +74,7 @@ cd "$repo"
 #   10  = verify FAIL — agent ran to completion but task not solved (capability miss)
 #   11  = verify SKIP — no project files written (delivery failure: agent never wrote code)
 #   12  = verify SKIP — manifest present, no `src/*.rs` (PARTIAL delivery: cargo has no target)
+#   13  = verify SKIP — the workdir is byte-identical to what the harness seeded (nothing changed)
 #   124 = timeout (RUN_TIMEOUT fired)
 #   other = agent error (non-zero, non-infra: tool error, segfault, etc.)
 #
@@ -93,9 +100,61 @@ cd "$repo"
 # test is deliberately "what cargo can build", not "did any bytes get written": source in a place
 # cargo does not look is not delivered.
 #
+# WHY 13 EXISTS, and why presence could not answer it. rc=11 and rc=12 both ask what is ON DISK, and
+# for the SEEDED tasks the answer is "a manifest and a source file" before the agent has done
+# anything — the harness put them there (`setup_task`). So on `fix`, `debug` and `multibug` an agent
+# that reads the project, writes nothing and exits scores rc=10: the code that means "delivered a
+# complete program and it is wrong". That is the same misattribution rc=12 removed, one layer down,
+# and it is the layer the fix/debug numbers on the boards come from.
+#
+# It needs a BEFORE and an AFTER, so `setup_task` records `.rozum-seed` — a sha256 of every file it
+# seeded — and `workdir_untouched` re-checks it. Inside the workdir rather than beside it because
+# `agentic.meta` already lives there: an agent that tampers with the manifest only makes the answer
+# "cannot say", which degrades to today's rc=10. There is no tampering that INVENTS a 13.
+#
+# SAY WHAT WAS MEASURED. "Byte-identical to the seed" is not "the agent did nothing" — a repair that
+# edits a file and reverts it ends byte-identical too, and so does one whose writes were lost by us.
+# The code and its label state the measurement; the interpretation is the reader's, with the log.
+#
 # A FUNCTION, and not the inline block it used to be, so the classification can be tested without a
 # model and without a gateway: `scripts/bench/test-classify-rc.sh` drives all of it from temp dirs.
 # The rule this encodes had been asserted on the boards for a year and never once executed.
+
+# What the HARNESS puts in a workdir, plus what `cargo` leaves when the verifier builds. Everything
+# else is the agent's.
+#
+# THE DIRECTION OF THE ERROR IS THE POINT. A missing entry here makes a harness artifact look like
+# the agent's work, so `workdir_untouched` says no and the cell falls back to today's answer. There
+# is no entry whose absence manufactures an "untouched" verdict — this list can only ever SUPPRESS
+# the new code, never fabricate it. That is the opposite of the inclusion-list trap and it is why
+# the list is allowed to be a list.
+SEED_IGNORE='^\./(\.rozum-seed|agentic\.meta|agent\.log|samples\.txt|verify\.out|run\.err|cargo\.err|triage\.out|Cargo\.lock|target/.*)$'
+
+seed_manifest() { # $1=workdir — call at the END of setup_task, over exactly what was seeded
+  ( cd "$1" 2>/dev/null || exit 0
+    find . -type f ! -name .rozum-seed -print0 | while IFS= read -r -d '' f; do shasum -a 256 "$f"; done
+  ) > "$1/.rozum-seed" 2>/dev/null
+}
+
+workdir_untouched() { # $1=workdir — 0 iff every seeded file is byte-identical AND nothing was added
+  local w="$1"
+  [ -f "$w/.rozum-seed" ] || return 1   # no manifest → cannot say, and silence beats a guess
+  ( cd "$w" || exit 1
+    # A DELETED seeded file fails this too, which is right: deleting the code you were asked to fix
+    # is a change, and a loud one.
+    #
+    # The `-s` guard is not defensive noise. A from-scratch task seeds nothing, so its manifest is
+    # empty, and `shasum -c` on an empty file exits 1 — "no properly formatted checksum lines". This
+    # function would then answer "changed" for a workdir where nothing happened, and be RIGHT only by
+    # accident, because rc=11 fires first. A predicate that returns the wrong answer and is saved by
+    # the caller's ordering is a trap for whoever reorders the caller.
+    if [ -s .rozum-seed ]; then shasum -a 256 -c --status .rozum-seed 2>/dev/null || exit 1; fi
+    # …and nothing NEW. Without this half, an agent that leaves `src/lib.rs` alone and writes
+    # `src/main.rs` beside it reads as untouched, which is the reverse of the truth.
+    [ "$(find . -type f | grep -Ev "$SEED_IGNORE" | LC_ALL=C sort)" \
+      = "$(sed 's/^[0-9a-f]*  //' .rozum-seed | LC_ALL=C sort)" ] )
+}
+
 classify_rc() { # $1=task $2=workdir $3=timed_out(0|1) $4=raw agent rc $5=verify pass(0|1)
   local task="$1" work="$2" tmo="$3" raw_rc="$4" pass="$5"
   local files_written=1 partial_delivery=0
@@ -112,8 +171,92 @@ classify_rc() { # $1=task $2=workdir $3=timed_out(0|1) $4=raw agent rc $5=verify
   elif [ "$raw_rc" != 0 ];           then echo "$raw_rc"   # non-zero agent exit, not gateway crash
   elif [ "$files_written" = 0 ];     then echo 11          # agent ran but wrote no project files
   elif [ "$partial_delivery" = 1 ];  then echo 12          # manifest only — nothing for cargo to build
+  elif workdir_untouched "$work";    then echo 13          # complete project, byte-identical to seed
   else                                    echo 10          # verify FAIL on a clean agent exit
   fi
+}
+
+setup_task() { # $1=task  $2=workdir — pre-create files for fix/debug
+  case "$1" in
+    fix)
+      printf '[package]\nname = "reverse-cli"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
+      mkdir -p "$2/src"
+      cat >"$2/src/main.rs" <<'EOF'
+use std::env;
+
+/// Reverse a string by characters.
+fn reverse(s: &str) -> String {
+    // BUG: returns the input unchanged.
+    s.to_string()
+}
+
+fn main() {
+    let arg = env::args().nth(1).unwrap_or_default();
+    println!("{}", reverse(&arg));
+}
+EOF
+      ;;
+    debug)
+      printf '[package]\nname = "mathlib"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
+      mkdir -p "$2/src"
+      cat >"$2/src/lib.rs" <<'EOF'
+/// Add two integers.
+pub fn add(a: i32, b: i32) -> i32 {
+    a - b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn adds() {
+        assert_eq!(add(2, 3), 5);
+    }
+}
+EOF
+      ;;
+    wordcount)
+      # From-scratch task: the agent creates Cargo.toml + src/main.rs; we only
+      # pre-seed the data file. Mixed case tests case-folding; two words tie at 3
+      # (apple/banana) to test the alphabetical tie-break. Expected top-3:
+      # `apple 3` / `banana 3` / `cherry 2`.
+      printf 'Apple banana apple Cherry BANANA apple date banana cherry\n' >"$2/input.txt"
+      ;;
+    multibug)
+      printf '[package]\nname = "twobugs"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
+      mkdir -p "$2/src"
+      cat >"$2/src/lib.rs" <<'EOF'
+/// Add two integers.
+pub fn add(a: i32, b: i32) -> i32 {
+    // BUG: subtracts instead of adding.
+    a - b
+}
+
+/// True when `n` is even.
+pub fn is_even(n: i32) -> bool {
+    // BUG: checks odd, not even.
+    n % 2 == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn adds() {
+        assert_eq!(add(2, 3), 5);
+    }
+    #[test]
+    fn evenness() {
+        assert!(is_even(4));
+        assert!(!is_even(3));
+    }
+}
+EOF
+      ;;
+  esac
+  # The BEFORE half of rc=13. Last line of the function on purpose: it must see everything the case
+  # above wrote and nothing the harness writes afterwards (`write_agentic_meta` runs next).
+  seed_manifest "$2"
 }
 
 # Sourced rather than executed: helpers are defined, nothing runs. Must stay ABOVE the config
@@ -318,85 +461,6 @@ bench_tasks_file() {
   echo "${ROZUM_BENCH_TASKS:-$(dirname "${BASH_SOURCE[0]}")/tasks.json}"
 }
 
-setup_task() { # $1=task  $2=workdir — pre-create files for fix/debug
-  case "$1" in
-    fix)
-      printf '[package]\nname = "reverse-cli"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
-      mkdir -p "$2/src"
-      cat >"$2/src/main.rs" <<'EOF'
-use std::env;
-
-/// Reverse a string by characters.
-fn reverse(s: &str) -> String {
-    // BUG: returns the input unchanged.
-    s.to_string()
-}
-
-fn main() {
-    let arg = env::args().nth(1).unwrap_or_default();
-    println!("{}", reverse(&arg));
-}
-EOF
-      ;;
-    debug)
-      printf '[package]\nname = "mathlib"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
-      mkdir -p "$2/src"
-      cat >"$2/src/lib.rs" <<'EOF'
-/// Add two integers.
-pub fn add(a: i32, b: i32) -> i32 {
-    a - b
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn adds() {
-        assert_eq!(add(2, 3), 5);
-    }
-}
-EOF
-      ;;
-    wordcount)
-      # From-scratch task: the agent creates Cargo.toml + src/main.rs; we only
-      # pre-seed the data file. Mixed case tests case-folding; two words tie at 3
-      # (apple/banana) to test the alphabetical tie-break. Expected top-3:
-      # `apple 3` / `banana 3` / `cherry 2`.
-      printf 'Apple banana apple Cherry BANANA apple date banana cherry\n' >"$2/input.txt"
-      ;;
-    multibug)
-      printf '[package]\nname = "twobugs"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
-      mkdir -p "$2/src"
-      cat >"$2/src/lib.rs" <<'EOF'
-/// Add two integers.
-pub fn add(a: i32, b: i32) -> i32 {
-    // BUG: subtracts instead of adding.
-    a - b
-}
-
-/// True when `n` is even.
-pub fn is_even(n: i32) -> bool {
-    // BUG: checks odd, not even.
-    n % 2 == 1
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn adds() {
-        assert_eq!(add(2, 3), 5);
-    }
-    #[test]
-    fn evenness() {
-        assert!(is_even(4));
-        assert!(!is_even(3));
-    }
-}
-EOF
-      ;;
-  esac
-}
 
 write_agentic_meta() { # $1=workdir $2=agent $3=model $4=task $5=pass $6=timeout $7=rc $8=repairs
   {

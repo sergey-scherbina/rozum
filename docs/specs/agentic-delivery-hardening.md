@@ -28,13 +28,22 @@ the delivery-shaped cases.
   | `10` | verify FAIL — the agent delivered a complete project and it is wrong | **yes** — capability miss |
   | `11` | no project files written at all | no — delivery failure |
   | `12` | manifest present, no `src/*.rs` — cargo has no build target | no — PARTIAL delivery |
+  | `13` | the workdir came back byte-identical to what `setup_task` seeded | no — nothing changed |
   | `124` | `RUN_TIMEOUT` fired | no |
   | other | agent error (tool error, signal, …), passed through | no |
 
-  `11` and `12` are counted separately, never summed: "wrote nothing" and "wrote half" point at
-  different fixes. `greet` is exempt from the file checks — it writes no files by design. The codes
-  are decided by `classify_rc`, which is a function precisely so `scripts/bench/test-classify-rc.sh`
-  can execute the rule without a model, a gateway or ten minutes.
+  `11`, `12` and `13` are counted separately, never summed: "wrote nothing", "wrote half" and
+  "changed nothing it was given" point at different fixes. `greet` is exempt from the file checks —
+  it writes no files by design. The codes are decided by `classify_rc`, which is a function
+  precisely so `scripts/bench/test-classify-rc.sh` can execute the rule without a model, a gateway
+  or ten minutes.
+
+  **`13` says what was MEASURED, not what it means.** Byte-identical to the seed is not the same as
+  "the agent did nothing": a repair that edits a file and reverts it ends byte-identical too, and so
+  does one whose writes we lost. The code marks the cell as not-a-capability-signal and sends the
+  reader to the log; it does not name a culprit. The before/after is `.rozum-seed`, a sha256 of
+  every file `setup_task` wrote, kept in the workdir beside `agentic.meta` — tampering with it makes
+  the answer "cannot say", which degrades to `10`; nothing about it can manufacture a `13`.
 - `scripts/bench/agentic.sh`
   - keeps its current benchmark contract.
   - writes `agentic.meta` and `verify.out` into each workdir so local failure triage has task/result
@@ -70,10 +79,15 @@ the delivery-shaped cases.
       (a complete project that is wrong) — the collapse that let partial delivery be read as a
       capability miss on every board entry quoting rc=10. Root-level `.rs` with no `src/` counts as
       partial too: source cargo cannot see is not delivered.
+- [x] A SEEDED task reports non-delivery too. `fix`, `debug` and `multibug` start with a manifest
+      and a source file because the harness wrote them, so `11` and `12` cannot fire there and an
+      agent that changes nothing scored `10`. `setup_task` records `.rozum-seed`; a workdir that
+      comes back byte-identical — seeded files unchanged AND nothing added — reports `13`.
 - [x] The rule is EXECUTED, not asserted: `scripts/bench/test-classify-rc.sh` drives `classify_rc`
-      over fifteen workdir shapes — including each precedence pair (timeout over partial, infra over
-      pass, pass over partial) and both `greet` cases — in under a second, with no model and no
-      network.
+      over the workdir shapes — including each precedence pair (timeout over partial, infra over
+      pass, pass over untouched) and both `greet` cases — in under a second, with no model and no
+      network. The seeded cases are driven through `setup_task` ITSELF, not a copy of it in the
+      test, so the baseline cannot drift from the harness's.
 - [x] Every reader of the code agrees: `summarize_matrix.py` and its byte-identical ScalaScript twin
       `summarize_matrix.ssc` both bucket `partial`, and the matrix console gives `12` its own glyph
       (`◐`) and label in all three languages rather than letting it render as `✗`.
