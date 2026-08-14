@@ -1,5 +1,30 @@
 # Changelog
 
+## ucc-ssc-public — slice 1 of the .ssc console port, finished, and the six upstream defects it cost
+Completed: 2026-08-15
+
+`/control/public/matrix/cell` and `/view/{token}` served from ScalaScript, equal to the Rust
+handlers they replace on **1892/1892 cells** in status and every field, and byte-identical on
+`/view` for a live, a bogus and an empty token. It builds and runs on scalascript's **unmodified
+main**: every workaround is out and nothing upstream is outstanding.
+
+Six defects had to be fixed there to get here, none of them known when the slice was written — the
+route handler lowered to `-> String`, a query value delivered raw, `indexOf` on a String, a
+three-operand concatenation, `length` counting bytes while `substring` counted characters (a panic
+mid-request that poisoned the server), and no way to keep `serve` off the LAN. Each was found by
+porting a route, minimised, filed with both lanes measured, and re-measured here before its
+workaround came out.
+
+One of their fixes broke this file rather than helping it: closing `toint-on-a-non-integer-diverges`
+by making both lanes abort turned `isInt`'s round-trip into a landmine — `isNumeric` runs on every
+CSV field and `seconds` is `3.1`. It BUILT and would have died on the first request. `isInt` is a
+digit walk now, permanently: `toInt` is partial and this predicate must be total.
+
+Nothing live is switched. `ROZUM_UCC_SSC_ORIGIN` unset is today's behaviour exactly and an
+unreachable origin answers 502 rather than falling back; `SSC_HTTP_BIND=127.0.0.1` keeps the .ssc
+server on loopback — demonstrated, with the host's own LAN address refusing. Installing the binary,
+setting the variable and supervising the process remain the operator's.
+
 ## plugin-wireprotocol — one spine behind three wire dialects, on an operator override of a decision that was two-thirds right
 Completed: 2026-08-14
 
