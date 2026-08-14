@@ -1,0 +1,6 @@
+feature/oai-stream-usage 2026-08-14T18:09:08Z
+agent: nadia-ucc
+heartbeat: 2026-08-14T18:09:08Z
+status: not-started
+done-so-far:
+next: BUG-033 — parse stream_options.include_usage, emit the final usage chunk ONLY when asked, add a 7th golden case
