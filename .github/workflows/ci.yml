@@ -61,6 +61,11 @@ jobs:
       # summarizers know every code it can emit. Under a second; needs no model and no gateway.
       - name: Test the bench exit-code classification
         run: bash scripts/bench/test-classify-rc.sh
+      # One level up from the codes: that the capability headline does not count cells which did not
+      # measure the model. Runs the python half only — the ScalaScript twin needs a toolchain that is
+      # not on a GitHub runner, and the test says SKIP out loud rather than passing quietly.
+      - name: Test the matrix capability rate
+        run: bash scripts/bench/test-summarize-matrix.sh
 
   linux-core:
     name: linux — portable core (no native backends)

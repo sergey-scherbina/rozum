@@ -65,8 +65,16 @@ def taskIdx(t: String): Int =
 def leftPad(s: String, n: Int): String = if s.length >= n then s else " " * (n - s.length) + s
 def rightPad(s: String, n: Int): String = if s.length >= n then s else s + " " * (n - s.length)
 def pct(p: Int, t: Int): String = if t == 0 then "  -%" else leftPad(((100 * p + t / 2) / t).toString, 3) + "%"
-def rateStr(rows: List[Cell]): String = passOf(rows).toString + "/" + rows.length.toString
-def passOf(rows: List[Cell]): Int = rows.filter(c => c.pass).length
+// The cells that actually MEASURED the model — everything except NONCAP_RC, but NEVER a passing one.
+// A cell where the agent process died (rc=1) or the gateway crashed (rc=2) says nothing about the
+// model; counting it as a miss put the resident model at 73/88 when the truth was 51/52. A passing
+// cell is kept whatever its rc, because 13 of 105 rows in one historical file are `pass=1, rc=1`
+// from before the structured codes, and dropping green cells would restate every old number.
+// Mirrors summarize_matrix.py — these two are byte-identical by contract.
+def measured(rows: List[Cell]): List[Cell] =
+  rows.filter(c => c.pass || NONCAP_RC.contains(c.rc) == false)
+def rateStr(rows: List[Cell]): String = passOf(rows).toString + "/" + measured(rows).length.toString
+def passOf(rows: List[Cell]): Int = measured(rows).filter(c => c.pass).length
 // Parse a "SEC.T" seconds string into integer tenths (see Cell.secondsT10) — avoids String.toDouble.
 def parseTenths(s: String): Int =
   if s == "" then 0
@@ -131,13 +139,15 @@ def summarize(cells: List[Cell]): Unit =
 
   val capClaude = cells.filter(c => tierOf(c.model) == "capable" && c.agent == "claude")
   println("")
-  println("▶ CAPABILITY  (claude × curated tier)   " + rateStr(capClaude) + "  " + pct(passOf(capClaude), capClaude.length) + "   ← the headline")
+  println("▶ CAPABILITY  (claude × curated tier)   " + rateStr(capClaude) + "  " + pct(passOf(capClaude), measured(capClaude).length) + "   ← the headline")
+  // Printed even when zero: an exclusion nobody can see is the same trap one line further on.
+  println("    excluded from it: " + (capClaude.length - measured(capClaude).length).toString + " cell(s) that did not measure the model (rc " + NONCAP_RC.mkString("/") + " — agent error / infra), of " + capClaude.length.toString + " run")
   capableModels.foreach { m =>
     val rows = cells.filter(c => c.model == m && c.agent == "claude")
     if rows.nonEmpty then
       val byTask = rows.groupBy(r => r.task).toList.sortBy(kv => taskIdx(kv._1))
       val cellsStr = byTask.map(kv => kv._1 + ":" + rateStr(kv._2)).mkString(" ")
-      println("    " + leftPad(passOf(rows).toString, 2) + "/" + rightPad(rows.length.toString, 2) + " " + pct(passOf(rows), rows.length) + "  " + rightPad(m, 34) + " " + cellsStr)
+      println("    " + leftPad(passOf(rows).toString, 2) + "/" + rightPad(measured(rows).length.toString, 2) + " " + pct(passOf(rows), measured(rows).length) + "  " + rightPad(m, 34) + " " + cellsStr)
   }
 
   println("")
@@ -158,7 +168,7 @@ def summarize(cells: List[Cell]): Unit =
     val other = fails.length - deliver - partial - untouched - wrong - tout - broke
     val modes = List(("deliver", deliver), ("partial", partial), ("untouched", untouched), ("wrong", wrong), ("timeout", tout), ("broke", broke), ("other", other)).filter(kv => kv._2 > 0).map(kv => kv._1 + " " + kv._2.toString)
     val modeStr = if modes.isEmpty then "" else "   fails: " + modes.mkString(", ")
-    println("    " + rightPad(a, 9) + " " + leftPad(passOf(rows).toString, 3) + "/" + rightPad(rows.length.toString, 3) + " " + pct(passOf(rows), rows.length) + modeStr)
+    println("    " + rightPad(a, 9) + " " + leftPad(passOf(rows).toString, 3) + "/" + rightPad(measured(rows).length.toString, 3) + " " + pct(passOf(rows), measured(rows).length) + modeStr)
   }
 
   if brokenModels.nonEmpty then
@@ -179,7 +189,7 @@ def summarize(cells: List[Cell]): Unit =
     probeModels.foreach { m =>
       val rows = cells.filter(c => c.model == m && c.agent == "claude")
       val ng = rows.filter(r => r.task != "greet")
-      println("    " + rightPad(m, 34) + " claude " + rateStr(rows) + " " + pct(passOf(rows), rows.length) + "  (non-greet " + rateStr(ng) + ")")
+      println("    " + rightPad(m, 34) + " claude " + rateStr(rows) + " " + pct(passOf(rows), measured(rows).length) + "  (non-greet " + rateStr(ng) + ")")
     }
 
   println("")
@@ -190,7 +200,7 @@ def summarize(cells: List[Cell]): Unit =
     val badge = if tierOf(model) == "capable" then "" else if tierOf(model) == "probe" then "  [probe]" else "  [BROKEN backend]"
     println("")
     println("■ " + model + badge)
-    println("   " + passOf(rows).toString + "/" + rows.length.toString + " green")
+    println("   " + passOf(rows).toString + "/" + measured(rows).length.toString + " green")
     val grouped = rows.groupBy(r => r.agent + " " + r.task).toList
       .sortBy(kv => kv._2.head.agent + " " + leftPad(taskIdx(kv._2.head.task).toString, 2) + " " + kv._2.head.task)
     grouped.foreach { kv =>
@@ -198,7 +208,7 @@ def summarize(cells: List[Cell]): Unit =
       val agent = reps.head.agent
       val task = reps.head.task
       val passed = passOf(reps)
-      val total = reps.length
+      val total = measured(reps).length
       val mark = if passed == total then "✅" else if passed == 0 then "❌" else "◐"
       val avgT10 = if total == 0 then 0 else reps.foldLeft(0)((a, r) => a + r.secondsT10) / total
       var why = ""
@@ -212,8 +222,8 @@ def summarize(cells: List[Cell]): Unit =
   println("")
   println(bar())
   val capAll = cells.filter(c => tierOf(c.model) == "capable")
-  println("CAPABILITY tier (all drivers): " + rateStr(capAll) + " " + pct(passOf(capAll), capAll.length) + "   |  claude-only: " + pct(passOf(capClaude), capClaude.length))
-  println("ALL runs incl. probe/broken:   " + rateStr(cells) + " " + pct(passOf(cells), cells.length) + "  ← do NOT quote this as 'capability'")
+  println("CAPABILITY tier (all drivers): " + rateStr(capAll) + " " + pct(passOf(capAll), measured(capAll).length) + "   |  claude-only: " + pct(passOf(capClaude), measured(capClaude).length))
+  println("ALL runs incl. probe/broken:   " + rateStr(cells) + " " + pct(passOf(cells), measured(cells).length) + "  ← do NOT quote this as 'capability'")
   if brokenModels.nonEmpty then
     println("  ⚠ " + brokenModels.length.toString + " broken backend(s) excluded from the capability rate: " + brokenModels.mkString(", "))
   println("  infra/runner-error cells (rc∈{1,2}): " + infraRc.toString + "   timeouts: " + toCount.toString + "   models not loaded: 0")

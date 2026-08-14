@@ -174,8 +174,33 @@ def classify(model: str, rows: list[dict[str, Any]]) -> str:
     return "probe"
 
 
+def measured(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The cells that actually MEASURED the model — everything except `NON_CAPABILITY_RC`.
+
+    A cell where the agent process died (rc=1) or the gateway crashed (rc=2) says nothing about the
+    model, and counting it as a miss is not a small distortion. Measured 2026-08-15 on this
+    repository's own results: reading `pass` alone put the resident model at 73/88 with `fix` at
+    10/18, and the true figure is 51/52 — fourteen of the fifteen "failures" were an agent error, an
+    infra crash or a timeout, most of them against a model build deleted a month earlier. The
+    conclusion drawn from the wrong number was "the model is weak at editing code", which is exactly
+    the mis-attribution `NON_CAPABILITY_RC` exists to prevent.
+
+    The constant and the promise were already here — the module docstring says broken backends are
+    "EXCLUDED from every rate" — but `rate` counted every row, so the exclusion only ever applied to
+    whole models, never to a bad cell inside a good one.
+
+    A PASSING cell is never excluded, whatever its `rc`. That is a fact about the data, not caution:
+    13 of the 105 rows in `agentic-ucc-1782922643` are `pass=1` carrying `rc=1`, from before the
+    structured codes existed and that column meant something else. A cell that passed measured the
+    model by definition, so this rule only ever removes a false NEGATIVE — excluding historical green
+    cells would have quietly restated every old number, the same class of error this exists to fix.
+    """
+    return [r for r in rows if r["pass"] or r.get("rc") not in NON_CAPABILITY_RC]
+
+
 def rate(rows: list[dict[str, Any]]) -> tuple[int, int]:
-    return sum(1 for r in rows if r["pass"]), len(rows)
+    m = measured(rows)
+    return sum(1 for r in m if r["pass"]), len(m)
 
 
 def pct(p: int, t: int) -> str:
@@ -205,6 +230,12 @@ def summarize(cells: list[dict[str, Any]], refused: dict[str, bool]) -> None:
     cap_claude = [c for c in cells if tier[c["model"]] == "capable" and c["agent"] == "claude"]
     p, t = rate(cap_claude)
     print(f"\n▶ CAPABILITY  (claude × curated tier)   {p}/{t}  {pct(p, t)}   ← the headline")
+    # Printed even when zero. An exclusion nobody can see is the same trap one line further on:
+    # the reader cannot tell "51/52" from "51/52, and 14 cells were dropped".
+    dropped = len(cap_claude) - t
+    print(f"    excluded from it: {dropped} cell(s) that did not measure the model "
+          f"(rc {'/'.join(sorted(NON_CAPABILITY_RC))} — agent error / infra), of "
+          f"{len(cap_claude)} run")
     for m in capable_models:
         rows = [c for c in cells if c["model"] == m and c["agent"] == "claude"]
         if not rows:
@@ -282,8 +313,8 @@ def summarize(cells: list[dict[str, Any]], refused: dict[str, bool]) -> None:
             continue
         badge = {"capable": "", "probe": "  [probe]", "broken": "  [BROKEN backend]"}[tier[model]]
         print(f"\n■ {model}{badge}")
-        npass = sum(1 for c in rows if c["pass"])
-        print(f"   {npass}/{len(rows)} green")
+        npass, ntot = rate(rows)
+        print(f"   {npass}/{ntot} green")
 
         grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         for row in rows:
@@ -291,8 +322,7 @@ def summarize(cells: list[dict[str, Any]], refused: dict[str, bool]) -> None:
         for (agent, task), reps in sorted(
             grouped.items(), key=lambda item: (item[0][0], TASK_ORDER.get(item[0][1], 99), item[0][1])
         ):
-            passed = sum(1 for r in reps if r["pass"])
-            total = len(reps)
+            passed, total = rate(reps)
             mark = "✅" if passed == total else ("❌" if passed == 0 else "◐")
             avg = sum(r["seconds"] for r in reps) / total if total else 0
             why = ""
