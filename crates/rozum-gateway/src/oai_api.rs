@@ -55,6 +55,11 @@ pub(crate) struct OaiChatReq {
     /// per-sequence over recent tokens), so this is a real throughput trade the client is making,
     /// not a free knob.
     pub(crate) repetition_penalty: Option<f32>,
+    /// `stop`: a bare string or an array of them, up to four per OpenAI. Until BUG-037 there was no
+    /// field for this ANYWHERE — not on the wire and not in `SamplingParams` — so a client asking
+    /// to stop at a marker generated straight past it.
+    #[serde(default)]
+    pub(crate) stop: Value,
 }
 
 #[derive(Deserialize, Default)]

@@ -370,6 +370,8 @@ mod inner {
             }
 
             let max_tokens = sampling.max_tokens.unwrap_or(2048) as usize;
+            // Cloned out before `sampling` is consumed below; the engine-agnostic loop applies them.
+            let stops = sampling.stop.clone();
             // Shared engine-agnostic sampler over the CPU logit slice (top-k/top-p/
             // repeat-penalty/seed) — see `crate::sampler`. Default temp 0.7 keeps GGUF's
             // historic behavior when the request omits it.
@@ -463,6 +465,7 @@ mod inner {
                 n_prompt,
                 max_tokens,
                 true, // runaway-loop guard (parity with the MLX path)
+                &stops,
                 &cancel,
                 decode,
                 |ev| tx.blocking_send(ev).is_ok(),

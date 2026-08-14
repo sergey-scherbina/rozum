@@ -172,6 +172,11 @@ pub struct SamplingParams {
     /// `reasoning.effort`). Only gpt-oss's harmony render honours it; when `None` the engine
     /// falls back to `ROZUM_GPTOSS_REASONING` (default `low`). Other backends ignore it.
     pub reasoning_effort: Option<String>,
+    /// Strings that end the turn when generated: OpenAI's `stop`, Anthropic's `stop_sequences`
+    /// (BUG-037). Applied in the engine-agnostic `consume_tokens`, so both engines honour them
+    /// identically and neither had to learn about it. **Empty is a strict no-op** — the property
+    /// that keeps every request which asked for nothing byte-identical.
+    pub stop: Vec<String>,
 }
 
 #[derive(Clone, Debug)]

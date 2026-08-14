@@ -37,6 +37,9 @@ pub(crate) struct AnthropicReq {
     /// `top_k.unwrap_or(0)` downstream mean "no restriction at all" — and no error to notice.
     pub(crate) top_p: Option<f32>,
     pub(crate) top_k: Option<u32>,
+    /// Anthropic's spelling of the same thing, always an array (BUG-037).
+    #[serde(default)]
+    pub(crate) stop_sequences: Value,
     #[serde(default)]
     pub(crate) stream: Option<bool>,
 }

@@ -4608,6 +4608,7 @@ mod inner {
             prompt_len,
             max_tokens,
             repeat_guard,
+            &job.sampling.stop,
             &job.cancel,
             |slice, skip| tokenizer.decode(slice, skip).ok(),
             |ev| job.events.send(ev).is_ok(),

@@ -156,6 +156,7 @@ where
         prompt_len,
         max_tokens,
         repeat_guard,
+        &params.stop,
         cancel,
         decode,
         emit,
@@ -220,6 +221,9 @@ where
         prompt_len,
         max_tokens,
         repeat_guard,
+        // This seam is a DRAFT and takes no request, so it carries no stop strings. When it is
+        // wired for real it must thread them, or it will be the one path that ignores them.
+        &[],
         cancel,
         decode,
         emit,
@@ -254,6 +258,54 @@ pub fn is_runaway_loop(ids: &[u32]) -> bool {
     (1..=REPEAT_MAX_PERIOD).any(|p| (p..REPEAT_WINDOW).all(|i| tail[i] == tail[i - p]))
 }
 
+/// Where the emittable text ends, and whether a stop string COMPLETED there.
+///
+/// Two jobs in one pass, because they are the same question asked at different confidence:
+/// - a stop string is present → cut there, drop everything after it, end the turn;
+/// - a stop string is half-present at the tail → cut before it and emit nothing more YET, because
+///   the next token decides whether those bytes were text or the start of a boundary.
+///
+/// The second half is the one that is easy to skip and impossible to fix later: text streamed to a
+/// client cannot be recalled, so emitting `"Fin"` because the stop string `"Finish"` had not
+/// arrived yet corrupts the answer for everyone downstream. A model emits multi-byte tokens; a stop
+/// string lands mid-token routinely.
+///
+/// An empty `stops` returns `(text.len(), false)` — the exact no-op that keeps every request which
+/// asked for nothing byte-identical.
+pub fn stop_boundary(text: &str, stops: &[String]) -> (usize, bool) {
+    let mut cut = text.len();
+    let mut completed = false;
+    let mut hold = 0usize;
+
+    for s in stops.iter().filter(|s| !s.is_empty()) {
+        if let Some(i) = text.find(s.as_str()) {
+            if !completed || i < cut {
+                cut = i;
+                completed = true;
+            }
+            continue;
+        }
+        // Not present in full. How much of the tail could be its beginning? Walk the stop string's
+        // char boundaries, longest first — a partial match must not split a UTF-8 sequence.
+        let mut k = s.len();
+        while k > 0 {
+            k -= 1;
+            if !s.is_char_boundary(k) {
+                continue;
+            }
+            if k > 0 && text.ends_with(&s[..k]) {
+                hold = hold.max(k);
+                break;
+            }
+        }
+    }
+
+    if completed {
+        return (cut, true);
+    }
+    (text.len().saturating_sub(hold), false)
+}
+
 /// A process-unique tool-call id. The Anthropic/OpenAI contract requires each
 /// `tool_use` id to be unique within a conversation so the client can pair the
 /// `tool_result` back to it (a per-response `call_{i}` reset collides across turns
@@ -280,6 +332,7 @@ pub fn consume_tokens<T, D, E>(
     prompt_len: usize,
     max_tokens: usize,
     repeat_guard: bool,
+    stops: &[String],
     cancel: &CancellationToken,
     mut decode: D,
     mut emit: E,
@@ -323,6 +376,11 @@ where
                 let stable = marked.trim_end_matches('\u{FFFD}');
                 full_text = stable.to_string();
                 let ft = crate::harmony::parse_harmony(stable).final_text;
+                // Stop strings apply to what the client SEES — for harmony that is the `final`
+                // channel, not the marker-bearing raw run. `full_text` is deliberately left alone
+                // here: harmony's tool calls are parsed out of channels, not out of this string.
+                let (cut, hit_stop) = stop_boundary(&ft, stops);
+                let ft = ft[..cut].to_string();
                 if ft.len() > emitted.len() && ft.starts_with(&emitted) {
                     let delta = ft[emitted.len()..].to_string();
                     emitted = ft;
@@ -331,26 +389,42 @@ where
                         break;
                     }
                 }
+                if hit_stop {
+                    stop_reason = StopReason::EndTurn;
+                    break;
+                }
             }
         } else if let Some(text) = decode(&out_ids, !meta.keep_special) {
             let stable = text.trim_end_matches('\u{FFFD}');
             full_text = stable.to_string();
+            // The client's stop strings bound what may be EMITTED, not what has been generated:
+            // `full_text` keeps everything until a stop actually completes, so a held-back tail
+            // that turns out to be ordinary text is still there for the tool-call parse below.
+            let (cut, hit_stop) = stop_boundary(stable, stops);
+            let visible = &stable[..cut];
             if !tool_seen {
-                if let Some(pos) = stable.find(TOOL_OPEN) {
-                    if pos > emitted.len() && stable.starts_with(&emitted) {
-                        let delta = stable[emitted.len()..pos].to_string();
-                        emitted = stable[..pos].to_string();
+                if let Some(pos) = visible.find(TOOL_OPEN) {
+                    if pos > emitted.len() && visible.starts_with(&emitted) {
+                        let delta = visible[emitted.len()..pos].to_string();
+                        emitted = visible[..pos].to_string();
                         let _ = emit(Ok(ChatEvent::TextDelta { text: delta }));
                     }
                     tool_seen = true;
-                } else if stable.len() > emitted.len() && stable.starts_with(&emitted) {
-                    let delta = stable[emitted.len()..].to_string();
-                    emitted = stable.to_string();
+                } else if visible.len() > emitted.len() && visible.starts_with(&emitted) {
+                    let delta = visible[emitted.len()..].to_string();
+                    emitted = visible.to_string();
                     if !emit(Ok(ChatEvent::TextDelta { text: delta })) {
                         client_gone = true;
                         break;
                     }
                 }
+            }
+            if hit_stop {
+                // Now it is decided: everything from the stop string on is dropped, including from
+                // the text the tool parser will read.
+                full_text = visible.to_string();
+                stop_reason = StopReason::EndTurn;
+                break;
             }
         }
 
@@ -483,7 +557,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{consume_tokens, EngineMeta};
+    use super::{consume_tokens, stop_boundary, EngineMeta};
     use crate::backend::{ChatEvent, StopReason};
     use tokio_util::sync::CancellationToken;
 
@@ -523,6 +597,16 @@ mod tests {
         max_tokens: usize,
         table: &std::collections::HashMap<u32, (&'static str, bool)>,
     ) -> (Vec<ChatEvent>, StopReason) {
+        run_with_stops(ids, m, max_tokens, table, &[])
+    }
+
+    fn run_with_stops(
+        ids: &[u32],
+        m: &EngineMeta,
+        max_tokens: usize,
+        table: &std::collections::HashMap<u32, (&'static str, bool)>,
+        stops: &[String],
+    ) -> (Vec<ChatEvent>, StopReason) {
         let mut events = Vec::new();
         let cancel = CancellationToken::new();
         let stop = consume_tokens(
@@ -531,6 +615,7 @@ mod tests {
             3,
             max_tokens,
             true,
+            stops,
             &cancel,
             toy_decode(table),
             |e| {
@@ -562,6 +647,81 @@ mod tests {
         assert_eq!(text, "Hello");
         assert_eq!(stop, StopReason::EndTurn);
         assert!(matches!(events.last(), Some(ChatEvent::Done { .. })));
+    }
+
+    #[test]
+    fn a_stop_string_ends_the_turn_and_nothing_past_it_is_streamed() {
+        // Through the real loop, not just the boundary helper: the tokens after the stop string are
+        // never decoded into output, and the turn ends without waiting for EOS.
+        let table = std::collections::HashMap::from([
+            (1, ("answer: 42", false)),
+            (2, ("\nHuman:", false)),
+            (3, (" and more", false)),
+            (9, ("", false)),
+        ]);
+        let m = meta(false, vec![9]);
+        let stops = vec!["\nHuman:".to_string()];
+        let (events, stop) = run_with_stops(&[1, 2, 3, 9], &m, 100, &table, &stops);
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ChatEvent::TextDelta { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "answer: 42", "everything from the stop string on is dropped");
+        assert_eq!(stop, StopReason::EndTurn);
+        assert!(matches!(events.last(), Some(ChatEvent::Done { .. })), "the turn still finishes properly");
+    }
+
+    #[test]
+    fn a_stop_string_split_across_tokens_is_not_streamed_before_it_completes() {
+        // The case the hold-back exists for. "\nHum" arrives first and is a prefix of the stop
+        // string; streaming it would put text on the client's screen that the stop was meant to
+        // remove, and no later token can take it back.
+        let table = std::collections::HashMap::from([
+            (1, ("done", false)),
+            (2, ("\nHum", false)),
+            (3, ("an:", false)),
+            (9, ("", false)),
+        ]);
+        let m = meta(false, vec![9]);
+        let stops = vec!["\nHuman:".to_string()];
+        let (events, stop) = run_with_stops(&[1, 2, 3, 9], &m, 100, &table, &stops);
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ChatEvent::TextDelta { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "done", "the half-arrived boundary was held, not streamed");
+        assert_eq!(stop, StopReason::EndTurn);
+    }
+
+    #[test]
+    fn a_held_back_tail_that_turns_out_to_be_text_is_still_delivered() {
+        // The other half of hold-back, and the one that would silently truncate answers if wrong:
+        // "\nHum" is held while "\nHuman:" is possible, then released once the next token proves
+        // it was ordinary prose.
+        let table = std::collections::HashMap::from([
+            (1, ("done", false)),
+            (2, ("\nHum", false)),
+            (3, ("ble pie", false)),
+            (9, ("", false)),
+        ]);
+        let m = meta(false, vec![9]);
+        let stops = vec!["\nHuman:".to_string()];
+        let (events, stop) = run_with_stops(&[1, 2, 3, 9], &m, 100, &table, &stops);
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ChatEvent::TextDelta { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "done\nHumble pie");
+        assert_eq!(stop, StopReason::EndTurn);
     }
 
     #[test]
@@ -713,6 +873,53 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn no_stop_strings_is_exactly_a_no_op() {
+        // The property every request that asked for nothing depends on.
+        assert_eq!(stop_boundary("anything at all", &[]), (15, false));
+        assert_eq!(stop_boundary("", &[]), (0, false));
+        // An empty stop string is not a boundary — it would match everywhere and stop instantly.
+        assert_eq!(stop_boundary("abc", &["".to_string()]), (3, false));
+    }
+
+    #[test]
+    fn a_present_stop_string_cuts_there_and_ends_the_turn() {
+        let stops = vec!["END".to_string()];
+        assert_eq!(stop_boundary("hello ENDtrailing", &stops), (6, true));
+        // Earliest wins when several are present, whichever list order they came in.
+        let two = vec!["ZZ".to_string(), "b".to_string()];
+        assert_eq!(stop_boundary("aabZZ", &two), (2, true));
+    }
+
+    #[test]
+    fn a_half_arrived_stop_string_holds_its_bytes_back() {
+        // The case that cannot be fixed after the fact: "Fin" must not reach the client while
+        // "Finish" is still possible. Emit up to the tail, keep the tail.
+        let stops = vec!["Finish".to_string()];
+        assert_eq!(stop_boundary("all done Fin", &stops), (9, false));
+        assert_eq!(stop_boundary("all done Finis", &stops), (9, false));
+        // …and once it completes, the same text cuts at the same place, now for good.
+        assert_eq!(stop_boundary("all done Finish", &stops), (9, true));
+        // A tail that merely looks similar is not held.
+        assert_eq!(stop_boundary("all done Fun", &stops), (12, false));
+    }
+
+    #[test]
+    fn a_partial_match_never_splits_a_utf8_character() {
+        // A stop string whose first byte lands mid-character would panic a naive slice.
+        let stops = vec!["конец".to_string()];
+        let text = "почти ко";
+        let (cut, done) = stop_boundary(text, &stops);
+        assert!(!done);
+        assert!(text.is_char_boundary(cut), "cut {cut} is inside a character of {text:?}");
+        assert_eq!(&text[..cut], "почти ");
+        // Full match, multi-byte: cut at the character boundary where it starts.
+        let full = "почти конец!";
+        let (c2, d2) = stop_boundary(full, &stops);
+        assert!(d2);
+        assert_eq!(&full[..c2], "почти ");
+    }
+
     fn drive_runs_generate_through_consume_tokens() {
         let table = std::collections::HashMap::from([
             (1, ("Hel", false)),

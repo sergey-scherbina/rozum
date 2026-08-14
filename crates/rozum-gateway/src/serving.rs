@@ -173,6 +173,40 @@ pub(crate) fn parse_text_format(text: &Value) -> Option<Value> {
     text.get("format").and_then(parse_format_object)
 }
 
+/// How many stop strings one request may carry.
+///
+/// A bound, not a preference: every generated token is scanned against every stop string, so an
+/// unbounded list is an unbounded per-token cost on a local server anyone on the tailnet can reach.
+/// OpenAI's own limit is 4 and Anthropic's is small, so no compliant client comes near this —
+/// which is why capping is safe here and dropping silently would not have been.
+pub(crate) const MAX_STOP_STRINGS: usize = 16;
+
+/// The client's stop strings, from either spelling: OpenAI's `stop` (a bare string OR an array),
+/// Anthropic's `stop_sequences` (an array). Empty strings are dropped — one would match at every
+/// position and end the turn before the first token (BUG-037).
+pub(crate) fn parse_stop(v: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match v {
+        Value::String(s) => {
+            if !s.is_empty() {
+                out.push(s.clone());
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    if !s.is_empty() {
+                        out.push(s.to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out.truncate(MAX_STOP_STRINGS);
+    out
+}
+
 /// Apply a [`ToolChoice`] to the resolved tool set: `None` → empty, `Named` → only that tool
 /// (empty if the client named a tool it didn't define), `Auto`/`Required` → unchanged.
 pub(crate) fn apply_tool_choice(tools: Vec<ToolDef>, choice: &ToolChoice) -> Vec<ToolDef> {
