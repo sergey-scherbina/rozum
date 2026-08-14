@@ -1270,24 +1270,13 @@ mod inner {
         use std::sync::atomic::Ordering::Relaxed;
         let s = &job.sampling;
         let constrained = constrain_enabled() && !job.tools.is_empty();
-        let has_penalty = s.repeat_penalty.unwrap_or(1.0) != 1.0;
+        // Any penalty keeps the row off the batched path: all three need per-row history
+        // scattered into the logits, which `sample_rows` does not do. OpenAI's pair joined
+        // `repeat_penalty` here when the engine learned to honour it (BUG-042).
+        let has_penalty = s.repeat_penalty.unwrap_or(1.0) != 1.0
+            || s.frequency_penalty.unwrap_or(0.0) != 0.0
+            || s.presence_penalty.unwrap_or(0.0) != 0.0;
         let has_seed = s.seed.is_some();
-        // OpenAI's `frequency_penalty` / `presence_penalty` are implemented in `rozum_core::sampler`
-        // — which the GGUF and x86 engines drive, and this one does NOT: MLX samples inside the
-        // vendored mlx-lm graph, so honouring them needs `SamplerOpts` in the fork (BUG-042's
-        // remaining half). Until then the request is answered without them, and it SAYS so once
-        // rather than being quietly ignored — the exact silence BUG-031…038 were about.
-        if s.frequency_penalty.unwrap_or(0.0) != 0.0 || s.presence_penalty.unwrap_or(0.0) != 0.0 {
-            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if !SAID.swap(true, Relaxed) {
-                crate::obs::log_event(serde_json::json!({
-                    "event": "sampling_unsupported",
-                    "engine": "mlx-native",
-                    "params": ["frequency_penalty", "presence_penalty"],
-                    "detail": "sampling happens in the mlx-lm graph; honouring these needs SamplerOpts in the fork",
-                }));
-            }
-        }
         if constrained { BATCH_SERIAL_CONSTRAINED.fetch_add(1, Relaxed); }
         if has_penalty { BATCH_SERIAL_PENALTY.fetch_add(1, Relaxed); }
         if has_seed { BATCH_SERIAL_SEED.fetch_add(1, Relaxed); }
@@ -1535,6 +1524,8 @@ mod inner {
         top_p: f32,
         top_k: i32,
         repeat_penalty: f32,
+        frequency_penalty: f32,
+        presence_penalty: f32,
         meta: crate::engine::EngineMeta,
     }
 
@@ -1558,6 +1549,8 @@ mod inner {
         ) -> Box<dyn Iterator<Item = Result<u32, String>> + 'a> {
             let (temp, top_p, top_k, repeat_penalty) =
                 (self.temp, self.top_p, self.top_k, self.repeat_penalty);
+            let (frequency_penalty, presence_penalty) =
+                (self.frequency_penalty, self.presence_penalty);
             let pt = &self.prompt_tokens;
             let cache = &mut *self.cache;
             // Per-arch generator — the dense arms of `run_job`, moved here. `true` = the
@@ -1565,7 +1558,13 @@ mod inner {
             macro_rules! dense {
                 ($g:expr) => {{
                     let mut g = $g;
-                    g.set_sampler(top_p, top_k, repeat_penalty);
+                    g.set_sampler(
+                        top_p,
+                        top_k,
+                        repeat_penalty,
+                        frequency_penalty,
+                        presence_penalty,
+                    );
                     Box::new(PipelinedIds::new(g, true))
                         as Box<dyn Iterator<Item = Result<u32, String>> + 'a>
                 }};
@@ -1838,6 +1837,10 @@ mod inner {
         let mut top_p = job.sampling.top_p.unwrap_or(1.0);
         let top_k = job.sampling.top_k.map(|k| k as i32).unwrap_or(0);
         let repeat_penalty = job.sampling.repeat_penalty.unwrap_or(1.0);
+        // OpenAI's pair, honoured on this engine since the fork learned them (BUG-042). Clamped
+        // in `SamplerConfig::from_params` for the other engines; clamped here for the same reason.
+        let frequency_penalty = job.sampling.frequency_penalty.unwrap_or(0.0).clamp(-2.0, 2.0);
+        let presence_penalty = job.sampling.presence_penalty.unwrap_or(0.0).clamp(-2.0, 2.0);
         // gpt-oss is a reasoning model built for SAMPLING (generation_config:
         // do_sample=true, temperature 1.0). Under greedy / near-greedy decoding its
         // long analysis CoT collapses into verbatim repetition loops ("We need. We
@@ -1949,7 +1952,13 @@ mod inner {
                     };
                     let c = job.cancel.clone();
                     generator.set_cancel(Box::new(move || c.is_cancelled()));
-                    generator.set_sampler(top_p, top_k, repeat_penalty);
+                    generator.set_sampler(
+                        top_p,
+                        top_k,
+                        repeat_penalty,
+                        frequency_penalty,
+                        presence_penalty,
+                    );
                     // VL: attach the vision splice + M-RoPE (single-pass prefill).
                     if let Some(mm) = vl_mm {
                         generator.set_mm_context(mm);
@@ -1980,7 +1989,13 @@ mod inner {
                     };
                     let c = job.cancel.clone();
                     generator.set_cancel(Box::new(move || c.is_cancelled()));
-                    generator.set_sampler(top_p, top_k, repeat_penalty);
+                    generator.set_sampler(
+                        top_p,
+                        top_k,
+                        repeat_penalty,
+                        frequency_penalty,
+                        presence_penalty,
+                    );
                     // VL: attach the vision splice + M-RoPE (single-pass prefill).
                     if let Some(mm) = vl_mm {
                         generator.set_mm_context(mm);
@@ -2021,6 +2036,8 @@ mod inner {
                 top_p,
                 top_k,
                 repeat_penalty,
+                frequency_penalty,
+                presence_penalty,
                 meta: crate::engine::EngineMeta {
                     n_ctx: 0,
                     eos: eos.to_vec(),
@@ -3081,7 +3098,10 @@ mod inner {
             let _ = self.job.events.send(Ok(ChatEvent::Done {
                 input_tokens: self.prompt_len as u32,
                 output_tokens: self.output_tokens,
-                stop_reason: self.stop,
+                // Cloned since `StopReason` began carrying WHICH stop string fired (BUG-041).
+                // This site is behind `mlx-native`, so a `--no-default-features` check — which is
+                // what every board entry this week quoted — never type-checked it.
+                stop_reason: self.stop.clone(),
             }));
         }
     }
@@ -3686,6 +3706,8 @@ mod inner {
             top_p: job.sampling.top_p.unwrap_or(1.0),
             top_k: job.sampling.top_k.map(|k| k as i32).unwrap_or(0),
             repeat_penalty: job.sampling.repeat_penalty.unwrap_or(1.0),
+            frequency_penalty: job.sampling.frequency_penalty.unwrap_or(0.0).clamp(-2.0, 2.0),
+            presence_penalty: job.sampling.presence_penalty.unwrap_or(0.0).clamp(-2.0, 2.0),
         }
     }
 
@@ -3714,8 +3736,11 @@ mod inner {
             tokenizer.decode(&[id], false).ok().as_deref() == Some("\"")
         });
         loop {
-            let recent: &[u32] = if opts.repeat_penalty != 1.0 {
-                qwen3::repeat_window(&seq.out_ids)
+            // The WHOLE run: `sample_with` windows it itself for the repetition penalty and
+            // counts over all of it for OpenAI's pair, and `keeps_history` is the one predicate
+            // for "this sampling needs the history".
+            let recent: &[u32] = if opts.keeps_history() {
+                &seq.out_ids
             } else {
                 &[]
             };

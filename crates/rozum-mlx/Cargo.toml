@@ -57,13 +57,13 @@ tracing = "0.1"
 
 # The vendored MLX fork, pinned to a fork rev so a clean clone builds reproducibly
 # (same pin as the old root Cargo.toml). mlx-sys builds MLX C++ from source.
-mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "2df597b731b7c8b6f60c840ea6fcb63f33d663e4", optional = true }
+mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "54acd6976843f381dbef815a55293d4fca7d5f2b", optional = true }
 # default-features = false: the fork's `all-models` default would compile every architecture back
 # in regardless of the family features above, defeating the whole point. The families are opted
 # into explicitly by `all-models` / `model-*`; the qwen core is ungated in the fork, so a
 # no-family build still loads Qwen.
-mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "2df597b731b7c8b6f60c840ea6fcb63f33d663e4", optional = true, default-features = false }
-mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "2df597b731b7c8b6f60c840ea6fcb63f33d663e4", optional = true }
+mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "54acd6976843f381dbef815a55293d4fca7d5f2b", optional = true, default-features = false }
+mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "54acd6976843f381dbef815a55293d4fca7d5f2b", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 
 [dev-dependencies]

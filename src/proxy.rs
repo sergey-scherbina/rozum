@@ -783,7 +783,7 @@ mod tests {
         // Serialize the XDG_STATE_HOME mutation: a sole-in-flight crash confirms
         // the fingerprint to the shared poison.json, which we redirect to a temp
         // dir so we never write the real state dir (and never race another test).
-        let _env = crate::share::POISON_ENV_LOCK.lock().unwrap();
+        let _env = crate::share::POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("rozum-proxy-poison-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // SAFETY: held under POISON_ENV_LOCK; no other thread reads XDG now.

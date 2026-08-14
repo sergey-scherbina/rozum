@@ -280,6 +280,10 @@ pub fn clear_poison(fp: u64) {
 /// too) — so it is `pub` and not `#[cfg(test)]`: a `#[cfg(test)]` item is invisible
 /// when `rozum-core` is built as a dependency, and the cross-crate test callers need
 /// it. The cost is one tiny always-present static.
+/// **Take it with `unwrap_or_else(|e| e.into_inner())`, never `.unwrap()`.** A test that fails
+/// while holding this POISONS the mutex, and every later test that unwraps the lock then dies of
+/// the poison instead of its own result. Measured 2026-08-14: one wrong assertion of mine on
+/// Windows CI produced two red tests, and the second one had nothing wrong with it.
 pub static POISON_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn spawn_lock_path() -> PathBuf {
@@ -1389,7 +1393,7 @@ mod tests {
         // ledger moves, a live gateway's reservations become invisible to the next one and the
         // admission gate stops gating — the failure it exists to prevent is an OOM reboot
         // (BUG-003). So this asserts the old layout, exactly.
-        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev_state = std::env::var_os("XDG_STATE_HOME");
         let prev_home = std::env::var_os("HOME");
         unsafe {
@@ -1407,12 +1411,20 @@ mod tests {
                 None => std::env::remove_var("HOME"),
             }
         }
-        assert_eq!(dir, PathBuf::from("/Users/somebody/.local/state/rozum/gateway"));
+        // Built by JOINS, not from a literal: on Windows the separator is `\`, so a forward-slash
+        // literal fails there — which is exactly what happened. The test written to prove the
+        // Windows port moved nothing was itself unix-shaped and turned CI red on Windows for a day.
+        let want = PathBuf::from("/Users/somebody")
+            .join(".local")
+            .join("state")
+            .join("rozum")
+            .join("gateway");
+        assert_eq!(dir, want);
     }
 
     #[test]
     fn queue_scan_reads_every_live_locked_ticket_footprint() {
-        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = residency_env(u64::MAX);
         let first = enqueue_waiter(10_001, 5 * GB, PRIO_INTERACTIVE).expect("first ticket");
         let second = enqueue_waiter(10_002, 9 * GB, PRIO_BATCH).expect("second ticket");
@@ -1479,7 +1491,7 @@ mod tests {
 
     #[test]
     fn poison_set_records_refuses_decays_and_expires() {
-        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Isolate the state dir so we don't touch a real ~/.local/state.
         let dir = std::env::temp_dir().join(format!("rozum-poison-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1566,7 +1578,7 @@ mod tests {
 
     #[test]
     fn residency_sole_model_always_admitted() {
-        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Budget absurdly small: a lone model must STILL load — single-gateway
         // operation never caused a reboot, so we never refuse the only model.
         let dir = residency_env(1);
@@ -1579,7 +1591,7 @@ mod tests {
 
     #[test]
     fn residency_refuses_even_sole_model_that_overcommits_actual_free_ram() {
-        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Huge budget (ledger lever is permissive) but only ~10 GiB ACTUALLY free → a sole 20 GiB
         // model is REFUSED, because loading it would overcommit the host (jetsam/reboot). This is the
         // hole the free-RAM lever closes that the reserved-footprint ledger alone could not.
@@ -1596,7 +1608,7 @@ mod tests {
 
     #[test]
     fn residency_guard_update_footprint_republishes() {
-        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = residency_env(100 * GB);
         // Reserve 3 GiB (sole → admitted), then republish the process's total as warm
         // models come/go (residency-unify U1). A reader from another pid's view must see
@@ -1619,7 +1631,7 @@ mod tests {
 
     #[test]
     fn update_my_reservation_republishes_or_noops() {
-        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = residency_env(100 * GB);
         let other = std::process::id().wrapping_add(1);
         // No reservation held → no-op (must NOT create a stray unlocked file).
@@ -1635,7 +1647,7 @@ mod tests {
 
     #[test]
     fn residency_refuses_overcommit_admits_fitting_second() {
-        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = residency_env(20 * GB);
 
         // A 15 GB resident is up. A 2nd 8 GB load → 23 GB > 20 GB budget → REFUSED
@@ -1666,7 +1678,7 @@ mod tests {
 
     #[test]
     fn residency_reaps_dead_reservation_and_frees_budget() {
-        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = residency_env(20 * GB);
 
         // A reservation file whose owner is GONE: write it but DON'T hold the flock
@@ -1690,7 +1702,7 @@ mod tests {
 
     #[test]
     fn residency_escape_hatch_skips_the_gate() {
-        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: single-threaded test holding the shared env lock. The hatch is
         // checked before any file IO, so this never touches a real state dir.
         unsafe { std::env::set_var("ROZUM_ALLOW_CONCURRENT_RESIDENT", "1") };
@@ -1702,7 +1714,7 @@ mod tests {
 
     #[test]
     fn reap_orphan_residents_removes_dead_keeps_live() {
-        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = residency_env(20 * GB);
 
         // A dead reservation: written but NOT flock-held (drop the File), like a
@@ -1726,7 +1738,7 @@ mod tests {
 
     #[test]
     fn residency_reserve_overwrites_stale_own_pid_file() {
-        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = residency_env(20 * GB);
 
         // A stale reservation file at OUR pid from a prior (dead) process that reused
