@@ -5,6 +5,42 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-033 — `/v1/chat/completions` streaming reports no token usage at all, and `stream_options` is not parsed
+
+- **Status:** OPEN, filed 2026-08-14 during the wire-parameter sweep the operator asked for.
+- **Severity:** P2 for anyone metering tokens over that endpoint; P3 for the agents here, which
+  drive `/v1/messages` and `/v1/responses`. Filed rather than fixed on the spot because the fix is
+  a new SSE chunk, not a wired field — see below.
+
+Measured straight off the frozen wire bytes (`crates/rozum-gateway/src/testdata/wire-golden.txt`),
+which is why this is a fact and not an impression:
+
+| case | usage in the body |
+|---|---|
+| `/v1/chat/completions` stream=false | yes |
+| `/v1/responses` stream=false | yes |
+| `/v1/messages` stream=false | yes |
+| **`/v1/chat/completions` stream=true** | **no** |
+| `/v1/responses` stream=true | yes |
+| `/v1/messages` stream=true | yes |
+
+One cell out of six. OpenAI's contract is that usage in a stream is opt-in — the client sends
+`stream_options: {"include_usage": true}` and gets a final chunk carrying `usage`. We parse no
+`stream_options` (the whole tree contains no mention of it) and emit no such chunk, so a client that
+asks is answered as if it had not: no error, no field, nothing to notice. Same family as BUG-031 and
+BUG-032 — a documented request parameter that evaporates in `serde`.
+
+**And the other half of the loop is ours too.** `openai_http.rs` — rozum acting as a CLIENT of an
+upstream OpenAI — *parses* `usage` out of a streamed chunk and has a test pinning that expectation
+(`parse_done_finish`, `openai_http.rs:440`), while never sending `stream_options` to ask for it. So
+against a spec-compliant upstream our client would also get nothing. One missing parameter, both
+directions.
+
+**Why it is not four lines** (unlike BUG-032): honouring it means emitting an EXTRA final chunk that
+today's clients do not receive. That chunk must appear only when asked for, or a client that never
+opted in gets a frame it does not expect — so the fix is parse + conditional emit + a seventh golden
+case, and it should land as its own change with its own before/after bytes.
+
 ## BUG-032 — the OpenAI `seed` was never parsed, so the code's own comment described a branch nothing could reach
 
 - **Status:** FIXED 2026-08-14 (`OaiChatReq` declares `seed`; `OaiWire::into_internal` passes it;

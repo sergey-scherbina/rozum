@@ -123,6 +123,43 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   branch, and that branch never touches the RNG, so the bench's determinism never depended on a
   seed. The comment is now true. See BUG-032.
 
+- [ ] **wire-parameter-coverage** — the rest of the sweep the operator asked for after BUG-031/032
+  (2026-08-14), recorded as one entry because it is one question: *which documented request
+  parameters does this gateway drop, and which of them are wiring versus missing capability?*
+  Measured against the three request structs, not from memory. The two that were pure wiring are
+  already fixed (BUG-031 `top_p`/`top_k`, BUG-032 `seed`); the streaming-usage one is BUG-033. What
+  is left is capability, and each needs a decision before code:
+  - **stop sequences** — `stop` (OpenAI) / `stop_sequences` (Anthropic). Neither struct declares
+    them and **`SamplingParams` has no field at all**, so this is not a dropped parameter but a
+    missing feature: a client asking to stop at a marker generates past it. The largest of the set —
+    it needs a field, backend support in both engines' decode loops (the shared
+    `consume_tokens` stop check is the natural home, beside the EOS test), and a test that a stop
+    string mid-token does the right thing.
+  - **`frequency_penalty` / `presence_penalty`** (OpenAI) — internally there is only
+    `repeat_penalty`, and it is a DIFFERENT function (HF convention: divide positive logits /
+    multiply negative ones, over a recent window) rather than OpenAI's additive-per-occurrence
+    penalties. Mapping one onto the other would be an approximation presented as a parameter.
+    Decide: implement them properly, or state in the API docs that they are unsupported. Do not
+    quietly alias them.
+  - **`repeat_penalty` has the opposite problem** — an internal knob **no dialect can set**, which
+    is exactly the shape `seed` had before BUG-032. Either give it a wire path or write down that it
+    is engine-internal, so the next person does not find a third dead field.
+  - **structured output on `/v1/responses`** — `/v1/chat/completions` honours `response_format`
+    (→ `response_schema`, constrained decode); the Responses API's own `text.format` json_schema is
+    not parsed, so the SAME capability works on one OpenAI dialect and silently not on the other.
+    Closest to a real bug of the remaining set.
+  - **Anthropic `thinking`** — `{type: enabled, budget_tokens}` is unparsed; `SamplingParams` has
+    `reasoning_effort`, so there is somewhere for it to go. Worth checking whether Claude Code sends
+    it before wiring anything.
+  - **`previous_response_id`** (Responses) — unparsed. **Verify before filing anything stronger:** I
+    do not know whether codex sends it, and if it does, ignoring it means dropped conversation state
+    rather than a dropped knob. Check a real codex request first; the claim is unverified.
+
+  The general lesson, which is why this entry exists rather than six scattered ones: **serde drops an
+  undeclared field in silence**, so "the client asked for X and X did nothing" produces no error and
+  no log line here. Both fixed bugs were found by putting the three dialects' parsed requests side by
+  side in one file, not by reading any one of them.
+
 - [ ] **chain-per-model-executor-tools** (marginal, not urgent) — per-MODEL executor tool curation in the
   chain: a weaker link gets a smaller tool set than a strong one. Today the real levers are already pulled —
   `--lean` cuts the executor surface 33→4 tools and backend planner/verifier tiers run `tools=[]`
