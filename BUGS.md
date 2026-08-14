@@ -67,10 +67,11 @@ request on the endpoint codex drives. `text`, an unknown type, and an absent fie
 
 ## BUG-033 — `/v1/chat/completions` streaming reports no token usage at all, and `stream_options` is not parsed
 
-- **Status:** OPEN, filed 2026-08-14 during the wire-parameter sweep the operator asked for.
+- **Status:** SERVER HALF FIXED 2026-08-14 (`stream_options.include_usage` parsed; `usage: null` on
+  every ordinary chunk; one extra final chunk with the real counts; a seventh golden case).
+  **Client half still open** — see the last paragraph.
 - **Severity:** P2 for anyone metering tokens over that endpoint; P3 for the agents here, which
-  drive `/v1/messages` and `/v1/responses`. Filed rather than fixed on the spot because the fix is
-  a new SSE chunk, not a wired field — see below.
+  drive `/v1/messages` and `/v1/responses`.
 
 Measured straight off the frozen wire bytes (`crates/rozum-gateway/src/testdata/wire-golden.txt`),
 which is why this is a fact and not an impression:
@@ -96,10 +97,24 @@ upstream OpenAI — *parses* `usage` out of a streamed chunk and has a test pinn
 against a spec-compliant upstream our client would also get nothing. One missing parameter, both
 directions.
 
-**Why it is not four lines** (unlike BUG-032): honouring it means emitting an EXTRA final chunk that
-today's clients do not receive. That chunk must appear only when asked for, or a client that never
-opted in gets a frame it does not expect — so the fix is parse + conditional emit + a seventh golden
-case, and it should land as its own change with its own before/after bytes.
+**Why it was not four lines** (unlike BUG-032): honouring it means emitting an EXTRA final chunk
+today's clients do not receive. That chunk must appear only when asked for, so the fix is parse +
+conditional emit + a seventh golden case. **The proof that the default is untouched is the golden
+diff: 17 lines added, none removed** — the six existing cases are byte-identical, so a client that
+sends no `stream_options` receives exactly the frames it always did.
+
+The shape follows OpenAI's, including the part that is easy to skip: with `include_usage`, every
+ordinary chunk carries `"usage": null` and the extra one carries the counts with an empty `choices`.
+The null is how a client tells "this build does not report usage" from "this chunk is not the one
+that does".
+
+**The client half is still open, deliberately.** `openai_http.rs` — rozum as a client of an upstream
+OpenAI — parses `usage` out of a streamed chunk and pins that with a test, while never sending
+`stream_options` to ask for it, so those token counts are 0 against a spec-compliant upstream. Not
+fixed here because it changes an OUTBOUND request to third-party servers I cannot test from this
+machine: an OpenAI-compatible server that validates unknown parameters strictly would 400 the whole
+request rather than ignore the field. It needs either a probe against the real providers or an
+escape hatch, and both are a different change from this one.
 
 ## BUG-032 — the OpenAI `seed` was never parsed, so the code's own comment described a branch nothing could reach
 
