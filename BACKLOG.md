@@ -131,11 +131,14 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   is left is capability, and each needs a decision before code:
   - **stop sequences** — **DONE 2026-08-14 as BUG-037**, in the shared `consume_tokens` exactly as
     this entry guessed, with the mid-token case as its own test. Empty stays a strict no-op.
-  - [ ] **stop-reason-sequence** — the label, split off from BUG-037. Anthropic reports
-    `stop_reason: "stop_sequence"` and which sequence matched; we return `end_turn`. It needs a new
-    `StopReason` variant, and that enum has **83 references across twelve files**, several in
-    matches that may not be exhaustive — mechanical, but on the decode path, so it deserves its own
-    pass rather than riding along with the behaviour change.
+  - [x] **stop-reason-sequence — DONE 2026-08-14 as BUG-040.** The "83 references" that deferred it
+    were mostly constructions: the compiler found ONE non-exhaustive match. The wildcards were the
+    real question and reviewing them turned up a second defect — the upstream Anthropic shim was
+    flattening `stop_sequence` into `end_turn` on the way in.
+  - [ ] **stop-sequence-which-one** — Anthropic's `stop_sequence` field (WHICH string matched) is
+    still `null`. Carrying it costs either `StopReason`'s `Copy` (call sites rely on it) or a new
+    field on `ChatEvent::Done`, which has **38 exhaustive destructuring sites** — measured. Clients
+    branch on `stop_reason`, so this is a detail, not a blocker.
   - **`frequency_penalty` / `presence_penalty`** (OpenAI) — internally there is only
     `repeat_penalty`, and it is a DIFFERENT function (HF convention: divide positive logits /
     multiply negative ones, over a recent window) rather than OpenAI's additive-per-occurrence

@@ -5,6 +5,36 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-040 — a stop-sequence hit and a natural end were the same answer, in both directions
+
+- **Status:** FIXED 2026-08-14 — `StopReason::StopSequence`; `/v1/messages` reports Anthropic's
+  `stop_sequence`, and the upstream shim stops flattening it on the way in. The matched STRING is
+  still not carried — measured cost below.
+- **Severity:** P3. A client branching on `stop_reason` could not tell "the model finished" from
+  "your stop sequence fired", which is the one distinction the parameter exists to make.
+
+Split off from BUG-037 on the grounds that the enum had "83 references across twelve files" and a
+new variant risked a wrong arm in a non-exhaustive match. **That estimate was wrong, and the
+compiler settled it in one run: exactly ONE non-exhaustive match in the whole workspace**
+(`obs.rs:345`). The 83 were mostly constructions. Recorded because the estimate is what deferred the
+work, and a number produced by reading is worth less than the same number produced by the compiler.
+
+**The wildcards were the real question, and reviewing them found a second defect.** Six matches on
+`StopReason` end in `_`, so the new variant lands silently in whatever bucket they name:
+
+| site | lands on | verdict |
+|---|---|---|
+| `oai_api.rs` finish_reason | `"stop"` | correct — OpenAI spells a stop-sequence hit `stop`, same as a natural end. Now an explicit arm, so it reads as a decision. |
+| `responses_api.rs` status | `"completed"` | correct |
+| `openai_http.rs` / `mistralrs_backend.rs` | `EndTurn` | correct — an upstream `stop` cannot say which it was |
+| **`anthropic_http.rs`** | **`EndTurn`** | **wrong.** Upstream Anthropic DOES distinguish `stop_sequence`, and this shim was collapsing it on the way IN — a proxied answer lost exactly the information the serializer now preserves. Found by reviewing the wildcard, not by looking for it. |
+
+**What is still not carried:** Anthropic's `stop_sequence` field (which string matched) stays `null`.
+Carrying it means either giving `StopReason` a `String` payload — costing it `Copy`, which call
+sites rely on — or a field on `ChatEvent::Done`, which has **38 exhaustive destructuring sites**.
+Measured, not guessed, this time. Clients branch on `stop_reason`; the string is a detail, and it is
+filed as `stop-sequence-which-one` rather than smuggled in.
+
 ## BUG-039 — `cargo test` wrote fabricated events into the operator's LIVE gateway log, which incident evidence reads
 
 - **Status:** FIXED 2026-08-14 — a test binary with no explicit `ROZUM_GATEWAY_LOG` writes nothing.
