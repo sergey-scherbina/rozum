@@ -5,6 +5,38 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-039 — `cargo test` wrote fabricated events into the operator's LIVE gateway log, which incident evidence reads
+
+- **Status:** FIXED 2026-08-14 — a test binary with no explicit `ROZUM_GATEWAY_LOG` writes nothing.
+  Measured: the gateway suite appended **5,303 bytes** before, **0** after; the workspace suite the
+  same.
+- **Severity:** P2, and higher than it looks. `~/.rozum/gateway.jsonl` is not a scratch file: it is
+  what `meeting::store::gateway_log_slice` cuts an incident's evidence out of, and what
+  `doctor`/`/stats` read. A test run manufacturing `request_done` and `generation_timeout` events
+  into it means an incident report can quote something that never happened on the live gateway.
+
+Found while verifying BUG-038, by asking whether the new logging call would touch the real file —
+the answer for MY change was no (it only logs when a request carries unknown fields, and none of the
+tests do), and the measurement then showed the suite was already writing 5.3 KB per run **on
+untouched master**. The tail of the operator's log had
+`{"event":"generation_timeout","inactivity_secs":0}` in it: that is the `gen_timeout_zero_disables`
+unit test, sitting in production observability data.
+
+**Why a test could not simply redirect it:** `obs::log_path()` resolves through a `OnceLock`, so
+whichever code logs first in a process fixes the destination for every later call. A test that sets
+`ROZUM_GATEWAY_LOG` after that point changes nothing, and one that sets it before depends on test
+ordering — which is the same trap as BUG-035, one file over.
+
+**The rule:** no explicit destination AND the executable lives in `target/*/deps/` ⇒ log nothing.
+Cargo puts test binaries there and nothing this workspace ships does — the gateway runs from
+`target/release/rozum-gateway`, `~/.cargo/bin`, or `~/.rozum/bin`. An explicit `ROZUM_GATEWAY_LOG`
+still wins, so a test that wants to assert on the log can point it at a temp file.
+
+**Both directions are tested, because the second is the dangerous one.** Recognising a test binary
+too eagerly would silence the production log — the opposite failure, and just as quiet. The rule is
+a pure function of the path with both cases asserted, plus one test that this very process is
+detected, so the 5,303 → 0 measurement is not luck.
+
 ## BUG-038 — the gateway could not tell you it had ignored your parameter
 
 - **Status:** FIXED 2026-08-14 — every request field this gateway does not act on is captured and

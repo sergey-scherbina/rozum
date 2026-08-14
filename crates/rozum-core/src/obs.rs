@@ -19,12 +19,40 @@ use serde_json::{Value, json};
 
 const RECENT_CAP: usize = 30;
 
+/// Is this process a `cargo test` binary?
+///
+/// Cargo builds test executables into `target/<profile>/deps/` and nothing else this workspace
+/// ships lives there: the gateway runs from `target/release/rozum-gateway`, `~/.cargo/bin`, or
+/// `~/.rozum/bin`. The check is a heuristic, and it is deliberately biased toward the safe side —
+/// a mistake here loses a log line from an unusual debug run, while the mistake it prevents writes
+/// fabricated events into the operator's evidence (BUG-039).
+///
+/// An explicit `ROZUM_GATEWAY_LOG` still wins, so a test that WANTS to assert on the log can point
+/// it at a temp file.
+fn is_test_binary() -> bool {
+    std::env::current_exe().ok().is_some_and(|p| exe_is_test(&p))
+}
+
+/// The rule, as a pure function of the path, so both directions are testable — the one that must
+/// say "test" and the one that must NOT, which a test running inside a test binary cannot check
+/// about itself.
+fn exe_is_test(exe: &std::path::Path) -> bool {
+    exe.parent().is_some_and(|d| d.ends_with("deps"))
+}
+
 fn log_path() -> Option<&'static PathBuf> {
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
     PATH.get_or_init(|| {
         let p = match std::env::var("ROZUM_GATEWAY_LOG") {
             Ok(v) if v.is_empty() => return None,
             Ok(v) => PathBuf::from(v),
+            // No explicit destination AND we are a test binary: write nothing. Measured
+            // 2026-08-14 before this existed — `cargo test -p rozum-gateway --lib` appended 5,303
+            // bytes of `request_done` and `generation_timeout` events to the operator's live
+            // `~/.rozum/gateway.jsonl`, the same file `meeting::store::gateway_log_slice` cuts
+            // incident evidence out of. A test that manufactures evidence is worse than a test
+            // that logs nothing.
+            Err(_) if is_test_binary() => return None,
             Err(_) => {
                 // Same rule as the reader: `meeting::store::gateway_log_slice` opens this file
                 // to cut an incident's evidence out of it, so writer and reader must resolve the
@@ -386,4 +414,22 @@ pub fn mlx_memory_mb() -> Option<(u64, u64, u64)> {
 /// the MLX engine is absent.
 pub fn batch_stats() -> Option<BatchStats> {
     MLX_BATCH.get().and_then(|f| f())
+}
+
+#[cfg(test)]
+mod obs_log_path_tests {
+    use super::exe_is_test;
+    use std::path::Path;
+
+    #[test]
+    fn a_cargo_test_binary_is_recognised_and_a_shipped_one_is_not() {
+        assert!(exe_is_test(Path::new("/w/rozum/target/debug/deps/rozum_gateway-7b2b0fd1")));
+        assert!(!exe_is_test(Path::new("/w/rozum/target/release/rozum-gateway")));
+        assert!(!exe_is_test(Path::new("/Users/x/.cargo/bin/rozum-gateway")));
+    }
+
+    #[test]
+    fn this_very_process_is_a_test_binary() {
+        assert!(super::is_test_binary());
+    }
 }
