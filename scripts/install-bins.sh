@@ -167,17 +167,24 @@ install_ssc() {
     #
     # 2026-08-08: failed inside the STD library (`jsonCoreRenderFields extracts Cons which is not a
     # known enum constructor`, `_normSegments uses unsupported infix operator ::`). Those are fixed.
-    # 2026-08-13: fails on ONE line of our own source — `hashStr` in `clients/meeting/meeting.ssc`
-    # does `s.trim.toList.map(c => c.toInt).sum`, and the Rust lane has no `toInt` for a character
+    # 2026-08-13: failed on ONE line of our own source — `hashStr` in `clients/meeting/meeting.ssc`
+    # does `s.trim.toList.map(c => c.toInt).sum`, and the Rust lane had no `toInt` for a character
     # (`error[E0277]: the trait bound &char: SscToInt is not satisfied`). Reported to scalascript
-    # WITH a fix on `feature/ssc-toint-on-a-char`; built against that branch the PWA compiles again
-    # (1,708,272 bytes, runs, binds its port). Until it is in their main, the shared toolchain still
-    # refuses, so this leaves the running binary alone rather than break it.
+    # with a fix; it is in their main since `2315f2ecf` and the build is green again (2026-08-14).
     #
-    # The same line cannot run on the `run` lane either, for a DIFFERENT reason (`String.toList`
-    # answers a closure there). Both are filed; neither is ours to fix.
+    # WHICH LEAVES NO STANDING REASON HERE, and that is the point of not writing one. Both entries
+    # above were true when written and false a week later, and the second cost a reader the assumption
+    # that the toolchain was fine. So the failure now EXPLAINS ITSELF: `build.sh` compares the staged
+    # toolchain's digest against its own tree and prints which of "restage" / "our source" / "their
+    # compiler" it is, at the moment it fails, from the machine's own state instead of from a comment.
+    # Print that block whole — its last lines are the suggested commands, so a blind `tail` would
+    # show the remedy and hide the diagnosis.
     echo "SKIP rozum-meeting-ssc: the ssc build FAILED — $dst left as it is. Reason:" >&2
-    tail -3 "$log" | sed 's/^/      /' >&2
+    if grep -q 'build.sh: the ssc build FAILED' "$log"; then
+      sed -n '/build.sh: the ssc build FAILED/,$p' "$log" | sed 's/^/      /' >&2
+    else
+      tail -3 "$log" | sed 's/^/      /' >&2
+    fi
     rm -f "$log"
     return 0
   fi
