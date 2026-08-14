@@ -296,7 +296,7 @@ async fn shutdown_signal(sb: Arc<Switchboard>) {
     crate::obs::log_event(json!({
         "event": "gateway_shutdown_signal",
         "signal": signal,
-        "ppid": std::os::unix::process::parent_id(),
+        "ppid": crate::procctl::parent_pid(),
         "pid": std::process::id(),
     }));
     sb.mark_shutting_down();
@@ -862,10 +862,13 @@ async fn control_reload(State(state): State<GatewayState>) -> Response {
 }
 
 /// Replace this process with a fresh `rozum gateway` for the same model/port.
-/// Falls back to `process::exit(0)` if exec fails (the failover watchdog or a
+/// Falls back to `process::exit(0)` if the replacement fails (the failover watchdog or a
 /// fresh launch will respawn it).
+///
+/// "Replace" means `exec` on unix — same pid, same open files, same supervision. Where there is no
+/// exec the successor is a separate process and this one exits after starting it; that difference
+/// (and what it costs) is documented in `crate::procctl::replace_self`.
 fn reexec_gateway(spec: &ModelSpec, port: u16) -> ! {
-    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().unwrap_or_else(|_| "rozum".into());
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("gateway")
@@ -875,10 +878,11 @@ fn reexec_gateway(spec: &ModelSpec, port: u16) -> ! {
         .arg(spec.n_ctx.to_string())
         .arg("--port")
         .arg(port.to_string());
-    let err = cmd.exec(); // returns only on failure
-    crate::obs::log_event(json!({
-        "event": "gateway_reload_exec_failed", "error": err.to_string(),
-    }));
+    if let Err(err) = crate::procctl::replace_self(&mut cmd) {
+        crate::obs::log_event(json!({
+            "event": "gateway_reload_exec_failed", "error": err.to_string(),
+        }));
+    }
     std::process::exit(0);
 }
 

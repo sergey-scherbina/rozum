@@ -7,6 +7,9 @@
 // It reads MLX telemetry through `crate::obs` (the rozum-core hook), never the engine.
 pub mod anthropic_http;
 pub(crate) mod codex_patch;
+/// Starting and stopping child processes, on a platform with signals and on one without. Every
+/// `libc::kill` / `std::os::unix` in this crate lives here (`docs/specs/windows-spawn-seams.md`).
+pub(crate) mod procctl;
 /// The browser console: routes, RBAC and the passkey ceremonies. Behind `ucc` because it is the one
 /// consumer of `webauthn-rs` → OpenSSL, and a model server does not need a passkey stack to serve
 /// models (`docs/specs/ucc-optional.md`). The snapshot it serves lives in `status`, ungated.

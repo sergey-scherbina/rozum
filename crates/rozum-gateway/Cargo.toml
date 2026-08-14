@@ -33,8 +33,17 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 axum = { version = "0.8", features = ["ws"] }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
-libc = "0.2"
 # Phase 4 — live terminal sessions + Face ID auth (UCC).
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"], optional = true }
 portable-pty = "0.8"
 url = "2"
+
+# Signals are a unix concept and `libc` is now used for exactly that — every call is in
+# `src/procctl.rs`. Target-conditional so a Windows build does not carry a crate whose whole
+# purpose there would be to not compile (`docs/specs/windows-spawn-seams.md`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The Windows half of the same seam: a console control event is the platform's only graceful stop.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }

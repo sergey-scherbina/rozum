@@ -5296,6 +5296,7 @@ dependencies = [
  "url",
  "uuid 1.23.2",
  "webauthn-rs",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

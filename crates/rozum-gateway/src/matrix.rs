@@ -79,11 +79,8 @@ pub(crate) fn load_matrix_live_from_disk() -> Option<MatrixLive> {
         return None;
     }
     // For in-progress jobs, check if the process group is still alive.
-    if !l.done {
-        let alive = unsafe { libc::kill(-l.pgid, 0) } == 0;
-        if !alive {
-            return None;
-        }
+    if !l.done && !crate::procctl::group_alive(l.pgid) {
+        return None;
     }
     Some(l)
 }
@@ -452,7 +449,6 @@ pub(crate) async fn run_matrix_job(job_id: &str) {
         q.iter().find(|j| j.id == job_id).and_then(|j| j.started_at).unwrap_or_else(crate::share::now_unix)
     };
 
-    use std::os::unix::process::CommandExt as _;
     let mut cmd = Command::new("bash");
     cmd.arg(bench_script())
         .env("AGENTIC_MODELS", &models_str)
@@ -474,8 +470,8 @@ pub(crate) async fn run_matrix_job(job_id: &str) {
         .env("GEN_TIMEOUT", "120") // 120s per-generation; frozen model fails fast, leaves room for retry
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_out))
-        .stderr(Stdio::from(log_err))
-        .process_group(0);
+        .stderr(Stdio::from(log_err));
+    crate::procctl::own_process_group(&mut cmd);
 
     let exit_code = match cmd.spawn() {
         Ok(mut child) => {
@@ -650,16 +646,36 @@ pub(crate) fn matrix_fail(job_id: &str) {
     });
 }
 
-pub(crate) fn signal_matrix(sig: libc::c_int) -> bool {
+/// Ask the running bench's process group to stop / freeze / continue.
+///
+/// `Outcome`, not `bool`: on a platform without SIGSTOP the pause routes must be able to say WHY
+/// nothing happened, and "no live run" and "this platform cannot freeze a process group" are two
+/// different answers to the operator (`crate::procctl`).
+pub(crate) fn signal_matrix(ask: crate::procctl::Ask) -> crate::procctl::Outcome {
     let live = matrix_live().lock().unwrap();
-    if let Some(ref l) = *live {
-        unsafe { libc::killpg(l.pgid, sig) == 0 }
-    } else { false }
+    match *live {
+        Some(ref l) => crate::procctl::signal_group(l.pgid, ask),
+        None => crate::procctl::Outcome::Failed,
+    }
+}
+
+/// The answer a pause/resume/stop route gives.
+///
+/// `why` is present only when the platform has no such operation at all, so on unix this body is
+/// byte-for-byte the `{"ok": …}` the console has always parsed. A UI that renders a bare `false`
+/// for "Windows cannot freeze a process group" sends the operator hunting a broken bench run.
+fn ask_answer(sent: crate::procctl::Outcome) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut body = serde_json::json!({ "ok": sent.ok() });
+    if let Some(why) = sent.why() {
+        body["why"] = serde_json::Value::from(why);
+    }
+    axum::Json(body).into_response()
 }
 
 pub(crate) async fn matrix_pause_route() -> axum::response::Response {
-    use axum::response::IntoResponse;
-    let ok = signal_matrix(libc::SIGSTOP);
+    let sent = signal_matrix(crate::procctl::Ask::Suspend);
+    let ok = sent.ok();
     if ok {
         let id = {
             let mut live = matrix_live().lock().unwrap();
@@ -676,12 +692,12 @@ pub(crate) async fn matrix_pause_route() -> axum::response::Response {
             });
         }
     }
-    axum::Json(serde_json::json!({ "ok": ok })).into_response()
+    ask_answer(sent)
 }
 
 pub(crate) async fn matrix_resume_route() -> axum::response::Response {
-    use axum::response::IntoResponse;
-    let ok = signal_matrix(libc::SIGCONT);
+    let sent = signal_matrix(crate::procctl::Ask::Resume);
+    let ok = sent.ok();
     if ok {
         let id = {
             let mut live = matrix_live().lock().unwrap();
@@ -698,15 +714,15 @@ pub(crate) async fn matrix_resume_route() -> axum::response::Response {
             });
         }
     }
-    axum::Json(serde_json::json!({ "ok": ok })).into_response()
+    ask_answer(sent)
 }
 
 pub(crate) async fn matrix_stop_route() -> axum::response::Response {
-    use axum::response::IntoResponse;
-    // SIGCONT first to unfreeze if paused, then SIGTERM
-    signal_matrix(libc::SIGCONT);
-    let ok = signal_matrix(libc::SIGTERM);
-    axum::Json(serde_json::json!({ "ok": ok })).into_response()
+    // Continue first to unfreeze a paused run, then ask it to stop. Where the platform cannot
+    // freeze, it never froze, so the unsupported continue is exactly the no-op it should be — the
+    // stop's own outcome is the one reported.
+    let _ = signal_matrix(crate::procctl::Ask::Resume);
+    ask_answer(signal_matrix(crate::procctl::Ask::Terminate))
 }
 
 pub(crate) async fn matrix_live_route() -> axum::response::Response {

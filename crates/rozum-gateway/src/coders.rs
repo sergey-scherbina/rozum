@@ -121,7 +121,6 @@ pub(crate) fn update_coder_record(id: &str, f: impl FnOnce(&mut CoderRecord)) ->
 /// Spawn `rozum launch --model <m> <agent invocation>` DETACHED in `workdir`, output → a log file.
 /// Returns (pid, log_path).
 pub(crate) fn spawn_coder(agent: &str, model: &str, workdir: &str, prompt: &str, verify: bool) -> std::io::Result<(u32, PathBuf)> {
-    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
     let log_dir = state_dir().map(|d| d.join("logs")).unwrap_or_else(|| PathBuf::from("/tmp"));
     let _ = std::fs::create_dir_all(&log_dir);
@@ -152,8 +151,8 @@ pub(crate) fn spawn_coder(agent: &str, model: &str, workdir: &str, prompt: &str,
         .current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log2))
-        .process_group(0);
+        .stderr(Stdio::from(log2));
+    crate::procctl::own_process_group(&mut cmd);
     // Chat turns (verify:false) opt out of the post-agent cargo verify-gate AND decode GREEDILY
     // (argmax) — the same focus lever the matrix uses (ROZUM_FORCE_GREEDY). Both env vars propagate
     // to the shared gateway `rozum launch` spawns, so a chat's model runs deterministic + focused
@@ -234,7 +233,7 @@ pub(crate) async fn coder_launch_route(body: String) -> axum::response::Response
                         c.status = "running".into();
                     });
                     if !kept {
-                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+                        crate::procctl::terminate(pid);
                     }
                 }
                 Err(e) => { update_coder_record(&task_id, |c| c.status = format!("failed: spawn: {e}")); }
@@ -256,9 +255,7 @@ pub(crate) async fn coder_stop_route(body: String) -> axum::response::Response {
         return json_err(axum::http::StatusCode::NOT_FOUND, "no such coder");
     };
     let c = coders.remove(pos);
-    if c.pid != 0 {
-        unsafe { libc::kill(c.pid as libc::pid_t, libc::SIGTERM); }
-    }
+    crate::procctl::terminate(c.pid);
     save_coders(&coders);
     axum::Json(serde_json::json!({ "ok": true, "id": c.id })).into_response()
 }

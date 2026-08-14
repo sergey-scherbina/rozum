@@ -168,7 +168,7 @@ pub(crate) async fn agent_launch_route(body: String) -> axum::response::Response
                         a.status = "running".into();
                     });
                     if !kept {
-                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+                        crate::procctl::terminate(pid);
                     }
                 }
                 Err(e) => { update_agent_record(&task_id, |a| a.status = format!("failed: spawn: {e}")); }
@@ -190,9 +190,7 @@ pub(crate) async fn agent_stop_route(body: String) -> axum::response::Response {
         return json_err(axum::http::StatusCode::NOT_FOUND, "no such agent");
     };
     let a = agents.remove(pos);
-    if a.pid != 0 {
-        unsafe { libc::kill(a.pid as libc::pid_t, libc::SIGTERM); }
-    }
+    crate::procctl::terminate(a.pid);
     save_agents(&agents);
     axum::Json(serde_json::json!({ "ok": true, "id": a.id })).into_response()
 }

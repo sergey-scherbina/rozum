@@ -162,13 +162,22 @@ pub fn live_lease_count(fresh_secs: u64) -> usize {
     live
 }
 
+/// Is `pid` a live process?
+///
+/// Public because it is the ONE answer to that question in this workspace: the gateway had a second
+/// copy (unix-only, which is half of why `rozum-gateway` did not compile for Windows) and two copies
+/// of a platform fact is exactly the shape of defect this repo keeps finding in its own boards.
+/// pid 0 is the "not spawned yet" placeholder and is never alive — never pass it to `kill`, which
+/// would signal our own process group.
 #[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
+pub fn pid_alive(pid: u32) -> bool {
     pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
 }
 
+/// See the unix arm above. Access-denied means the process exists but is protected, so only the
+/// documented "no such process" error is safe to read as dead.
 #[cfg(windows)]
-fn pid_alive(pid: u32) -> bool {
+pub fn pid_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE,
     };

@@ -4919,7 +4919,21 @@ async fn run_meetings_participant_pool(
     let mut children: HashMap<String, tokio::process::Child> = HashMap::new();
     // Stop children on SIGTERM/SIGINT (launchd stop) so a restart never leaves orphaned
     // participants double-replying in a room.
+    //
+    // Created ONCE, outside the loop, and deliberately: installing a handler replaces the default
+    // disposition, so a stop arriving while no stream existed would be ignored outright rather than
+    // merely arrive late — re-arming per iteration would open exactly that window every 5s.
+    #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    // Windows has no SIGTERM. Ctrl+Break is what a console stop delivers to a process group — and
+    // what `rozum-gateway`'s own `procctl::terminate` sends — so it is this pool's stop there.
+    // The two arms have the same shape (`recv().await`), which is why the loop below needs no cfg.
+    // Kept local rather than shared: the other two copies of "wait to be stopped" live in
+    // `rozum-meeting` (which deliberately does not depend on `rozum-core`, so there is no shared
+    // home without inventing a crate edge) and in `gateway.rs`, which must report WHICH signal
+    // fired and so cannot use a merged "something asked us to stop" future.
+    #[cfg(windows)]
+    let mut sigterm = tokio::signal::windows::ctrl_break().ok();
     eprintln!(
         "[participant-pool] primary room '{primary_room}', registry {}",
         registry_path.display()

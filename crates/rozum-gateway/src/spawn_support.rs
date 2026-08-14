@@ -59,10 +59,7 @@ pub(crate) fn tmux_alive(id: &str) -> bool {
 }
 
 pub(crate) fn is_executable_file(p: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    crate::procctl::is_executable_file(p)
 }
 
 /// Is `agent` actually runnable — an executable of that name on THIS process's PATH? The UCC offers
@@ -76,7 +73,7 @@ pub(crate) fn agent_on_path(agent: &str) -> bool {
         return is_executable_file(p);
     }
     let Some(path) = std::env::var_os("PATH") else { return false };
-    std::env::split_paths(&path).any(|dir| is_executable_file(&dir.join(agent)))
+    std::env::split_paths(&path).any(|dir| crate::procctl::runnable_in_dir(&dir, agent))
 }
 
 /// The refusal for an agent the machine cannot run, naming the fix rather than the symptom.
@@ -92,11 +89,10 @@ pub(crate) fn agent_missing_reason(agent: &str) -> Option<String> {
     Some(format!("agent `{agent}` is not on PATH — {how}"))
 }
 
-/// Is `pid` still alive? `kill(pid, 0)` returns 0 for a live process we can signal.
-/// pid 0 is the "not spawned yet" placeholder on starting records — never alive (and never
-/// passed to kill: `kill(0, sig)` would signal our own whole process group).
+/// Is `pid` still alive? One implementation for the whole workspace, in `rozum_core::share` —
+/// this was a second copy of it, and the unix-only one (`docs/specs/windows-spawn-seams.md`).
 pub(crate) fn pid_alive(pid: u32) -> bool {
-    pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    crate::procctl::pid_alive(pid)
 }
 
 /// Derive the roster handle the participant uses, mirroring `model_participant::derive_handle` (the
@@ -110,7 +106,6 @@ pub(crate) fn derive_handle(model: &str) -> String {
 /// Spawn `rozum meetings participant …` DETACHED (own process group, output → a per-agent log), so it
 /// survives a control-serve restart. Returns the child pid.
 pub(crate) fn spawn_participant(model: &str, room: &str, policy: &str, persona: &str, gw_port: u16) -> std::io::Result<u32> {
-    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
     let gw_url = format!("http://127.0.0.1:{gw_port}/v1");
     let log_path = state_dir()
@@ -128,7 +123,7 @@ pub(crate) fn spawn_participant(model: &str, room: &str, policy: &str, persona: 
     }
     cmd.args(["--gateway-url", &gw_url]);
     cmd.stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(log2));
-    cmd.process_group(0); // detach from control-serve's group so it survives a service restart
+    crate::procctl::own_process_group(&mut cmd); // survives a control-serve restart
     Ok(cmd.spawn()?.id())
 }
 
