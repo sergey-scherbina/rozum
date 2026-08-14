@@ -11,7 +11,7 @@
   msg system: be brief
   msg user: hi
   tools: [read_file]
-  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) seed=None schema=false reasoning=Some("low")
+  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) seed=None schema=true reasoning=Some("low")
 --- response
 {"id":"resp-X","object":"response","created_at":0,"status":"completed","model":"asked-for-model","output":[{"type":"message","id":"msg-X","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9},"error":null,"incomplete_details":null,"metadata":{},"parallel_tool_calls":true}
 === /v1/messages stream=false
@@ -43,7 +43,7 @@ data: [DONE]
   msg system: be brief
   msg user: hi
   tools: [read_file]
-  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) seed=None schema=false reasoning=Some("low")
+  sampling: temperature=Some(0.3) top_p=Some(0.9) top_k=Some(40) max_tokens=Some(64) seed=None schema=true reasoning=Some("low")
 --- response
 event: response.created
 data: {"response":{"id":"resp-X","object":"response","created_at":0,"status":"in_progress","model":"asked-for-model","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"error":null,"incomplete_details":null,"metadata":{},"parallel_tool_calls":true},"type":"response.created","sequence_number":0}

@@ -54,6 +54,11 @@ pub(crate) struct RespReq {
     /// gpt-oss (overrides the `ROZUM_GPTOSS_REASONING` default); ignored by other models.
     #[serde(default)]
     pub(crate) reasoning: Option<Value>,
+    /// Responses' structured-output request: `text: { format: { type, schema, … } }`. Unread until
+    /// BUG-034, so a constrained-decode request was answered with unconstrained output and a 200 —
+    /// while the same capability worked on `/v1/chat/completions` via `response_format`.
+    #[serde(default)]
+    pub(crate) text: Value,
 }
 
 /// The `effort` out of an OpenAI Responses `reasoning` object, lower-cased + validated.

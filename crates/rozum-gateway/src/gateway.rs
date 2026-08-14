@@ -748,6 +748,10 @@ impl WireDialect for RespWire {
                     &lease.model_id,
                     reasoning_effort_of(&self.req.reasoning),
                 ),
+                // `text.format`, the Responses spelling of what Chat calls `response_format`
+                // (BUG-034). `{"type":"text"}` — which is what a client says when it wants plain
+                // prose — parses to `None`, so the default stays UNCONSTRAINED.
+                response_schema: parse_text_format(&self.req.text),
                 ..Default::default()
             },
         }

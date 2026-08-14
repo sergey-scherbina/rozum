@@ -138,15 +138,39 @@ pub(crate) fn parse_anthropic_tool_choice(v: &Value) -> ToolChoice {
 /// `None` for free text). `{"type":"json_object"}` → any JSON object; `{"type":"json_schema",
 /// "json_schema":{"schema":{…}}}` → that schema; `{"type":"text"}` / absent → `None`.
 pub(crate) fn parse_response_format(v: &Value) -> Option<Value> {
-    match v.get("type").and_then(Value::as_str) {
+    parse_format_object(v)
+}
+
+/// The schema out of a FORMAT OBJECT, whichever OpenAI dialect it arrived in.
+///
+/// The two spell the type names identically and differ only in where the schema sits: Chat wraps it
+/// one level deeper (`json_schema.schema`) than Responses (`schema`). That is a nesting difference,
+/// not a semantic one, so it is handled once here instead of becoming a second copy of the same
+/// rule in the Responses dialect (BUG-034).
+///
+/// Anything else — including Responses' explicit `{"type": "text"}` — is `None`, i.e. UNCONSTRAINED.
+/// That default matters more than the feature: a client saying "plain text please" must not be
+/// silently forced to emit JSON.
+pub(crate) fn parse_format_object(fmt: &Value) -> Option<Value> {
+    match fmt.get("type").and_then(Value::as_str) {
         Some("json_object") => Some(json!({ "type": "object" })),
-        Some("json_schema") => v
+        Some("json_schema") => fmt
             .get("json_schema")
-            .and_then(|js| js.get("schema"))
+            .and_then(|js| js.get("schema")) // OpenAI Chat: response_format.json_schema.schema
+            .or_else(|| fmt.get("schema")) // Responses: text.format.schema
             .cloned()
             .or_else(|| Some(json!({ "type": "object" }))),
         _ => None,
     }
+}
+
+/// The Responses API's structured-output request: `text: { format: { … } }`.
+///
+/// Until BUG-034 this was not read at all, so the same capability worked on
+/// `/v1/chat/completions` and silently did nothing on `/v1/responses` — a constrained-decode
+/// request answered with unconstrained output and a 200.
+pub(crate) fn parse_text_format(text: &Value) -> Option<Value> {
+    text.get("format").and_then(parse_format_object)
 }
 
 /// Apply a [`ToolChoice`] to the resolved tool set: `None` → empty, `Named` → only that tool
@@ -240,3 +264,45 @@ pub(crate) async fn poison_layer(req: axum::extract::Request, next: Next) -> Res
     next.run(req).await
 }
 
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn both_openai_dialects_yield_the_same_schema_from_their_own_nesting() {
+        // BUG-034: the capability existed on `/v1/chat/completions` and did nothing on
+        // `/v1/responses`, because only the nesting differs and only one nesting was read.
+        let schema = json!({"type": "object", "properties": {"answer": {"type": "string"}}});
+
+        // Chat: response_format.json_schema.schema
+        let chat = json!({"type": "json_schema", "json_schema": {"name": "a", "schema": schema}});
+        assert_eq!(parse_response_format(&chat), Some(schema.clone()));
+
+        // Responses: text.format.schema
+        let responses = json!({"format": {"type": "json_schema", "name": "a", "schema": schema, "strict": true}});
+        assert_eq!(parse_text_format(&responses), Some(schema.clone()));
+    }
+
+    #[test]
+    fn plain_text_and_absence_both_mean_unconstrained() {
+        // The dangerous direction. `{"type":"text"}` is what a Responses client sends when it wants
+        // prose; reading it as "constrain to JSON" would break every ordinary request on the
+        // endpoint codex drives. Absence must be just as inert.
+        assert_eq!(parse_text_format(&json!({"format": {"type": "text"}})), None);
+        assert_eq!(parse_text_format(&json!({})), None);
+        assert_eq!(parse_text_format(&Value::Null), None);
+        assert_eq!(parse_response_format(&Value::Null), None);
+        assert_eq!(parse_text_format(&json!({"format": {"type": "who_knows"}})), None);
+    }
+
+    #[test]
+    fn json_object_asks_for_an_object_and_a_schemaless_json_schema_falls_back_to_one() {
+        let obj = json!({"type": "object"});
+        assert_eq!(parse_text_format(&json!({"format": {"type": "json_object"}})), Some(obj.clone()));
+        assert_eq!(parse_response_format(&json!({"type": "json_object"})), Some(obj.clone()));
+        // `json_schema` with no schema in it: constrain to "some object" rather than refuse — the
+        // pre-existing Chat behaviour, now shared rather than re-decided.
+        assert_eq!(parse_text_format(&json!({"format": {"type": "json_schema"}})), Some(obj));
+    }
+}

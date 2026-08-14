@@ -219,6 +219,10 @@ async fn render_all() -> String {
                        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}],
             "temperature": 0.3, "top_p": 0.9, "top_k": 40, "max_output_tokens": 64,
             "reasoning": {"effort": "low"},
+            // Structured output, the Responses spelling. Before BUG-034 this line changed nothing
+            // and the golden read `schema=false` while the Chat case beside it read `true`.
+            "text": {"format": {"type": "json_schema", "name": "answer",
+                                "schema": {"type": "object"}, "strict": true}},
             "stream": stream,
         }))
         .unwrap();
