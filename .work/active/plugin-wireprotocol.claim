@@ -1,0 +1,7 @@
+feature/plugin-wireprotocol 2026-08-14T15:41:30Z
+agent: nadia-ucc
+heartbeat: 2026-08-14T15:41:30Z
+status: not-started
+note: OPERATOR OVERRIDE 2026-08-14 — the entry was parked pending exactly this decision.
+done-so-far:
+next: read the triage that parked it + the arch-spi "map, not trait" call it supersedes, then measure the three wire surfaces before proposing a shape
