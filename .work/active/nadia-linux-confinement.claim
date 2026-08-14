@@ -1,6 +1,0 @@
-feature/nadia-linux-confinement 2026-08-14T23:12:33Z
-agent: nadia-ucc
-heartbeat: 2026-08-14T23:12:33Z
-status: not-started
-done-so-far:
-next: BUG-044 — the test asserts confinement on a platform that has none; gate it AND make the gap loud, do not just hide it
