@@ -1,5 +1,35 @@
 # Changelog
 
+## windows-spawn-seams — the gateway's process control behind one seam, and the workspace compiles for Windows
+Completed: 2026-08-14
+
+`cargo check --workspace --no-default-features --target x86_64-pc-windows-gnu`: **0 errors**, from
+26. Everything the gateway does to a child process — put it in its own group, ask if it is alive,
+stop it, freeze a bench run, decide whether a file can be run at all, replace itself — was written
+against `libc` at the call site in five files, and is now in `crates/rozum-gateway/src/procctl.rs`
+with a unix and a Windows arm. `pid_alive` stopped being two implementations: `rozum-core::share`
+already had both platforms, for reaping dead residency leases.
+
+Three things this made me write down rather than paper over. **`Unsupported` is a third outcome**:
+SIGSTOP has no supported Win32 equivalent, so the pause route answers with a reason instead of a
+bare `false` that would send an operator hunting a bench run which was never asked to freeze — on
+unix the body is byte-for-byte what the console has always parsed. **Ctrl+Break, never
+`TerminateProcess`**: a hard kill of a process that may be mid-GPU-eval is what rebooted this Mac
+once (BUG-001), and no caller here asked for a kill. And **one real unix change**: `group_alive(0)`
+is now false — `kill(-0, 0)` addresses the caller's own process group, so a matrix record that was
+never spawned used to read as alive and keep its stale live-state forever.
+
+The board entry said the errors were in three files; there were five, plus two more in the
+participant pool that only appeared once the library compiled. The count (26) was exact because it
+came from the compiler; the file list was not because it came from memory. CI now runs
+`cargo check --workspace --no-default-features` on `windows-latest` — the first time these packages
+meet a real Windows box (MSVC, where the local proof was a GNU cross-check), so a red there is that
+difference reporting itself rather than a regression.
+
+**None of it has run on Windows.** The three claims most likely to be wrong are named in the spec,
+along with the runtime gaps no compiler will catch: terminal sessions shell out to `tmux`, the
+matrix to `bash`. Spec: `docs/specs/windows-spawn-seams.md`.
+
 ## bench-rc-partial-delivery — a manifest without source stopped being read as the model's fault
 Completed: 2026-08-14
 
@@ -20,6 +50,7 @@ of ✗. The test asserts that agreement — 28/28, and 27/28 with exit 1 when a 
 
 Deferred with it: the same misattribution one layer down, where file presence cannot answer it —
 `bench-rc-seeded-tasks-cannot-report-non-delivery` in `BACKLOG.md`.
+
 
 ## bug030-pwa-rebuild — the meeting PWA builds from source again, and a failing build now says which kind of failure it is
 Completed: 2026-08-14

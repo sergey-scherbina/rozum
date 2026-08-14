@@ -642,10 +642,19 @@ Remaining:
     Measured: `webauthn-rs-core` depends on openssl unconditionally, so "webauthn on rustls" is a
     fork of someone else's crate, not a switch — `openssl/vendored` remains the escape hatch for
     anyone who wants the console on Windows. Spec: `docs/specs/ucc-optional.md`.
-  - [ ] windows-spawn-seams — the NEXT Windows blocker, found by removing the last one: with `ucc`
-    off, `cargo check --target x86_64-pc-windows-gnu` reaches 26 errors, all `std::os::unix` in the
-    process-spawn helpers (`coders.rs`, `spawn_support.rs`, `matrix.rs`). Same shape as
-    `windows-daemon-ipc`: put the platform bits behind a seam. Wants a Windows box to verify.
+  - [x] windows-spawn-seams — **DONE 2026-08-14 (compiles for Windows; never run there).** All of
+    it is behind `crates/rozum-gateway/src/procctl.rs`: own-process-group, pid/group liveness,
+    stop/suspend/resume, the executable-file test, parent pid, and replace-self. `cargo check
+    --workspace --no-default-features --target x86_64-pc-windows-gnu` is now **0 errors** — the
+    gateway's 26 plus two more the entry did not know about (`tokio::signal::unix` in the
+    participant pool). **The entry named three files and there were five**: `gateway.rs` and
+    `agents.rs` were missing, because the count came from the compiler and the file list came from
+    memory. Windows' Ctrl+Break replaces SIGTERM; SIGSTOP has no equivalent at all and the routes
+    now answer with a `why` instead of a bare `false`. `pid_alive` de-duplicated against
+    `rozum-core::share`. Spec: `docs/specs/windows-spawn-seams.md`.
+    - Runtime gaps that remain even with it compiling, and are NOT compile errors: terminal
+      sessions shell out to `tmux` and the matrix to `bash`, neither of which is on a Windows box.
+      Whoever takes `windows-service-install` should decide whether those get a seam or a refusal.
   - [ ] windows-service-install - Add a Windows arm to `src/service.rs` (today: launchd/systemd
     generation + `launchctl`/`systemctl`): install/uninstall a Windows Service (`sc.exe` / the
     `windows-service` crate) or a Task Scheduler entry. The module is already "pure generation +
