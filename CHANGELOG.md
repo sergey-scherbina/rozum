@@ -1,5 +1,27 @@
 # Changelog
 
+## windows-service-install — Windows was not missing a service arm, it was taking the wrong one
+Completed: 2026-08-14
+
+`rozum service install` and `rozum meetings install` split on `macos` / `not(macos)`, so Windows
+generated a **systemd** unit into `%APPDATA%`, wrote it, and then failed to spawn `systemctl`. It
+compiled and Windows CI was green — the wrongness was entirely in what it did.
+
+Task Scheduler and not `sc.exe`: both existing arms install a per-user thing, `sc.exe` installs a
+machine service under `LocalSystem`, and the SCM kills any binary that does not speak the service
+control protocol — an SCM entry point in the BINARY, not an arm in a file generator. What `sc.exe`
+would buy is written down instead of dismissed: a task only runs while someone is logged on.
+
+Two files, because task XML has no element for environment variables and all three services pass
+one; the generated `.cmd` sets them and appends both streams to the log the plist names. A double
+quote is refused rather than escaped — `cmd.exe` has no total escape and the failure mode is a
+service silently started with different arguments.
+
+Proven the cross-check compiles the arm rather than skipping it, by making it fail on purpose
+(E0425 on Windows, 0 on macOS). 14 generator tests, workspace `--lib` green. Nothing has run on
+Windows; the spec says which half is a claim. Also answers the question `windows-spawn-seams` handed
+over — tmux/bash get a refusal, filed as `windows-tmux-bash-refusal` with the reasoning.
+
 ## extract-shared-serving-helpers — closed by measurement, and the one real item was a divergence in the number the residency gate trusts
 Completed: 2026-08-14
 
@@ -35,6 +57,7 @@ refuse loads that fit — the mirror image of the bug above.
 Three tests: the real Qwen3.5-4B shape carrying BOTH spellings, a list-only config (the case that
 was wrong), and a list naming no full-attention layer at all — which falls through rather than
 reporting a model with no KV.
+
 
 ## windows-fs-locks — one rule for where this user's files are, and the variable Windows does not set
 Completed: 2026-08-14

@@ -655,10 +655,31 @@ Remaining:
     - Runtime gaps that remain even with it compiling, and are NOT compile errors: terminal
       sessions shell out to `tmux` and the matrix to `bash`, neither of which is on a Windows box.
       Whoever takes `windows-service-install` should decide whether those get a seam or a refusal.
-  - [ ] windows-service-install - Add a Windows arm to `src/service.rs` (today: launchd/systemd
-    generation + `launchctl`/`systemctl`): install/uninstall a Windows Service (`sc.exe` / the
-    `windows-service` crate) or a Task Scheduler entry. The module is already "pure generation +
-    invoke", so the arm slots in beside the existing two.
+      ANSWERED 2026-08-14: a refusal — `windows-tmux-bash-refusal` below carries the reasoning.
+  - [x] windows-service-install — **DONE 2026-08-14, and the entry understated it: there was not a
+    missing arm, there was a WRONG one.** The split was `macos` / `not(macos)`, so Windows took the
+    systemd path — `rozum service install` wrote a systemd unit into `%APPDATA%` and then failed to
+    spawn `systemctl`, after the file was already on disk. It compiled, and Windows CI was green,
+    because the wrongness was entirely in what it did. `not(macos)` is now `all(unix, not(macos))`.
+    Task Scheduler and not `sc.exe`: both existing arms install a PER-USER thing, `sc.exe` installs a
+    machine service under `LocalSystem`, and the SCM kills any binary that does not speak the service
+    control protocol — that is a change to the BINARY, not an arm in a file generator. The trade-off
+    is recorded rather than dismissed: a task runs only while someone is logged on. Two files,
+    because task XML has no element for environment variables and all three services pass one. A
+    double quote is REFUSED rather than escaped (`cmd.exe` has no total escape, and the failure mode
+    is a service silently started with different arguments). Proven the cross-check really compiles
+    the arm by making it fail on purpose. Spec: `docs/specs/windows-service-install.md`.
+  - [ ] windows-tmux-bash-refusal — **the decision is made; only the code is left.** Handed over
+    from `windows-spawn-seams`: terminal sessions shell out to `tmux`
+    (`crates/rozum-gateway/src/sessions.rs`) and the matrix to `bash` (`matrix.rs`), and neither is
+    on a Windows box. **A REFUSAL, NOT A SEAM.** Reimplementing a terminal multiplexer on ConPTY and
+    a 1000-line bash harness in Rust is a project of its own, and a seam that pretended to be one
+    would fail later and less clearly than a message saying so up front — the same reasoning that
+    made the SCM route wrong for the service. What is left: an early `#[cfg(windows)]` guard at each
+    entry point returning "terminal sessions need tmux, which does not exist on Windows" and the
+    matrix equivalent, instead of the OS's own "program not found" surfacing from four layers down.
+    **Done when:** both paths refuse with a sentence naming the missing tool and what it would take,
+    and nothing else on Windows changes.
   - [x] windows-fs-locks — **DONE 2026-08-14, and two thirds of what this entry asked for did not
     exist.** Measured before writing anything: every advisory lock in the workspace is already
     `std::fs::File::try_lock` (std, both platforms — no `fs2`/`fd-lock` needed, and the code around
