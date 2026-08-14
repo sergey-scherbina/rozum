@@ -144,10 +144,10 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   - **`repeat_penalty` has the opposite problem** — an internal knob **no dialect can set**, which
     is exactly the shape `seed` had before BUG-032. Either give it a wire path or write down that it
     is engine-internal, so the next person does not find a third dead field.
-  - **structured output on `/v1/responses`** — `/v1/chat/completions` honours `response_format`
-    (→ `response_schema`, constrained decode); the Responses API's own `text.format` json_schema is
-    not parsed, so the SAME capability works on one OpenAI dialect and silently not on the other.
-    Closest to a real bug of the remaining set.
+  - **structured output on `/v1/responses`** — **DONE 2026-08-14 as BUG-034.** It was the closest to
+    a real bug of the set, and it was one: `text.format` was unparsed while Chat's `response_format`
+    worked, so the same capability existed on one OpenAI dialect and not the other. One parser now
+    reads either nesting.
   - **Anthropic `thinking`** — `{type: enabled, budget_tokens}` is unparsed; `SamplingParams` has
     `reasoning_effort`, so there is somewhere for it to go. Worth checking whether Claude Code sends
     it before wiring anything.

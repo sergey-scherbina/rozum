@@ -1,6 +1,0 @@
-feature/responses-structured-output 2026-08-14T18:00:30Z
-agent: nadia-ucc
-heartbeat: 2026-08-14T18:00:30Z
-status: not-started
-done-so-far:
-next: verify the gap in code first (parse_response_format shape vs Responses text.format), then wire + golden case

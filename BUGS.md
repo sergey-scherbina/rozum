@@ -5,6 +5,51 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-035 — the `nadia` gate tests race on a process-wide env var, so the workspace suite is flaky
+
+- **Status:** OPEN, filed 2026-08-14 (found by it failing once during an unrelated change, then
+  measured on untouched master).
+- **Severity:** P2, and the severity is about TRUST rather than function: a suite that fails ~8% of
+  runs makes every "workspace green" claim unreliable, including the ones in this file.
+
+`gate::tests` sets `ROZUM_GATE_OWNER` (and `NADIA_VERIFY`, `NADIA_VERIFY_ROUNDS`) with
+`std::env::set_var` and removes it a few lines later. cargo runs the tests of one crate as THREADS
+in one process, so any test scheduled inside that window sees the variable set.
+`a_report_never_implies_a_pass_it_does_not_have` reads it through `Report::summary()` → `owner()` and
+gets `⤳ проверку выполняет rozum-launch` where it asserts `не проверено`.
+
+**Measured, not inferred:** `cargo test -p nadia --lib gate:: -- --test-threads=16`, 25 runs on
+`origin/master` with no local changes → **2 failures**. A plain `-p nadia --lib` run passed 8/8,
+which is exactly why this survived: it only shows under load or with more threads, and it is
+invisible in the single-test form anyone reaches for when checking.
+
+**The fix already exists in this repo, twice.** `rozum-core` serialises the same hazard with a
+`POISON_ENV_LOCK` static, and `src/doctor.rs` carries a comment about the identical mistake — "I
+wrote 'no other test in this crate reads XDG_STATE_HOME' instead of checking, and shipped a suite
+that passed alone". The gate tests need the same lock, held across set → assert → restore.
+
+## BUG-034 — structured output worked on one OpenAI dialect and silently did nothing on the other
+
+- **Status:** FIXED 2026-08-14 (`RespReq.text` declared; `parse_text_format` reads `text.format`;
+  the nesting difference handled once in `parse_format_object`).
+- **Severity:** P2 — a constrained-decode request answered with unconstrained output and a 200. The
+  client gets prose where it asked for schema-conforming JSON and finds out by failing to parse it.
+
+`/v1/chat/completions` honours `response_format` → `SamplingParams.response_schema` → constrained
+decode (`docs/specs/constrained-tool-decoding.md`). The Responses API spells the same capability
+`text: { format: { type: "json_schema", schema: … } }`, and `RespReq` did not declare `text` at all,
+so it was dropped by serde like every other undeclared field.
+
+The two shapes differ by exactly one level of nesting — Chat wraps the schema in `json_schema`,
+Responses puts it inline — and the type names (`json_schema` / `json_object` / `text`) are identical.
+So the fix is not a second parser: `parse_format_object` now reads either nesting, and each dialect
+says only where its format object lives.
+
+**The dangerous direction is the default, and it is tested.** `{"type": "text"}` is what a Responses
+client sends when it wants prose, and reading that as "constrain to JSON" would break every ordinary
+request on the endpoint codex drives. `text`, an unknown type, and an absent field all parse to
+`None` — unconstrained — with a test naming each case.
+
 ## BUG-033 — `/v1/chat/completions` streaming reports no token usage at all, and `stream_options` is not parsed
 
 - **Status:** OPEN, filed 2026-08-14 during the wire-parameter sweep the operator asked for.
