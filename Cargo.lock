@@ -3812,6 +3812,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "landlock",
  "regex",
  "rozum-agent",
  "rozum-core",

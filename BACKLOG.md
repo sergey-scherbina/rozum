@@ -169,7 +169,11 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   no log line here. Both fixed bugs were found by putting the three dialects' parsed requests side by
   side in one file, not by reading any one of them.
 
-- [ ] **nadia-linux-confinement** — nadia's exec sandbox is macOS-only. The mechanism is
+- [x] **nadia-linux-confinement — DONE 2026-08-15 (Landlock).** Writes confined to root/CARGO_HOME/
+  TMPDIR//dev sinks, `no_new_privs`, best-effort ABI; degrades LOUDLY when the kernel has no
+  Landlock, and the child fails closed if a built ruleset then enforces nothing. The deletion test
+  is un-gated so CI proves it on Linux. The old entry, for the reasoning:
+- [~] **nadia-linux-confinement (original)** — nadia's exec sandbox was macOS-only. The mechanism is
   `sandbox-exec` (seatbelt), so `confine` defaults to false everywhere else and an agent on Linux
   runs unconfined in its workspace: BUG-017 ("the jail let the agent delete its own workspace") is
   unfixed there. Surfaced while attributing BUG-044's red CI. `exec` now says so once on stderr

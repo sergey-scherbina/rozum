@@ -60,7 +60,8 @@ impl Sandbox {
         Ok(Self {
             root,
             allow_net: false,
-            confine: cfg!(target_os = "macos"),
+            // On by default wherever a mechanism exists: seatbelt on macOS, Landlock on Linux.
+            confine: cfg!(any(target_os = "macos", target_os = "linux")),
             timeout: Duration::from_secs(120),
         })
     }
@@ -141,13 +142,14 @@ impl Sandbox {
         // Say it once when confinement was wanted and this platform has none. `exec` runs per
         // command, so this is a one-time notice rather than a line per invocation — but it is not
         // silent, because "the sandbox is on" and "the sandbox exists here" are different claims
-        // and the second one is false everywhere except macOS (BUG-044).
-        if self.confine && !cfg!(target_os = "macos") {
+        // (BUG-044). Linux has its own mechanism now (Landlock, below); anything else does not.
+        if self.confine && !cfg!(any(target_os = "macos", target_os = "linux")) {
             static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
                     "nadia: sandbox confinement was requested but this platform has none \
-                     (seatbelt is macOS-only) — commands run UNCONFINED in {}",
+                     (seatbelt is macOS-only, Landlock is Linux-only) — commands run UNCONFINED \
+                     in {}",
                     self.root.display()
                 );
             }
@@ -165,6 +167,10 @@ impl Sandbox {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(target_os = "linux")]
+        if self.confine {
+            self.restrict_child_with_landlock(&mut cmd);
+        }
 
         let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
         let deadline = Instant::now() + timeout;
@@ -207,6 +213,94 @@ impl Sandbox {
     /// Deleting files inside is ordinary work and stays allowed; deleting the workspace is
     /// not work, and everything downstream of it — the check, the file list, the report —
     /// becomes meaningless the moment it happens.
+    /// The Linux half of the same policy, through Landlock — writes confined, reads free.
+    ///
+    /// Mirrors [`Self::seatbelt_profile`] deliberately, because two sandboxes that differ by
+    /// accident are worse than one: writes are allowed under the workspace root, `CARGO_HOME`,
+    /// `TMPDIR`, and the three `/dev` sinks a shell needs; everything else is read-only.
+    ///
+    /// **The root itself cannot be removed, and that falls out of the design rather than needing
+    /// its own rule.** Landlock grants rights on a path and everything BENEATH it, so `rm -rf
+    /// <root>` deletes the contents and then fails on the final `rmdir(root)` — removing a
+    /// directory needs the right on its PARENT, which is not granted. That is exactly the
+    /// `(deny file-write-unlink (literal root))` line of the seatbelt profile, obtained for free.
+    ///
+    /// **Degrades LOUDLY.** Landlock needs kernel ≥ 5.13, and a container may forbid it; when the
+    /// ruleset cannot be built or applied, the command runs UNCONFINED and says so once, rather
+    /// than pretending. `BestEffort` compatibility means an older ABI enforces the subset it has —
+    /// which is why the notice reports what was actually enforced, not what was asked for.
+    #[cfg(target_os = "linux")]
+    fn restrict_child_with_landlock(&self, cmd: &mut Command) {
+        use landlock::{
+            ABI, Access, AccessFs, PathBeneath, PathFd, RulesetAttr, RulesetCreatedAttr,
+            RulesetStatus, Ruleset,
+        };
+        use std::os::unix::process::CommandExt;
+
+        let abi = ABI::V1;
+        let write = AccessFs::from_write(abi) | AccessFs::from_read(abi);
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+        let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let cargo_home = std::env::var("CARGO_HOME").unwrap_or_else(|_| format!("{home}/.cargo"));
+        let writable = [
+            self.root.display().to_string(),
+            cargo_home,
+            tmp,
+            "/dev/null".into(),
+            "/dev/stdout".into(),
+            "/dev/stderr".into(),
+        ];
+
+        // Built HERE, in the parent, on purpose: `pre_exec` runs between fork and exec, where
+        // allocating can deadlock on another thread's malloc lock. Everything below the closure
+        // is prepared now; the child only performs the syscall.
+        let ruleset = Ruleset::default()
+            .handle_access(AccessFs::from_all(abi))
+            .and_then(|r| r.create())
+            .and_then(|r| {
+                let mut r = r.no_new_privs(true);
+                for p in writable.iter() {
+                    if let Ok(fd) = PathFd::new(p) {
+                        r = r.add_rule(PathBeneath::new(fd, write))?;
+                    }
+                    // A path that does not exist is skipped rather than fatal: `/dev/stdout` is
+                    // absent in some containers, and refusing to confine at all because of it
+                    // would trade the whole sandbox for one missing sink.
+                }
+                Ok(r)
+            });
+
+        let ruleset = match ruleset {
+            Ok(r) => r,
+            Err(e) => {
+                Self::say_unconfined_once(&format!("ruleset: {e}"));
+                return;
+            }
+        };
+
+        unsafe {
+            cmd.pre_exec(move || {
+                // Syscall only — no allocation on the success path.
+                match ruleset.try_clone()?.restrict_self() {
+                    Ok(s) if s.ruleset == RulesetStatus::NotEnforced => Err(std::io::Error::other(
+                        "landlock: not enforced by this kernel",
+                    )),
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(std::io::Error::other(format!("landlock: {e}"))),
+                }
+            });
+        }
+    }
+
+    /// One line, once per process, when confinement was wanted and could not be applied.
+    #[cfg(target_os = "linux")]
+    fn say_unconfined_once(why: &str) {
+        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("nadia: Landlock unavailable ({why}) — commands run UNCONFINED");
+        }
+    }
+
     fn seatbelt_profile(&self) -> String {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".into());
         let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
@@ -296,22 +390,23 @@ mod tests {
         assert!(!std::path::Path::new("/tmp/nadia-should-not-exist.txt").exists());
     }
 
-    /// macOS ONLY, and the reason is a gap rather than a test artifact: exec confinement is
-    /// `sandbox-exec` (seatbelt), which exists on no other platform, so `confine` defaults to
-    /// false off macOS and this property is simply not true there. Ungated, this test asserted
-    /// a guarantee the platform does not make and kept the Linux CI job red from before
-    /// 2026-08-14 — and a permanently red job is one nobody reads, which is how two REAL
-    /// breakages went unnoticed the same day (BUG-043).
-    ///
-    /// The gap itself is `nadia-linux-confinement` in `BACKLOG.md`; on Linux an agent can still
-    /// delete its own workspace, which is BUG-017 unfixed there.
-    #[cfg(target_os = "macos")]
+    /// Runs on macOS **and Linux**, and the un-gating is the point: this test was gated to macOS
+    /// on 2026-08-15 because Linux had no confinement, and gating it was honest only for as long
+    /// as the gap was named. Now Landlock enforces the same policy there, so the assertion is the
+    /// proof — and on Linux it is proof produced by CI, which is the only machine here that runs
+    /// that kernel. A guarantee nobody can check is not a guarantee.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn the_agent_cannot_delete_its_own_workspace() {
         // Measured 2026-08-04: `(subpath root)` covers the directory node itself, so an agent
         // told to reorganize a project ran `rm -rf` over its own root and succeeded. Everything
         // after that is nonsense — the acceptance check reports "verify command failed to run"
         // because there is no directory to run it in, and the work is simply gone.
+        //
+        // The two platforms refuse it for different reasons and both are deliberate: seatbelt has
+        // an explicit `(deny file-write-unlink (literal root))`, while Landlock grants rights
+        // BENEATH a path, so removing the root itself needs a right on its parent that is never
+        // granted. Same guarantee, arrived at from opposite directions.
         let (d, s) = sb();
         let root = d.path().to_path_buf();
         std::fs::write(root.join("keep.txt"), "x").unwrap();
