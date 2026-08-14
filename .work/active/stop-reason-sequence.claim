@@ -1,0 +1,6 @@
+feature/stop-reason-sequence 2026-08-14T19:12:55Z
+agent: nadia-ucc
+heartbeat: 2026-08-14T19:12:55Z
+status: not-started
+done-so-far:
+next: measure the enum first — derives (Copy?) and how many of the 83 matches are non-exhaustive
