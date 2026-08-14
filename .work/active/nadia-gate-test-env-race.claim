@@ -1,6 +1,0 @@
-feature/nadia-gate-test-env-race 2026-08-14T18:05:38Z
-agent: nadia-ucc
-heartbeat: 2026-08-14T18:05:38Z
-status: not-started
-done-so-far:
-next: BUG-035 — one env lock across the gate tests, then re-measure the 25-run loop

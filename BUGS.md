@@ -7,8 +7,10 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ## BUG-035 — the `nadia` gate tests race on a process-wide env var, so the workspace suite is flaky
 
-- **Status:** OPEN, filed 2026-08-14 (found by it failing once during an unrelated change, then
-  measured on untouched master).
+- **Status:** FIXED 2026-08-14 — one `GATE_ENV_LOCK` across every test that touches those
+  variables, and the reader test now ESTABLISHES the precondition it used to assume. After:
+  **0 failures in 30 runs** of the same command that gave 2/25 before. Thirty clean runs do not
+  prove a race gone — but the mechanism is closed, and the measurement is the same one, unchanged.
 - **Severity:** P2, and the severity is about TRUST rather than function: a suite that fails ~8% of
   runs makes every "workspace green" claim unreliable, including the ones in this file.
 
@@ -23,10 +25,23 @@ gets `⤳ проверку выполняет rozum-launch` where it asserts `н
 which is exactly why this survived: it only shows under load or with more threads, and it is
 invisible in the single-test form anyone reaches for when checking.
 
-**The fix already exists in this repo, twice.** `rozum-core` serialises the same hazard with a
+**The fix already existed in this repo, twice.** `rozum-core` serialises the same hazard with a
 `POISON_ENV_LOCK` static, and `src/doctor.rs` carries a comment about the identical mistake — "I
 wrote 'no other test in this crate reads XDG_STATE_HOME' instead of checking, and shipped a suite
-that passed alone". The gate tests need the same lock, held across set → assert → restore.
+that passed alone". The gate tests now have the same lock.
+
+**What the earlier attempt missed, and why it matters more than the flake.** Someone had already hit
+this and fixed it by MERGING the racing tests into one, with a comment saying so
+(`who_owns_the_gate_for_this_run`). That caught the tests which obviously WRITE the variables and
+missed the one that only READS them, indirectly, through `Report::summary()` → `owner()`. Merging
+also does not scale: it ends with one enormous test and no names. A lock covers readers, and a new
+test only has to take it.
+
+**A second defect fell out, and it was never a race at all.** The reader test ASSUMED no outer gate
+instead of establishing one, so it failed for anyone with `ROZUM_GATE_OWNER` exported in their
+shell — deterministically, not occasionally. Proven both ways:
+`ROZUM_GATE_OWNER=rozum-launch cargo test -p nadia --lib a_report_never` fails on master and passes
+here.
 
 ## BUG-034 — structured output worked on one OpenAI dialect and silently did nothing on the other
 
