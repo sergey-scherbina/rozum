@@ -1,0 +1,11 @@
+feature/bug030-pwa-rebuild 2026-08-14T07:17:16Z
+agent: claude-opus-5
+heartbeat: 2026-08-14T07:17:16Z
+status: in-progress
+done-so-far: measured the state BUG-030 was left in. The char fix IS in scalascript main
+  (2315f2ecf, my branch rebased and landed), but their SHARED staged toolchain is stale
+  (bin/lib/.build-digest 18a017d4 vs computed 7bcfe032) — so the PWA build still dies with the
+  SAME error today: `the trait bound &char: SscToInt is not satisfied` at meeting.rs:261, from
+  hashStr in clients/meeting/meeting.ssc:257. Measured, not assumed.
+next: build a toolchain from THEIR origin/main in my own detached worktree (never rebuild the
+  shared one — siblings measure against it) and prove the PWA builds from source again.
