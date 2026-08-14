@@ -1,0 +1,7 @@
+feature/nadia-linux-confinement-impl 2026-08-14T23:17:30Z
+agent: nadia-ucc
+heartbeat: 2026-08-14T23:17:30Z
+status: not-started
+note: verification path — implement Landlock, UN-GATE the deletion test on Linux, let the Linux CI job prove it.
+done-so-far:
+next: mirror the seatbelt policy (writes: root+cargo+tmp+/dev/{null,stdout,stderr}; root itself unremovable) via Landlock in pre_exec
