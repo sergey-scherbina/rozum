@@ -1,0 +1,6 @@
+feature/windows-fs-locks 2026-08-14T08:40:25Z
+agent: nadia-ucc
+heartbeat: 2026-08-14T08:40:25Z
+status: not-started
+done-so-far:
+next: the entry is stale — locks are already std::fs::File::try_lock; measure what actually remains
