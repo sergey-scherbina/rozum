@@ -1266,6 +1266,12 @@ pub async fn serve_on(
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
+/// The frozen bytes of all three dialects — the gate `plugin-wireprotocol` is judged by.
+/// Its own file because it carries a data file beside it, not because it is a separate subject.
+#[cfg(test)]
+#[path = "wire_golden_tests.rs"]
+mod wire_golden;
+
 #[cfg(test)]
 mod tests {
     use super::*;
