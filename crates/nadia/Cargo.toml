@@ -32,6 +32,7 @@ regex = "1"
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
+rozum-confine = { version = "0.1.0", path = "../rozum-confine" }
 
 [dev-dependencies]
 tempfile = "3"

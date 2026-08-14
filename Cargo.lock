@@ -3815,6 +3815,7 @@ dependencies = [
  "landlock",
  "regex",
  "rozum-agent",
+ "rozum-confine",
  "rozum-core",
  "rozum-gateway",
  "rozum-paths",
@@ -5253,6 +5254,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rozum-confine"
+version = "0.1.0"
+dependencies = [
+ "landlock",
+]
+
+[[package]]
 name = "rozum-core"
 version = "0.1.0"
 dependencies = [
@@ -5345,6 +5353,7 @@ dependencies = [
  "ratatui",
  "reqwest 0.12.28",
  "rmcp",
+ "rozum-confine",
  "rozum-paths",
  "schemars 1.2.1",
  "serde",

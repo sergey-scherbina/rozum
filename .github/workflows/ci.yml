@@ -44,14 +44,17 @@ jobs:
       - name: Build every binary (shipped default features)
         run: cargo build --workspace --bins
       - name: Test every workspace library (shipped default features)
-        run: cargo test --workspace --lib
+        # `--no-fail-fast`: cargo stops at the first failing test BINARY, so one broken crate
+        # hides every failure behind it. Measured 2026-08-15 — fixing one Linux failure revealed
+        # three more that had been masked for days, discovered one CI round at a time.
+        run: cargo test --workspace --lib --no-fail-fast
       # `--bins` is the same lesson one level up. `--lib` builds and runs library suites only, so
       # every `#[cfg(test)]` inside a BINARY was invisible here — 64 tests across the workspace's
       # bins, including the whole `rozum-gateway` bin suite, ran on nobody's machine but the author's.
       # Verified green across the workspace before this line was added, so it fails on a regression
       # rather than on a backlog.
       - name: Test every workspace binary (shipped default features)
-        run: cargo test --workspace --bins
+        run: cargo test --workspace --bins --no-fail-fast
       # The bench harness is shell, so no cargo gate ever saw it — and its structured exit codes are
       # the vocabulary every board entry argues in ("0 rc11", "rc=10 so it is the model"). This runs
       # the classification against real directories, and asserts that the console and both
@@ -80,7 +83,7 @@ jobs:
       - name: Build every binary (--no-default-features)
         run: cargo build --workspace --no-default-features --bins
       - name: Test every workspace library (--no-default-features)
-        run: cargo test --workspace --no-default-features --lib
+        run: cargo test --workspace --no-default-features --lib --no-fail-fast
 
   windows-core:
     name: windows — portable core (no native backends)
@@ -107,7 +110,7 @@ jobs:
         run: cargo build --no-default-features -p rozum-cli --bin rozum
       - name: Test the declared portable-core packages
         run: >-
-          cargo test --no-default-features --lib
+          cargo test --no-default-features --lib --no-fail-fast
           -p rozum-core
           -p rozum-models
           -p rozum-agent

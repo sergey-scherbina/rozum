@@ -85,8 +85,29 @@ pub async fn shutdown_signal() {
 pub fn endpoint_identity(path: &Path) -> Option<u64> {
     #[cfg(unix)]
     {
+        use std::hash::{Hash, Hasher};
         use std::os::unix::fs::MetadataExt;
-        std::fs::metadata(path).ok().map(|m| m.ino())
+        // Device + inode + creation time, folded into one number — NOT the inode alone.
+        //
+        // Linux reuses inode numbers immediately: remove a socket and bind a successor in the same
+        // directory and the new one very often lands on the same `ino`, so a wedged owner asking
+        // "is the socket still mine?" would be told yes about someone else's. macOS does not reuse
+        // that eagerly, which is why the inode-only version passed here for months and failed the
+        // first time CI ran it on Linux. `ctime` moves on every (re)creation, so the pair
+        // distinguishes a successor from ourselves even when the number comes round again.
+        //
+        // The trade, stated: `ctime` also moves if someone chmods or links the socket while we own
+        // it, which would read as "not ours" — a false negative. Nobody chmods a bound socket, and
+        // the failure it would cause (an owner concluding it lost the path) is the safe direction:
+        // the dangerous one is a wedged owner believing it still serves clients who left.
+        std::fs::metadata(path).ok().map(|m| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            m.dev().hash(&mut h);
+            m.ino().hash(&mut h);
+            m.ctime().hash(&mut h);
+            m.ctime_nsec().hash(&mut h);
+            h.finish()
+        })
     }
     #[cfg(windows)]
     {

@@ -1,0 +1,16 @@
+[package]
+name = "rozum-confine"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# The write-confinement policy, in ONE place. Two consumers today — nadia's `exec` and the meeting
+# assistant's in-chat shell — and they used to be two sandboxes that differed by accident: one ran
+# UNCONFINED off macOS, the other REFUSED to run at all. A policy worth having is worth having once.
+#
+# No dependencies off Linux: seatbelt is a profile string the caller passes to `sandbox-exec`, while
+# Landlock is syscalls and needs the binding crate.
+[dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"

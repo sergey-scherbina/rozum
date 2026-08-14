@@ -283,20 +283,51 @@ impl Sandbox {
         // delete anything outside the root, and cannot use the network. Reads stay
         // open (restricting them aborts dyld's shared-cache mapping). HOME + TMPDIR
         // are redirected into the sandbox so tool dotfiles/tempfiles stay inside.
-        if !Path::new(SANDBOX_EXEC).exists() {
-            return format!("error: shell confinement unavailable ({SANDBOX_EXEC} missing)");
-        }
         let tmp = self.root.join(".tmp");
         if let Err(e) = std::fs::create_dir_all(&tmp) {
             return format!("error: cannot prepare shell tempdir: {e}");
         }
-        let profile = seatbelt_profile(&self.root, self.allow_network);
-        let child = Command::new(SANDBOX_EXEC)
-            .arg("-p")
-            .arg(&profile)
-            .arg("/bin/sh")
-            .arg("-c")
-            .arg(command)
+        // macOS wraps the shell in seatbelt; Linux applies Landlock to it (`rozum_confine`).
+        // Anywhere else there is no mechanism and the shell still REFUSES to run — an in-chat
+        // shell that quietly loses its sandbox is the one thing this tool must never be.
+        let mut child = if cfg!(target_os = "macos") {
+            if !Path::new(SANDBOX_EXEC).exists() {
+                return format!("error: shell confinement unavailable ({SANDBOX_EXEC} missing)");
+            }
+            let profile = seatbelt_profile(&self.root, self.allow_network);
+            let mut c = Command::new(SANDBOX_EXEC);
+            c.arg("-p").arg(&profile).arg("/bin/sh").arg("-c").arg(command);
+            c
+        } else if cfg!(target_os = "linux") {
+            // The POLICY is this tool's own and deliberately tighter than nadia's: writes only
+            // under the sandbox root (HOME and TMPDIR are redirected into it below), plus the
+            // `/dev` sinks a shell needs. Network confinement is NOT covered — Landlock's network
+            // rules need ABI v4 and only bound TCP, so `allow_network` stays a macOS guarantee and
+            // says so rather than pretending.
+            let mut std_cmd = std::process::Command::new("/bin/sh");
+            std_cmd.arg("-c").arg(command);
+            let dev_null = std::path::PathBuf::from("/dev/null");
+            let dev_tty = std::path::PathBuf::from("/dev/tty");
+            let dev_out = std::path::PathBuf::from("/dev/stdout");
+            let dev_err = std::path::PathBuf::from("/dev/stderr");
+            let writable: Vec<&Path> = vec![
+                self.root.as_path(),
+                &dev_null,
+                &dev_tty,
+                &dev_out,
+                &dev_err,
+            ];
+            match rozum_confine::confine_child(&mut std_cmd, &writable) {
+                rozum_confine::Outcome::Applied => {}
+                other => {
+                    return format!("error: shell confinement unavailable ({other:?})");
+                }
+            }
+            Command::from(std_cmd)
+        } else {
+            return "error: shell confinement unavailable (no mechanism on this platform)".into();
+        };
+        let child = child
             .current_dir(&self.root)
             .env("HOME", &self.root)
             .env("TMPDIR", &tmp)

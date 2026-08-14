@@ -5,6 +5,41 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-045 — one Linux failure hid three more, because cargo stops at the first failing test binary
+
+- **Status:** FIXED 2026-08-15 — all four causes repaired, and CI now runs its suites with
+  `--no-fail-fast` so the next set arrives in ONE round instead of four.
+- **Severity:** P2. Not the individual failures — the discovery loop. Each fix revealed the next
+  only after a full CI round, which is how a job stays red long enough for people to stop reading it
+  (BUG-043).
+
+Fixing BUG-044 turned the Linux job from one failure to **three**, none of them new: `cargo test`
+stops at the first failing test BINARY, so `nadia`'s failure had been hiding everything behind it
+for days. What came out:
+
+**1. `meeting::daemon::a_rebound_path_is_not_our_socket_any_more` — a real defect, not a test
+artifact.** Socket identity was the inode number alone, and **Linux reuses inode numbers
+immediately**: remove a socket, bind a successor in the same directory, and the new one very often
+lands on the same `ino`. A wedged owner asking "is the socket still mine?" was answered YES about
+someone else's socket. macOS does not reuse that eagerly, which is why an inode-only identity passed
+here for months and failed the first time it met Linux. Identity is now device + inode + ctime,
+folded into one number. The trade is stated in the code: `ctime` also moves if someone chmods the
+socket, which would read as "not ours" — a false negative, and the safe direction, since the
+dangerous one is a wedged owner believing it still serves clients who left.
+
+**2–3. Two `sandbox_tools` tests** — the meeting assistant's in-chat shell REFUSED to run off macOS
+(`error: shell confinement unavailable`), the mirror image of nadia's old silent unconfined run.
+Both are fixed by `crates/rozum-confine`, and what that crate does NOT do is the part worth reading.
+
+**The mechanism is shared; the policies are not, and that is deliberate.** I nearly folded the two
+seatbelt profiles into one list before noticing they differ on purpose: nadia's is `(allow default)`
+with writes denied and re-allowed under the workspace, `CARGO_HOME` and `TMPDIR`, because a coding
+agent runs `cargo`; the assistant's is `(deny default)` with writes only under its root, because an
+in-chat shell should reach less. Unifying them would have been a silent policy change for whichever
+one lost — the same mistake as forcing one abstraction over two genuinely different things, in a
+different costume. So `rozum-confine` applies a Landlock ruleset to a child and each caller passes
+its own paths.
+
 ## BUG-044 — `nadia`'s sandbox test fails on Linux, and has since before 2026-08-14
 
 - **Status:** FIXED 2026-08-15 — the TEST was wrong, and the gap it stumbled over is now named
