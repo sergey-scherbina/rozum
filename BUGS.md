@@ -1,5 +1,39 @@
 # Bugs
 
+## BUG-052 — idle-exit fires before idle-unload, so a supervised gateway reloads its model every 15 minutes instead of releasing it
+
+- **Status:** FIXED 2026-08-16 (`gateway.rs`: `idle_exit_after` — a gateway that can reload does not
+  idle-exit). Surfaced by BUG-051's fix, not caused by it: both timers were unreachable before.
+- **Severity:** P2. The model's RAM is never actually released, and a full load is paid every
+  quarter of an hour on an idle machine.
+
+`idle_secs` defaults to **900** (`ROZUM_GATEWAY_IDLE_SECS`, set by the daemon path unconditionally);
+`ROZUM_GATEWAY_UNLOAD_IDLE_SECS` on the durable job is **1200**. The smaller wins, so the unload
+branch was dead code on this machine — the process exits instead, and `KeepAlive` returns it within
+seconds, whereupon it eagerly reloads the weights because the job carries `--model`.
+
+**Observed, on the live job, minutes after BUG-051 landed:**
+
+```
+gateway_exit {"reason": "idle", "idle_secs": 900}
+uptime 870 → 26          (KeepAlive restarted it, model loaded again)
+```
+
+That log line is also BUG-051's proof: the idle clock reached 900 for the first time, which it could
+not do while the doctor's probe reset it every 300 s.
+
+**Why the fix is "do not exit" rather than "exit later".** For a gateway that CAN reload, exiting is
+strictly worse than unloading in every case: unload frees the model and keeps the daemon for a lazy
+reload, exit frees the same RAM and then hands it straight back under a supervisor. Making the exit
+threshold larger would only lengthen the cycle, not remove it. Idle-exit stays exactly where it is
+still the only lever: a gateway with no builder (nothing to reload with), and one whose unload is
+switched off — `ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0`, which is what the bench harness sets so its
+per-run gateways still go away. `launch_managed` is untouched; an agent-spawned gateway exits on
+`clients_gone`, which is the right trigger for it.
+
+The decision is a pure function so it is testable without a running gateway: three cases, including
+the bench's.
+
 ## BUG-051 — the health check kept the model resident forever, so idle-unload could never fire
 
 - **Status:** FIXED 2026-08-15 (`gateway.rs`: `last_active` is bumped only for requests that USE the

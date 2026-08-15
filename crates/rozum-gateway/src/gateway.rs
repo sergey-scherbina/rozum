@@ -1161,6 +1161,28 @@ async fn auth_layer(
 /// A DENY-LIST, and the direction of the error is the whole argument. Miss a probe here and the
 /// model stays resident — today's behaviour, recoverable. An allow-list of inference paths would
 /// fail the other way: a new endpoint nobody added to it would let the model unload UNDER A LIVE
+/// How long before a gateway EXITS on idle — and `None` when it should unload its model instead.
+///
+/// BUG-052. Both timers existed and neither could be reached: the doctor's health probe reset the
+/// idle clock every 300 s (BUG-051). With that fixed the clock finally advanced, and the wrong one
+/// won — idle-EXIT defaults to 900 s while idle-UNLOAD is 1200, so the model was never unloaded.
+/// Observed on the durable job: `gateway_exit {reason: idle, idle_secs: 900}`, then uptime 870 → 26
+/// as `KeepAlive` brought the process straight back and it eagerly reloaded the weights. The RAM is
+/// not freed for any useful length of time and a full load is paid every fifteen minutes.
+///
+/// So: **a gateway that can reload does not idle-exit.** Exiting is strictly worse than unloading
+/// for it — unload frees the model and keeps the daemon for a lazy reload, while exit frees the
+/// same RAM and then, under a supervisor, gives it straight back. Idle-exit stays for a gateway
+/// that CANNOT reload, where there is nothing to keep the daemon around for, and for one whose
+/// unload is switched off (`ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0` — what the bench harness sets, so its
+/// per-run gateways still go away).
+///
+/// `launch_managed` is untouched: an agent-spawned gateway exits on `clients_gone`, which is a
+/// different trigger and the right one for it.
+fn idle_exit_after(cfg_idle: Option<u64>, unload_on_idle: bool) -> Option<u64> {
+    cfg_idle.filter(|&s| s > 0).filter(|_| !unload_on_idle)
+}
+
 /// CLIENT, mid-conversation. Cheap wrong beats expensive wrong.
 fn is_liveness_probe(path: &str) -> bool {
     matches!(
@@ -1275,9 +1297,9 @@ pub async fn serve_on(
     //      `unload_secs`: drop just the model's RAM, keep the daemon for lazy
     //      reload. A `--dedicated` gateway has no builder, so unload is guarded
     //      off. Spec: `docs/specs/model-unload-on-idle.md`.
-    let idle_exit = cfg.idle_secs.filter(|&s| s > 0);
     let unload_after = unload_idle_secs();
     let unload_on_idle = unload_after > 0 && state.sb.can_reload();
+    let idle_exit = idle_exit_after(cfg.idle_secs, unload_on_idle);
     // Daemons spawned by `rozum launch` are launch-managed: shut down once the
     // last client lease drops, even if a lease was never observed (a short
     // startup grace lets the launch register its first lease).
@@ -1592,6 +1614,25 @@ mod tests {
         // A request without it stays unconstrained, which is what every client that sends no schema
         // has always got.
         assert_eq!(parse_text_format(&Value::Null), None);
+    }
+
+    #[test]
+    fn a_reloadable_gateway_unloads_instead_of_exiting() {
+        // The durable job: idle-exit 900 (the default), idle-unload 1200, a builder present. Before
+        // BUG-052 the 900 won and the model was never unloaded — the process exited and KeepAlive
+        // reloaded it seconds later, paying a full load every quarter of an hour for no RAM saved.
+        assert_eq!(idle_exit_after(Some(900), true), None);
+    }
+
+    #[test]
+    fn idle_exit_survives_where_there_is_nothing_to_reload_with() {
+        // No builder, or unload switched off: the daemon has no way to come back cheaply, so
+        // exiting is the only way to release anything. `ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0` is what
+        // the bench harness sets, and its per-run gateways must still go away.
+        assert_eq!(idle_exit_after(Some(900), false), Some(900));
+        // And an explicit "never idle-exit" stays never, either way.
+        assert_eq!(idle_exit_after(None, false), None);
+        assert_eq!(idle_exit_after(Some(0), false), None);
     }
 
     #[test]
