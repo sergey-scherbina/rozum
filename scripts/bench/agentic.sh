@@ -297,6 +297,36 @@ agent_gateway_mismatch() {
   echo ""
 }
 
+# Copy a cell's evidence out of the temp workdir before it is deleted.
+#
+# A red used to leave NOTHING: `rm -rf "$work"` takes the program the model wrote, the stream-json
+# transcript and the sample dump with it, and in shared mode `$OUT/runs/` was never written to at
+# all — so the footer's "CSV + per-run logs" pointed at an empty directory. The cost is measured,
+# not theoretical: HISTORY.md 2026-08-04 records a conclusion ("the gate repaired it") that had to
+# be withdrawn because the log was gone, and on 2026-08-15 an `rpn` cell failed printing 20 for
+# `3 4 + 5 *` and the program that printed it could not be read afterwards. A row saying `pass=0`
+# with no artifact cannot distinguish a model that wrote bad arithmetic from a harness that
+# delivered a broken file — which is the single most important distinction this bench makes.
+#
+# `target/` is excluded deliberately: it is 10–100× the rest, and it is exactly the part that
+# rebuilds from what is kept. The whole of one failed cell is a few hundred KB.
+#
+# $1 = workdir, $2 = destination root ($OUT/runs), $3 = cell label. Echoes the directory it wrote.
+# Never overwrites: repetitions (REPS>1) land beside each other, since the pass/fail SPLIT across
+# reps is the thing worth reading.
+preserve_cell() {
+  local work="$1" dest_root="$2" label="$3" dest i=2
+  [ -d "$work" ] || return 0
+  mkdir -p "$dest_root" || return 0
+  dest="$dest_root/$label"
+  while [ -e "$dest" ]; do dest="$dest_root/$label.$i"; i=$((i + 1)); done
+  mkdir -p "$dest" || return 0
+  # tar rather than cp: one traversal, and `--exclude` is honoured by both BSD and GNU tar, which
+  # is what a Mac laptop and a Linux CI runner give us.
+  ( cd "$work" && tar -cf - --exclude ./target --exclude target . 2>/dev/null ) | ( cd "$dest" && tar -xf - 2>/dev/null )
+  echo "$dest"
+}
+
 # Sourced rather than executed: helpers are defined, nothing runs. Must stay ABOVE the config
 # block, which calls `exit 1` when its preconditions are missing.
 (return 0 2>/dev/null) && return 0
@@ -1206,6 +1236,13 @@ for spec in "${MODELS[@]}"; do
         "$agent" "$spec_csv" "$task" "$diff" "$secs_total" "$pass" "$rc" "$tmo" "$turns" "$tools" "$agent_mb" "$peak_cpu" "" "$repairs" \
         "$verifier_kind" "$verdict" "$verdict_confidence" "$gw_generation" "$context_window" "$mlx_active" "$mlx_peak" "$mlx_cache" >> "$CSV"
 
+      # A red keeps its evidence in the results directory, always: the workdir is a temp path that
+      # the next run's `rm -rf` (or a reboot) takes away, and a failure nobody can reopen is the
+      # one this harness must never produce. KEEP=1 still keeps every cell, in place.
+      if [ "$pass" != 1 ]; then
+        _kept="$(preserve_cell "$work" "$OUT/runs" "${agent}-${spec_csv//[:\/]/_}-${task}")"
+        [ -n "$_kept" ] && echo "    evidence: $_kept"
+      fi
       [ "${KEEP:-0}" = 1 ] && echo "    kept: $work" || rm -rf "$work"
     done
   done
@@ -1255,4 +1292,10 @@ echo "pass-rate (agent × model × task):"
 awk -F, 'NR>1{k=$1"|"$2"|"$3; tot[k]++; if($6==1)p[k]++; if(!(k in s)){s[k]=1; ord[++n]=k}}
   END{for(i=1;i<=n;i++){k=ord[i]; split(k,f,"|"); printf "  %-7s %-34s %-6s %d/%d\n", f[1], f[2], f[3], p[k]+0, tot[k]}}' "$CSV"
 echo
-echo "CSV + per-run logs: $OUT"
+# Name what is actually there. "per-run logs" used to point at a directory that stayed empty in
+# shared mode, which reads as "the logs were kept and say nothing" rather than "there are none".
+if [ -n "$(ls -A "$OUT/runs" 2>/dev/null)" ]; then
+  echo "CSV: $OUT/per-run.csv    kept evidence (failed cells + gateway logs): $OUT/runs"
+else
+  echo "CSV: $OUT/per-run.csv    (no failed cells — $OUT/runs is empty)"
+fi
