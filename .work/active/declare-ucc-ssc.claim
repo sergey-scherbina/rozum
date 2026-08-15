@@ -1,6 +1,0 @@
-feature/declare-ucc-ssc 2026-08-15T13:55:13Z
-agent: nadia-ucc
-heartbeat: 2026-08-15T13:55:13Z
-status: not-started
-done-so-far:
-next: declare com.rozum.ucc-ssc with a probe that MEANS something (403 with its own error body), and accept 403 like 401
