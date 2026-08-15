@@ -719,8 +719,12 @@ async fn check_service(
     };
     let answered = match probe {
         Probe::Get(u) => match client.get(u).send().await {
-            // 401 is an answer: the control plane demanding a session is proof it is alive.
-            Ok(r) if r.status().is_success() || r.status().as_u16() == 401 => {
+            // 401 and 403 are answers: a service demanding a session, or refusing the token it was
+            // given, has parsed the request and applied its own rules — which is exactly what a
+            // liveness probe is asking. The `.ssc` public routes answer 403 with their own error
+            // body; treating that as failure would be a red on a healthy service, which is the
+            // cry-wolf this whole check exists to remove.
+            Ok(r) if r.status().is_success() || matches!(r.status().as_u16(), 401 | 403) => {
                 Ok(format!("answers {}", r.status().as_u16()))
             }
             Ok(r) => Err(format!("answered {}", r.status().as_u16())),

@@ -113,6 +113,19 @@ pub const ALL: &[Service] = &[
         what: "the meeting PWA",
     },
     Service {
+        label: "com.rozum.ucc-ssc",
+        row: "svc:ucc-ssc",
+        program: "rozum-ucc-ssc",
+        // NOT `/`, which answers 404 — the same trap the mcp-http probe fell into, where "does the
+        // port respond" reported a healthy server as broken. This route answers 403 with its OWN
+        // body (`{"error":"invalid or revoked token"}`), which proves the process parsed the
+        // request and applied its own rules rather than merely holding a socket.
+        probe: Probe::Get("http://127.0.0.1:8412/control/public/matrix/cell"),
+        owner: Owner::JobItself,
+        shape: Shape::Resident,
+        what: "the .ssc public matrix routes",
+    },
+    Service {
         label: "com.rozum.mcp-http",
         row: "svc:mcp-http",
         program: "rozum-meet",
