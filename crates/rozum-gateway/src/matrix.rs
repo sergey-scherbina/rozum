@@ -349,6 +349,35 @@ pub(crate) struct MatrixRunReq {
     pub(crate) reps: Option<u32>,
 }
 
+/// Why this refuses instead of growing a seam, on the ONE platform where it cannot work.
+///
+/// The harness is `scripts/bench/agentic.sh` — a thousand lines of bash that drive three agent CLIs,
+/// a gateway, a sandbox and a cargo verifier. Windows has no `bash`. Porting it is a project, not a
+/// platform arm, and a seam that pretended otherwise would fail four layers down as the OS's own
+/// "program not found" with a job already queued, a result directory already created and a status
+/// row already saying `running`. The decision was made when `windows-service-install` landed and is
+/// recorded in BACKLOG as `windows-tmux-bash-refusal`: say so at the door.
+///
+/// Refuse at the ROUTE, not at the spawn, so nothing is half-created.
+#[cfg(windows)]
+pub(crate) async fn matrix_run_route(
+    axum::Json(_req): axum::Json<MatrixRunReq>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        axum::Json(serde_json::json!({
+            "ok": false,
+            "error": "the agentic matrix needs bash, which Windows does not have. \
+                      `scripts/bench/agentic.sh` drives the agent CLIs, the gateway and the \
+                      verifier; running it here would need that harness ported, not a shim. \
+                      Every other matrix route (status, log, results) works.",
+        })),
+    )
+        .into_response()
+}
+
+#[cfg(not(windows))]
 pub(crate) async fn matrix_run_route(axum::Json(req): axum::Json<MatrixRunReq>) -> axum::response::Response {
     use axum::response::IntoResponse;
     let id = format!("job-{}", crate::share::now_unix());

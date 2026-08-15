@@ -99,6 +99,35 @@ pub(crate) struct SessionLaunchReq {
     pub(crate) prompt: String,
 }
 
+/// Terminal sessions are `tmux`, and Windows does not have it.
+///
+/// Everything below drives a multiplexer: `new-session`, `send-keys`, `capture-pane`, and a PTY
+/// bridge attached to a running pane. The Windows equivalent is ConPTY plus a session manager
+/// written from scratch — a project, not a platform arm. A seam that pretended otherwise would fail
+/// at the first `Command::new("tmux")` with the OS's own "program not found", four layers below the
+/// caller and after a registry entry had already been written. The decision is recorded in BACKLOG
+/// as `windows-tmux-bash-refusal`; this is it, said at the door.
+///
+/// Only LAUNCH is guarded. `stop`, `send`, `output` and `attach` all take a session id, and on a
+/// platform where none can be created they answer "no such session" — which is true, and is the
+/// message they already give.
+#[cfg(windows)]
+pub(crate) async fn session_launch_route(_body: String) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        axum::Json(serde_json::json!({
+            "ok": false,
+            "error": "terminal sessions need tmux, which Windows does not have. The phone \
+                      terminal drives it through new-session/send-keys/capture-pane and a PTY \
+                      bridge; on Windows that is ConPTY plus a session manager, not a shim. \
+                      The rest of the console works.",
+        })),
+    )
+        .into_response()
+}
+
+#[cfg(not(windows))]
 pub(crate) async fn session_launch_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
     let req: SessionLaunchReq = match parse_action_json(&body) {
