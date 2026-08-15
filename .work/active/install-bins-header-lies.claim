@@ -1,6 +1,0 @@
-feature/install-bins-header-lies 2026-08-15T10:33:47Z
-agent: nadia-ucc
-heartbeat: 2026-08-15T10:33:47Z
-status: not-started
-done-so-far:
-next: the header says "It does NOT restart services" while restart_owner does exactly that
