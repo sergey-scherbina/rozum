@@ -222,6 +222,94 @@ EOF
       # `apple 3` / `banana 3` / `cherry 2`.
       printf 'Apple banana apple Cherry BANANA apple date banana cherry\n' >"$2/input.txt"
       ;;
+    leapday)
+      # THE DEFECT IS TWO CALLS BELOW THE FAILING TEST, AND NOTHING POINTS AT IT.
+      #
+      # Every other bug task here is signposted — `// BUG: subtracts instead of adding` sits on the
+      # line to change — and single-hop: the failing assertion names the function that is wrong.
+      # A 4B clears all of them, which is why the matrix cannot tell two models apart (measured
+      # 2026-08-15: Qwen3.5-4B and Qwen3.5-9B both 24/24 on the eight existing tasks). This one
+      # removes the signpost and the adjacency: `day_of_year` fails, calls `days_in_month`, which
+      # calls `is_leap`, which is where the rule is wrong.
+      #
+      # THE HALF-FIX IS THE POINT. `is_leap` is missing the century rule. The obvious repair —
+      # `y % 4 == 0 && y % 100 != 0` — makes the 1900 case pass and BREAKS 2000, which the tests
+      # also check. Special-casing the failing date in `day_of_year` breaks the others too. Only the
+      # full Gregorian rule passes all four, so a plausible edit that satisfies the visible failure
+      # is not enough.
+      printf '[package]\nname = "calendar"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
+      mkdir -p "$2/src"
+      cat >"$2/src/lib.rs" <<'EOF'
+/// Whether `y` is a leap year.
+pub fn is_leap(y: u32) -> bool {
+    y % 4 == 0
+}
+
+/// Number of days in month `m` (1-12) of year `y`.
+pub fn days_in_month(y: u32, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap(y) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// The 1-based ordinal day of `y-m-d` within its year.
+/// January 1st is 1; March 1st is 60 in a common year and 61 in a leap year.
+pub fn day_of_year(y: u32, m: u32, d: u32) -> u32 {
+    let mut total = 0;
+    let mut mm = 1;
+    while mm < m {
+        total += days_in_month(y, mm);
+        mm += 1;
+    }
+    total + d
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn common_year() {
+        assert_eq!(day_of_year(2023, 3, 1), 60);
+    }
+
+    #[test]
+    fn leap_year_divisible_by_four() {
+        assert_eq!(day_of_year(2024, 3, 1), 61);
+    }
+
+    #[test]
+    fn century_is_not_a_leap_year() {
+        assert_eq!(day_of_year(1900, 3, 1), 60);
+    }
+
+    #[test]
+    fn four_hundredth_year_is_a_leap_year() {
+        assert_eq!(day_of_year(2000, 3, 1), 61);
+    }
+
+    /// Counts leap years over four centuries, and it is here to close a hole the other four leave
+    /// open: it exercises `is_leap` DIRECTLY, so no amount of special-casing inside `day_of_year`
+    /// can satisfy it, and 98 out of 401 candidate years is not a number reachable by enumerating
+    /// exceptions. 1600..=2000 holds 101 multiples of four, minus 1700, 1800 and 1900, which are
+    /// centuries not divisible by 400.
+    #[test]
+    fn leap_years_across_four_centuries() {
+        let n = (1600..=2000).filter(|&y| is_leap(y)).count();
+        assert_eq!(n, 98);
+    }
+}
+EOF
+      ;;
     multibug)
       printf '[package]\nname = "twobugs"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
       mkdir -p "$2/src"
@@ -444,7 +532,7 @@ mkdir -p "$OUT/runs"
 CSV="$OUT/per-run.csv"
 TRIAGE_PY="$here/agentic_triage.py"
 echo "agent,model,task,difficulty,seconds,pass,rc,timeout,turns,tool_uses,agent_peak_mb,peak_cpu_pct,model_footprint_mb,repairs,verifier_kind,verdict,verdict_confidence,gateway_generation,context_window,mlx_active_mb,mlx_peak_mb,mlx_cache_mb" > "$CSV"
-declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 [wordcount]=7 [multibug]=8 )
+declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 [wordcount]=7 [multibug]=8 [leapday]=9 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -609,7 +697,7 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
       *)
         [ -f Cargo.toml ] || { echo "    FAIL  Cargo.toml missing"; fail=1; }
         ls src/*.rs >/dev/null 2>&1 || { echo "    FAIL  no src/*.rs"; fail=1; }
-        if [ "$t" = test ] || [ "$t" = debug ] || [ "$t" = multibug ]; then
+        if [ "$t" = test ] || [ "$t" = debug ] || [ "$t" = multibug ] || [ "$t" = leapday ]; then
           cargo test -q >/dev/null 2>"$w/cargo.err" && echo "    PASS  cargo test green" || { echo "    FAIL  cargo test red"; fail=1; }
         fi
         if [ "$t" = build ] || [ "$t" = test ] || [ "$t" = fix ]; then
