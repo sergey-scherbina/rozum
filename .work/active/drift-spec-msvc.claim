@@ -1,6 +1,0 @@
-feature/drift-spec-msvc 2026-08-15T10:14:44Z
-agent: nadia-ucc
-heartbeat: 2026-08-15T10:14:44Z
-status: not-started
-done-so-far:
-next: record the measured MSVC fact in the drift spec
