@@ -434,6 +434,7 @@ else
   DECODE_NOTE="FREE ENTROPY — a single red is one sample, not a result"
 fi
 
+CELL_N=0   # cells run so far, so each gets its own seed (see the runner invocation)
 AGENT_RUN=()
 for a in ${AGENTS:-claude codex opencode}; do command -v "$a" >/dev/null && AGENT_RUN+=("$a") || echo "skip agent '$a' (not on PATH)"; done
 [ "${#AGENT_RUN[@]}" -gt 0 ] || { echo "no agent CLIs available" >&2; exit 1; }
@@ -1163,7 +1164,15 @@ for spec in "${MODELS[@]}"; do
         # misclassifies pure-text tasks (e.g. greet) as cargo projects via the model's
         # interpretation of the prompt, spawning a repair loop that wastes the full RUN_TIMEOUT.
         npfile="$work/noprogress.reason"; rm -f "$npfile"
-        ( cd "$work"; exec env ROZUM_VERIFY=0 "${runner[@]}" ) </dev/null >"$alog" 2>&1 &
+        # ONE SEED PER CELL, not one per run. A fixed seed across repetitions would make REPS>1
+        # report a pass-RATE computed from near-identical draws — the opposite of what it is for,
+        # and a hole I would have opened myself by exporting a single default into the shared path
+        # (before this change shared runs had no seed at all, so their reps were independent). Base
+        # + index keeps each cell reproducible on its own while the reps stay separate samples.
+        CELL_N=$((CELL_N + 1))
+        cell_seed=""
+        [ -n "${ROZUM_SAMPLING_SEED:-}" ] && cell_seed=$((ROZUM_SAMPLING_SEED + CELL_N))
+        ( cd "$work"; exec env ROZUM_VERIFY=0 ${cell_seed:+ROZUM_SAMPLING_SEED=$cell_seed} "${runner[@]}" ) </dev/null >"$alog" 2>&1 &
         LP=$!
         # Agent-tree RSS + (agent + gateway) CPU; the model's RAM is the gateway footprint.
         ( while kill -0 "$LP" 2>/dev/null; do
