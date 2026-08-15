@@ -513,7 +513,14 @@ trait WireDialect: Sized {
 }
 
 /// Everything that happens to a chat request between "parsed" and "serialized", once.
-async fn serve_wire<D: WireDialect>(state: GatewayState, mut dialect: D) -> Response {
+async fn serve_wire<D: WireDialect>(
+    state: GatewayState,
+    mut dialect: D,
+    // The decode policy the CLIENT asked for (`x-rozum-decode` / `x-rozum-seed`). Threaded as a
+    // parameter rather than read from a thread-local or an extension: it belongs to one request,
+    // and the three handlers are the only place it can be read from.
+    policy: crate::serving::DecodePolicy,
+) -> Response {
     // Hold a lease for the whole request so a `switch` can't swap the model
     // mid-flight; parks here if a swap is draining, lazily reloads if unloaded.
     let lease = match state.sb.enter(dialect.model_hint()).await {
@@ -542,7 +549,7 @@ async fn serve_wire<D: WireDialect>(state: GatewayState, mut dialect: D) -> Resp
     let chat_req = ChatRequest {
         messages,
         tools,
-        sampling: apply_determinism_env(sampling),
+        sampling: crate::serving::apply_determinism_for(sampling, policy),
         cancel: cancel.clone(),
         session_id: None,
     };
@@ -551,6 +558,11 @@ async fn serve_wire<D: WireDialect>(state: GatewayState, mut dialect: D) -> Resp
         .model_hint()
         .map(str::to_owned)
         .unwrap_or_else(|| lease.model_id.clone());
+
+    // Read off the request BEFORE it moves into the backend: this is the effective decode, not
+    // what anyone asked for, which is the only version worth logging.
+    let decode = if chat_req.sampling.temperature == Some(0.0) { "greedy" } else { "sampled" };
+    let decode_seed = chat_req.sampling.seed;
 
     match chat_or_loopbreak(&lease.backend, chat_req).await {
         Err(e) => {
@@ -566,6 +578,8 @@ async fn serve_wire<D: WireDialect>(state: GatewayState, mut dialect: D) -> Resp
                 n_messages,
                 n_tools,
                 est_prompt_tokens: est,
+                decode,
+                seed: decode_seed,
             };
             let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
             let chat_stream = with_gen_timeout(chat_stream, cancel.clone(), gen_inactivity_timeout());
@@ -657,6 +671,7 @@ impl WireDialect for OaiWire {
 
 async fn oai_chat_handler(
     State(state): State<GatewayState>,
+    headers: axum::http::HeaderMap,
     axum::Json(req): axum::Json<OaiChatReq>,
 ) -> Response {
     tracing::debug!(
@@ -666,7 +681,12 @@ async fn oai_chat_handler(
         stream = req.stream.unwrap_or(false),
         "POST /v1/chat/completions"
     );
-    serve_wire(state, OaiWire { req }).await
+    serve_wire(
+        state,
+        OaiWire { req },
+        crate::serving::decode_policy_from_headers(&headers),
+    )
+    .await
 }
 
 // ─── OpenAI Responses (Codex) ─────────────────────────────────────────────────
@@ -813,6 +833,7 @@ impl WireDialect for RespWire {
 
 async fn responses_handler(
     State(state): State<GatewayState>,
+    headers: axum::http::HeaderMap,
     axum::Json(req): axum::Json<RespReq>,
 ) -> Response {
     tracing::debug!(
@@ -846,6 +867,7 @@ async fn responses_handler(
             req,
             apply_patch_is_tool: false,
         },
+        crate::serving::decode_policy_from_headers(&headers),
     )
     .await
 }
@@ -956,6 +978,7 @@ impl WireDialect for AnthropicWire {
 
 async fn anthropic_handler(
     State(state): State<GatewayState>,
+    headers: axum::http::HeaderMap,
     axum::Json(req): axum::Json<AnthropicReq>,
 ) -> Response {
     tracing::debug!(
@@ -965,7 +988,12 @@ async fn anthropic_handler(
         stream = req.stream.unwrap_or(false),
         "POST /v1/messages"
     );
-    serve_wire(state, AnthropicWire { req }).await
+    serve_wire(
+        state,
+        AnthropicWire { req },
+        crate::serving::decode_policy_from_headers(&headers),
+    )
+    .await
 }
 
 // ─── Control plane (switch / unload / reload) ────────────────────────────────
@@ -1625,6 +1653,57 @@ mod tests {
             Some(7),
         );
         assert_eq!(kept.seed, Some(123));
+    }
+
+    #[test]
+    fn a_request_can_pin_its_own_decode_without_owning_the_gateway() {
+        // The whole point: the two determinism knobs are read from the GATEWAY PROCESS's
+        // environment, and since the bench started borrowing a resident daemon (2026-08-07) there
+        // is no such process for a benchmark to set them on — so the matrix ran unpinned for eight
+        // days while its launcher still passed `ROZUM_FORCE_GREEDY=1` to a script that had nothing
+        // to apply it to. These headers are how a client asks for the same thing.
+        use axum::http::HeaderMap;
+        use crate::serving::{DecodePolicy, decode_policy_from_headers};
+
+        let mut h = HeaderMap::new();
+        h.insert("x-rozum-decode", "greedy".parse().unwrap());
+        h.insert("x-rozum-seed", "1234".parse().unwrap());
+        assert_eq!(
+            decode_policy_from_headers(&h),
+            DecodePolicy { greedy: true, seed: Some(1234) }
+        );
+
+        // Absent headers must read as "asked for nothing" — the property that keeps every other
+        // client on the shared gateway byte-identical while a benchmark pins its own runs.
+        assert_eq!(decode_policy_from_headers(&HeaderMap::new()), DecodePolicy::default());
+
+        // A value that does not parse is IGNORED, not an error: this is an instrument, and a
+        // benchmark wrapper's typo must not fail a real request.
+        let mut junk = HeaderMap::new();
+        junk.insert("x-rozum-seed", "banana".parse().unwrap());
+        junk.insert("x-rozum-decode", "sampled".parse().unwrap());
+        assert_eq!(decode_policy_from_headers(&junk), DecodePolicy::default());
+
+        // Case and whitespace are the client's business, not ours.
+        let mut loose = HeaderMap::new();
+        loose.insert("x-rozum-decode", " Greedy ".parse().unwrap());
+        assert!(decode_policy_from_headers(&loose).greedy);
+    }
+
+    #[test]
+    fn a_pinned_request_reaches_the_sampler_as_argmax() {
+        // The policy is only worth carrying if it lands where `ROZUM_FORCE_GREEDY` lands. Asserted
+        // through the pure core so the test does not touch the process environment.
+        use crate::serving::DecodePolicy;
+        let policy = DecodePolicy { greedy: true, seed: Some(1234) };
+        let out = apply_determinism(
+            SamplingParams { temperature: Some(1.0), top_p: Some(0.9), ..Default::default() },
+            policy.greedy,
+            policy.seed,
+        );
+        assert_eq!(out.temperature, Some(0.0));
+        assert_eq!(out.top_p, None);
+        assert_eq!(out.seed, Some(1234));
     }
 
     #[test]

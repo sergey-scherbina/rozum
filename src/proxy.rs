@@ -567,7 +567,8 @@ fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
 }
 
 /// Headers to send upstream: everything the agent sent except hop-by-hop and
-/// framing headers that reqwest recomputes from the (re-)set body.
+/// framing headers that reqwest recomputes from the (re-)set body — plus this launch's decode
+/// policy, if it has one.
 fn forward_request_headers(incoming: &HeaderMap) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in incoming.iter() {
@@ -576,7 +577,53 @@ fn forward_request_headers(incoming: &HeaderMap) -> HeaderMap {
         }
         out.append(name.clone(), value.clone());
     }
+    let (greedy, seed) = decode_policy_from_env();
+    stamp_decode_policy(&mut out, greedy, seed);
     out
+}
+
+/// `ROZUM_FORCE_GREEDY` / `ROZUM_SAMPLING_SEED` as this launch sees them, read once.
+///
+/// Both are documented as GATEWAY knobs, and that is exactly the problem they now solve here. They
+/// are read from the environment of the process that serves the model, so they worked only while
+/// every benchmark started its own gateway. Since borrowing a resident daemon became the default
+/// (2026-08-07) a matrix run has no such process: `run_full_matrix.sh` still exports
+/// `ROZUM_FORCE_GREEDY=1`, `agentic.sh` still passes it down, and the daemon actually decoding —
+/// the operator's launchd gateway, whose whole environment is one unrelated variable — never sees
+/// it. Eight days of matrix cells were sampled at the client's temperature while their launcher
+/// said greedy.
+///
+/// The launch proxy is the fix's natural home: it is the one place in the path that belongs to
+/// THIS run rather than to the daemon, so the policy can be pinned per-request without touching a
+/// gateway other people are using.
+fn decode_policy_from_env() -> (bool, Option<u64>) {
+    static POLICY: std::sync::OnceLock<(bool, Option<u64>)> = std::sync::OnceLock::new();
+    *POLICY.get_or_init(|| {
+        let greedy = matches!(
+            std::env::var("ROZUM_FORCE_GREEDY").ok().as_deref(),
+            Some("1" | "true" | "on")
+        );
+        let seed = std::env::var("ROZUM_SAMPLING_SEED")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        (greedy, seed)
+    })
+}
+
+/// Stamp the decode policy onto an upstream request. Pure, so the rule is testable without an
+/// environment or a socket.
+///
+/// Nothing is added when nothing was asked for — the property that keeps a launch without these
+/// variables byte-identical on the wire, which is every launch that is not a benchmark.
+fn stamp_decode_policy(out: &mut HeaderMap, greedy: bool, seed: Option<u64>) {
+    if greedy {
+        out.insert("x-rozum-decode", axum::http::HeaderValue::from_static("greedy"));
+    }
+    if let Some(sd) = seed {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&sd.to_string()) {
+            out.insert("x-rozum-seed", v);
+        }
+    }
 }
 
 /// Copy the daemon's response headers back, dropping framing headers so hyper
@@ -871,6 +918,30 @@ mod tests {
         assert!(out.get(header::CONNECTION).is_none());
         assert_eq!(out.get(header::CONTENT_TYPE).unwrap(), "application/json");
         assert_eq!(out.get(header::AUTHORIZATION).unwrap(), "Bearer x");
+    }
+
+    #[test]
+    fn stamps_the_launchs_decode_policy_and_nothing_else() {
+        // A launch that asked for greedy pins THIS request's decode without touching the daemon —
+        // the only way a borrowed gateway can be pinned at all, since the env knobs belong to the
+        // process that serves the model and a benchmark no longer starts one.
+        let mut h = HeaderMap::new();
+        stamp_decode_policy(&mut h, true, Some(1234));
+        assert_eq!(h.get("x-rozum-decode").unwrap(), "greedy");
+        assert_eq!(h.get("x-rozum-seed").unwrap(), "1234");
+
+        // Asked for nothing → sends nothing. This is what keeps every non-benchmark launch
+        // byte-identical on the wire, and it is the half a regression would break silently.
+        let mut none = HeaderMap::new();
+        stamp_decode_policy(&mut none, false, None);
+        assert!(none.is_empty(), "an unpinned launch must not add headers: {none:?}");
+
+        // Each half is independent: a seed without greedy is a legitimate ask (pin the RNG, keep
+        // the client's temperature — the ORIGINAL matrix instrument).
+        let mut seed_only = HeaderMap::new();
+        stamp_decode_policy(&mut seed_only, false, Some(7));
+        assert!(seed_only.get("x-rozum-decode").is_none());
+        assert_eq!(seed_only.get("x-rozum-seed").unwrap(), "7");
     }
 
     #[test]

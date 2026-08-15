@@ -208,7 +208,7 @@ async fn render_all() -> String {
             "stream": stream,
         }))
         .unwrap();
-        let resp = oai_chat_handler(axum::extract::State(state), axum::Json(req)).await;
+        let resp = oai_chat_handler(axum::extract::State(state), axum::http::HeaderMap::new(), axum::Json(req)).await;
         out.push_str(&format!(
             "=== /v1/chat/completions stream={stream}\n--- request\n{}--- response\n{}\n",
             seen.lock().unwrap().clone().unwrap_or_default(),
@@ -234,7 +234,7 @@ async fn render_all() -> String {
             "stream": stream,
         }))
         .unwrap();
-        let resp = responses_handler(axum::extract::State(state), axum::Json(req)).await;
+        let resp = responses_handler(axum::extract::State(state), axum::http::HeaderMap::new(), axum::Json(req)).await;
         out.push_str(&format!(
             "=== /v1/responses stream={stream}\n--- request\n{}--- response\n{}\n",
             seen.lock().unwrap().clone().unwrap_or_default(),
@@ -258,7 +258,7 @@ async fn render_all() -> String {
             "stream": stream,
         }))
         .unwrap();
-        let resp = anthropic_handler(axum::extract::State(state), axum::Json(req)).await;
+        let resp = anthropic_handler(axum::extract::State(state), axum::http::HeaderMap::new(), axum::Json(req)).await;
         out.push_str(&format!(
             "=== /v1/messages stream={stream}\n--- request\n{}--- response\n{}\n",
             seen.lock().unwrap().clone().unwrap_or_default(),
@@ -282,9 +282,38 @@ async fn render_all() -> String {
         "stream_options": {"include_usage": true},
     }))
     .unwrap();
-    let resp = oai_chat_handler(axum::extract::State(state), axum::Json(req)).await;
+    let resp = oai_chat_handler(axum::extract::State(state), axum::http::HeaderMap::new(), axum::Json(req)).await;
     out.push_str(&format!(
         "=== /v1/chat/completions stream=true include_usage=true\n--- request\n{}--- response\n{}\n",
+        seen.lock().unwrap().clone().unwrap_or_default(),
+        body_text(resp).await
+    ));
+
+    // ── The eighth case: a request that PINS ITS OWN DECODE ─────────────────────────────────
+    //
+    // Same Anthropic body as the case above, plus the two headers a `rozum launch` stamps when it
+    // was started with `ROZUM_FORCE_GREEDY=1` / `ROZUM_SAMPLING_SEED=…`. Here rather than in a unit
+    // test because the claim being made is end-to-end: what reaches the BACKEND is argmax with a
+    // pinned seed, not merely a parsed header. The dialect with no `seed` field of its own is the
+    // sharpest case — it is why the policy is a header and not a body key.
+    //
+    // The contrast with the `/v1/messages` block above is the evidence: identical request, and the
+    // only lines that differ are the sampling ones.
+    let seen = Arc::new(StdMutex::new(None));
+    let state = test_state(seen.clone());
+    let req: crate::anthropic_api::AnthropicReq = serde_json::from_value(json!({
+        "model": "asked-for-model",
+        "system": "be brief",
+        "messages": [{"role": "user", "content": "hi"}],
+        "temperature": 0.3, "top_p": 0.9, "top_k": 40, "max_tokens": 64,
+    }))
+    .unwrap();
+    let mut pinned = axum::http::HeaderMap::new();
+    pinned.insert("x-rozum-decode", "greedy".parse().unwrap());
+    pinned.insert("x-rozum-seed", "1234".parse().unwrap());
+    let resp = anthropic_handler(axum::extract::State(state), pinned, axum::Json(req)).await;
+    out.push_str(&format!(
+        "=== /v1/messages stream=false PINNED (x-rozum-decode: greedy, x-rozum-seed: 1234)\n--- request\n{}--- response\n{}\n",
         seen.lock().unwrap().clone().unwrap_or_default(),
         body_text(resp).await
     ));

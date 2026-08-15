@@ -284,6 +284,8 @@ pub(crate) fn apply_tool_choice(tools: Vec<ToolDef>, choice: &ToolChoice) -> Vec
     }
 }
 
+/// The decode policy for one request — and the two ways a caller can pin it.
+///
 /// Reproducibility instrument for the agentic matrix (and any caller wanting a
 /// deterministic local model). The gateway passes the client's sampling params through
 /// verbatim and leaves `seed` unset, so the sampler + MLX RNG seed from entropy: a
@@ -294,18 +296,75 @@ pub(crate) fn apply_tool_choice(tools: Vec<ToolDef>, choice: &ToolChoice) -> Vec
 /// unless explicitly set (so it is purely a benchmark/diagnosis instrument here):
 ///   `ROZUM_SAMPLING_SEED=<u64>`   pin the RNG seed (only fills it when the client sent none)
 ///   `ROZUM_FORCE_GREEDY=1|true|on` force temperature 0 (argmax — removes the RNG entirely)
-pub(crate) fn apply_determinism_env(s: SamplingParams) -> SamplingParams {
-    let force_greedy = matches!(
+///
+/// **Both are read from THIS PROCESS's environment, which is the limitation
+/// [`decode_policy_from_headers`] exists to remove.** They were introduced when every benchmark
+/// started its own gateway; since the bench began borrowing a resident one (2026-08-07) there is no
+/// such process to set them on, so the matrix's two determinism controls quietly stopped applying
+/// to every shared run — measured 2026-08-15 on the operator's launchd gateway, whose entire
+/// environment is one unrelated variable.
+///
+/// A decode policy that travelled ON THE REQUEST.
+///
+/// The env knobs above can only be set by whoever STARTS the gateway. A client that borrows a
+/// resident daemon — which is now how the matrix runs, and the whole point of borrowing is not to
+/// load a second copy of the weights — cannot reach them, and mutating the operator's gateway to
+/// pin a benchmark's sampler would be worse than the flakiness it fixes. So the policy rides on
+/// the request instead, and the gateway honours it per-request:
+///
+///   `x-rozum-decode: greedy`   temperature 0 / argmax for THIS request
+///   `x-rozum-seed: <u64>`      pin the RNG seed for THIS request
+///
+/// Absent headers mean an empty policy and a byte-identical request, which is what keeps this
+/// invisible to every client that does not ask — including the one whose traffic shares the
+/// gateway with a benchmark run.
+///
+/// It is deliberately NOT part of any dialect's body: `seed` exists in OpenAI's schema, is absent
+/// from Anthropic's, and `greedy` is in none of them. A header is the one place all three agree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DecodePolicy {
+    pub(crate) greedy: bool,
+    pub(crate) seed: Option<u64>,
+}
+
+pub(crate) const DECODE_HEADER: &str = "x-rozum-decode";
+pub(crate) const SEED_HEADER: &str = "x-rozum-seed";
+
+/// Read the policy off a request's headers. Unparseable values are IGNORED rather than rejected:
+/// a decode hint is an instrument, and failing a real request because a benchmark wrapper sent
+/// `x-rozum-seed: banana` would turn a diagnostic aid into an outage.
+pub(crate) fn decode_policy_from_headers(h: &axum::http::HeaderMap) -> DecodePolicy {
+    let greedy = h
+        .get(DECODE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().eq_ignore_ascii_case("greedy"))
+        .unwrap_or(false);
+    let seed = h
+        .get(SEED_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    DecodePolicy { greedy, seed }
+}
+
+/// The env defaults plus whatever the request asked for.
+///
+/// Precedence is deliberate and each direction has a reason: a gateway started with
+/// `ROZUM_FORCE_GREEDY=1` keeps forcing greedy whatever the request says (the operator of the
+/// process wins over a client of it), while a client's seed is preferred over the process default
+/// (that is the client pinning its own run, which is the entire feature). A seed the CLIENT put in
+/// the body still wins over both — `apply_determinism` only ever fills an unset one.
+pub(crate) fn apply_determinism_for(s: SamplingParams, policy: DecodePolicy) -> SamplingParams {
+    let env_greedy = matches!(
         std::env::var("ROZUM_FORCE_GREEDY").ok().as_deref(),
         Some("1" | "true" | "on")
     );
-    let seed = std::env::var("ROZUM_SAMPLING_SEED")
+    let env_seed = std::env::var("ROZUM_SAMPLING_SEED")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok());
-    apply_determinism(s, force_greedy, seed)
+    apply_determinism(s, env_greedy || policy.greedy, policy.seed.or(env_seed))
 }
 
-/// Pure core of [`apply_determinism_env`] (env read split out so it is race-free to test).
+/// Pure core of [`apply_determinism_for`] (env read split out so it is race-free to test).
 /// `force_greedy` wins over the client's temperature; `seed` only fills an unset seed so a
 /// caller that genuinely sent its own seed keeps it.
 pub(crate) fn apply_determinism(mut s: SamplingParams, force_greedy: bool, seed: Option<u64>) -> SamplingParams {

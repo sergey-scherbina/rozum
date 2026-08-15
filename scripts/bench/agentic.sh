@@ -409,6 +409,31 @@ if [ "$REPS" -gt 1 ] 2>/dev/null; then
   for _ in $(seq 1 "$REPS"); do TASK_LIST+=("${_base_tasks[@]}"); done
 fi
 
+# DECODE POLICY. Both knobs are documented as GATEWAY settings, and until 2026-08-15 that is
+# literally all they were: read from the environment of the process serving the model. They worked
+# only while every run started its own gateway. Since borrowing a resident one became the default
+# (2026-08-07) there is no such process — `run_full_matrix.sh` exported `ROZUM_FORCE_GREEDY=1`,
+# this script passed it down, and the daemon actually decoding never saw it. Eight days of cells
+# were sampled at the client's temperature under a launcher that said greedy, which is exactly the
+# noise the seed was introduced to remove (docs/specs/matrix-nondeterminism.md).
+#
+# They now travel on the REQUEST: `rozum launch`'s proxy stamps `x-rozum-decode`/`x-rozum-seed` from
+# these variables and the gateway honours them per-request, so a borrowed daemon can be pinned
+# without being touched. EXPORTED, because the agent is what has to inherit them.
+#   ROZUM_SAMPLING_SEED  pins sampler + MLX RNG (same temperature, replayable stream). Default 1234;
+#                        set empty to restore free entropy.
+#   ROZUM_FORCE_GREEDY   temperature 0 / argmax — no RNG at all. NOT defaulted here: it changes what
+#                        the model does, and `run_full_matrix.sh` turns it on for the matrix.
+export ROZUM_SAMPLING_SEED="${ROZUM_SAMPLING_SEED-1234}"
+[ -n "${ROZUM_FORCE_GREEDY:-}" ] && export ROZUM_FORCE_GREEDY
+if [ "${ROZUM_FORCE_GREEDY:-0}" = 1 ] || [ "${ROZUM_FORCE_GREEDY:-}" = true ] || [ "${ROZUM_FORCE_GREEDY:-}" = on ]; then
+  DECODE_NOTE="greedy (temperature 0, argmax — pinned per-request)"
+elif [ -n "${ROZUM_SAMPLING_SEED:-}" ]; then
+  DECODE_NOTE="sampled at the client's temperature, RNG pinned to seed ${ROZUM_SAMPLING_SEED}"
+else
+  DECODE_NOTE="FREE ENTROPY — a single red is one sample, not a result"
+fi
+
 AGENT_RUN=()
 for a in ${AGENTS:-claude codex opencode}; do command -v "$a" >/dev/null && AGENT_RUN+=("$a") || echo "skip agent '$a' (not on PATH)"; done
 [ "${#AGENT_RUN[@]}" -gt 0 ] || { echo "no agent CLIs available" >&2; exit 1; }
@@ -967,6 +992,9 @@ echo "  binary       : $BIN"
 echo "  agents       : ${AGENT_RUN[*]}    models: ${#MODELS[@]}    tasks: ${TASK_LIST[*]}"
 echo "  run timeout  : ${RUN_TIMEOUT}s   gen timeout: ${GEN_TIMEOUT}s   ctx: ${NCTX:-auto(max)}   verify-repair: $([ "$REPAIR" -gt 0 ] && echo "ON (up to $REPAIR retries)" || echo off)"
 echo "  out          : $OUT"
+echo "  decode       : $DECODE_NOTE"
+printf 'decode: %s\nseed: %s\nforce_greedy: %s\n' \
+  "$DECODE_NOTE" "${ROZUM_SAMPLING_SEED:-<none>}" "${ROZUM_FORCE_GREEDY:-0}" > "$OUT/run-info.txt"
 echo
 
 # Stop whatever gateway is resident — EXCEPT when we were told to share one. Without this guard
@@ -1022,12 +1050,8 @@ for spec in "${MODELS[@]}"; do
   # gap between the claude and codex phases, so every later codex task sees a dead gateway and
   # returns rc=2 at 0.0s (looks like "codex is broken"; it isn't). =0 disables the watchdog so
   # the load-once gateway survives all agents. See BUGS.md BUG-001 / project-agentic-bench-clients-gone.
-  # ROZUM_SAMPLING_SEED pins the sampler + MLX RNG so a temperature>0 request (Claude Code
-  # sends 1.0) replays an IDENTICAL token stream — without it the RNG seeds from entropy and
-  # high-entropy cells flip pass/fail on a byte-identical config, which is noise that
-  # undermines every reading (proven: docs/specs/matrix-nondeterminism.md). Default-pin so
-  # the matrix is reproducible (every red is reproducible+debuggable); override to any <u64>,
-  # or set ROZUM_SAMPLING_SEED= (empty) to restore free entropy sampling.
+  # (ROZUM_SAMPLING_SEED is set once, exported, near the top — it has to reach `rozum launch`
+  # too, not just a gateway this harness spawns.)
   # BENCH_GATEWAY_URL: run against a gateway that is ALREADY serving this model instead of
   # loading a second copy.
   #
@@ -1061,7 +1085,7 @@ for spec in "${MODELS[@]}"; do
   else
   SHARED_GW=0
   ROZUM_GATEWAY_IDLE_SECS=0 ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0 ROZUM_GEN_TIMEOUT_SECS="$GEN_TIMEOUT" \
-    ROZUM_SAMPLING_SEED="${ROZUM_SAMPLING_SEED-1234}" /usr/bin/time -l \
+    /usr/bin/time -l \
     "$BIN" gateway --model "$spec" --port "$port" --offline "${NCTX_OPT[@]}" \
     >"$glog" 2>&1 &
   TIME_PID=$!

@@ -97,6 +97,13 @@ pub struct ReqMeta {
     pub n_messages: usize,
     pub n_tools: usize,
     pub est_prompt_tokens: u32,
+    /// What the SAMPLER was told, after the process defaults and the request's own decode policy:
+    /// `"greedy"` (temperature 0 / argmax) or `"sampled"`. Logged because the alternative is
+    /// arguing about it: the matrix spent eight days believing it ran greedy while a borrowed
+    /// gateway sampled at the client's temperature, and nothing in any log could have said so.
+    pub decode: &'static str,
+    /// The RNG seed the request ended up with, when it has one.
+    pub seed: Option<u64>,
 }
 
 struct Active {
@@ -172,6 +179,8 @@ impl Observer {
             "messages": meta.n_messages,
             "tools": meta.n_tools,
             "est_prompt_tokens": meta.est_prompt_tokens,
+            "decode": meta.decode,
+            "seed": meta.seed,
         }));
         id
     }
