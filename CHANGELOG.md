@@ -1,5 +1,16 @@
 # Changelog
 
+## bench-gateway-url-unreachable — a run may no longer name a gateway it did not use
+Completed: 2026-08-15
+
+`BENCH_GATEWAY_URL` steered the harness and nothing else: agents take their base URL from
+`rozum launch`, which reuses whatever the active-gateway registry names. Caught with a recording
+proxy while chasing an `rpn` red — the run announced :8199, the proxy logged zero bodies, the cell
+ran on :8089, and no line of the output said so. The harness now resolves the gateway the agent
+will actually use and refuses the run when it differs, when nothing is registered (launch would
+spawn a second copy of the weights), or when the URL has no port to compare.
+`scripts/bench/test-agentic-gateway-url.sh` covers all six branches in CI in a second.
+
 ## windows-tmux-bash-refusal — say it at the door, not four layers down
 Completed: 2026-08-15
 
