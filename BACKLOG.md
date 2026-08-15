@@ -123,7 +123,10 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   branch, and that branch never touches the RNG, so the bench's determinism never depended on a
   seed. The comment is now true. See BUG-032.
 
-- [ ] **wire-parameter-coverage** — the rest of the sweep the operator asked for after BUG-031/032
+- [x] **wire-parameter-coverage — COMPLETE 2026-08-15.** Every sub-item is closed; the last two
+  (`previous_response_id`, Anthropic `thinking`) were answered by CAPTURING a real client request
+  against a fake endpoint rather than reading code, and both times the entry's assumption about what
+  the client sends was wrong. The original text: the rest of the sweep the operator asked for after BUG-031/032
   (2026-08-14), recorded as one entry because it is one question: *which documented request
   parameters does this gateway drop, and which of them are wiring versus missing capability?*
   Measured against the three request structs, not from memory. The two that were pure wiring are
@@ -771,17 +774,16 @@ Remaining:
     double quote is REFUSED rather than escaped (`cmd.exe` has no total escape, and the failure mode
     is a service silently started with different arguments). Proven the cross-check really compiles
     the arm by making it fail on purpose. Spec: `docs/specs/windows-service-install.md`.
-  - [ ] windows-tmux-bash-refusal — **the decision is made; only the code is left.** Handed over
-    from `windows-spawn-seams`: terminal sessions shell out to `tmux`
-    (`crates/rozum-gateway/src/sessions.rs`) and the matrix to `bash` (`matrix.rs`), and neither is
-    on a Windows box. **A REFUSAL, NOT A SEAM.** Reimplementing a terminal multiplexer on ConPTY and
-    a 1000-line bash harness in Rust is a project of its own, and a seam that pretended to be one
-    would fail later and less clearly than a message saying so up front — the same reasoning that
-    made the SCM route wrong for the service. What is left: an early `#[cfg(windows)]` guard at each
-    entry point returning "terminal sessions need tmux, which does not exist on Windows" and the
-    matrix equivalent, instead of the OS's own "program not found" surfacing from four layers down.
-    **Done when:** both paths refuse with a sentence naming the missing tool and what it would take,
-    and nothing else on Windows changes.
+  - [x] windows-tmux-bash-refusal — **DONE 2026-08-15.** Both routes refuse at the door with 501 and
+    a sentence naming the missing tool: terminal sessions need `tmux` (new-session / send-keys /
+    capture-pane / a PTY bridge — on Windows that is ConPTY plus a session manager, not a shim), the
+    matrix needs `bash` for `scripts/bench/agentic.sh`. Previously both surfaced as the OS's own
+    "program not found" from inside `Command::new`, after a registry entry or a queued job, a result
+    directory and a `running` row already existed. Only `session_launch_route` is guarded —
+    stop/send/output/attach take a session id and already answer "no such session", which is true.
+    **The check that matters for any `#[cfg(windows)]` written on a Mac:** a deliberate undefined
+    name inside the Windows body must make the cross-check FAIL. It did (two references), and
+    removing it returned it to 0 — otherwise the arm compiles nowhere and says nothing.
   - [x] windows-fs-locks — **DONE 2026-08-14, and two thirds of what this entry asked for did not
     exist.** Measured before writing anything: every advisory lock in the workspace is already
     `std::fs::File::try_lock` (std, both platforms — no `fs2`/`fd-lock` needed, and the code around
