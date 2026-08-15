@@ -1,0 +1,6 @@
+feature/windows-covers-new-crates 2026-08-15T10:09:24Z
+agent: nadia-ucc
+heartbeat: 2026-08-15T10:09:24Z
+status: not-started
+done-so-far:
+next: the Windows job tests an explicit package list and my two new crates are not in it — rozum-paths has Windows-only branches nothing runs
