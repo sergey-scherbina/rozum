@@ -160,9 +160,26 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   - **Anthropic `thinking`** — `{type: enabled, budget_tokens}` is unparsed; `SamplingParams` has
     `reasoning_effort`, so there is somewhere for it to go. Worth checking whether Claude Code sends
     it before wiring anything.
-  - **`previous_response_id`** (Responses) — unparsed. **Verify before filing anything stronger:** I
-    do not know whether codex sends it, and if it does, ignoring it means dropped conversation state
-    rather than a dropped knob. Check a real codex request first; the claim is unverified.
+  - [x] **`previous_response_id` — MEASURED 2026-08-15, and the answer is that there is nothing to
+    fix.** codex does not send it: not on the first turn, not on a continuation. It sends
+    `store: false` and RESENDS the whole conversation in `input` — 3 items on the opening request,
+    5 after a tool call (the `function_call` and its `function_call_output` appended). So no
+    conversation state is dropped by ignoring a field nobody sends, and wiring it would be
+    speculative code for a client that has told us, explicitly, to keep no state.
+    **How, so nobody has to re-derive it:** a 30-line fake `/v1/responses` on 127.0.0.1 that logs
+    each body and answers a valid SSE stream — a `function_call` on the first request so codex has
+    to take a second turn, since a continuation is the only place the field could appear. `strings`
+    on the codex binary was NOT enough and would have misled: it contains `previous_response_id` six
+    times, all in rollout-trace replay code and in prompt text about the API, none in a request.
+    **The census that fell out of it, for the one client that uses this endpoint.** codex sends 12
+    top-level fields; `/v1/responses` declares 9 of them. The three it drops:
+    - `client_metadata` — an installation id. Nothing to act on.
+    - `include` — codex sends `[]`, asking for no extra output parts. Nothing to act on.
+    - `prompt_cache_key` — a stable per-conversation key, and `ChatRequest.session_id` exists for
+      exactly this. **Still not worth wiring**: `session_id` is set to `None` at every one of its
+      three producers and read by nobody, and MLX prefix reuse keys on the token ids themselves
+      with an LRU of slots, so a key would duplicate a match the content already makes. It becomes
+      worth doing the day something needs a conversation identity the content cannot supply.
 
   The general lesson, which is why this entry exists rather than six scattered ones: **serde drops an
   undeclared field in silence**, so "the client asked for X and X did nothing" produces no error and

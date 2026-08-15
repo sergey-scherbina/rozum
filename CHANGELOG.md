@@ -1,5 +1,25 @@
 # Changelog
 
+## responses-previous-id — measured instead of wired: codex does not send it
+Completed: 2026-08-15
+
+The last open line of `wire-parameter-coverage`, and the entry was explicit that the claim was
+unverified: if codex sends `previous_response_id`, ignoring it drops conversation state rather than
+a knob. It does not send it — not on the first turn, not on a continuation. It sends `store: false`
+and resends the whole conversation in `input` (3 items, then 5 after a tool call). Nothing is
+dropped, and wiring the field would be speculative code for a client that explicitly asks us to keep
+no state.
+
+Measured with a 30-line fake `/v1/responses` that logs each body and returns a `function_call` first,
+so codex had to take a second turn — a continuation being the only place the field could appear.
+`strings` on the codex binary was not enough and would have pointed the wrong way: the name is in
+there six times, all in trace-replay code and prompt text.
+
+The census that fell out: codex sends 12 top-level fields, `/v1/responses` declares 9. The three
+dropped are an installation id, an empty `include`, and `prompt_cache_key` — the last one is the
+only interesting one, and it is still not worth wiring while `session_id` is `None` at all three
+producers and MLX prefix reuse keys on token ids.
+
 ## ucc-ssc-deploy — slice 1 in production, and the check that caught it not being
 Completed: 2026-08-15
 
