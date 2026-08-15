@@ -21,10 +21,19 @@ admit lock, with the lazy reload building nothing until it says yes. Whatever we
 may take — lowering without re-admitting is a plain overcommit hole, BUG-003's cascade reached from
 the far side. Both regression tests were checked to fail against the old code.
 
-Shipped with it: the idle-unload default drops to 300 s. A warm reload measured 1.1 s end-to-end
-(the weights are still in the page cache and MLX mmaps them), so the threshold trades about a second
-against ~7.4 GiB. The durable plist stops pinning `ROZUM_GATEWAY_UNLOAD_IDLE_SECS` altogether — it
-said 1200 while the code said 900, and only the plist decided anything.
+Self-caught the same day: that re-admit first ran through the full `admits`, free-RAM lever
+included, and twenty minutes after deploy every chat request answered 503 on a host that had the
+room — the footprint is a padded startup estimate, 7527 MB against 2893 MB of MLX active memory.
+Fitting a load to the host is `adapt_n_ctx_to_fit`'s job upstream, where it already happens; the gate
+now asks only what the release opened — the ledger, plus kernel pressure.
+
+Shipped with it: the idle-unload default drops to 300 s. Reload measured end-to-end at 1.1–3.6 s
+with the weights in the page cache and 15–23 s once builds had churned it, against ~7.4 GiB held on
+a 36 GiB host. The durable plist stops pinning `ROZUM_GATEWAY_UNLOAD_IDLE_SECS` altogether — it said
+1200 while the code said 900, and only the plist decided anything.
+
+Verified live across a full cycle: idle → `loaded: false`, `active: 0`, ledger 0 → next request
+reloads, answers, and republishes 7 892 971 128.
 
 ## idle-exit-beats-unload — the durable gateway reloaded its model every 15 minutes (BUG-052)
 Completed: 2026-08-16
