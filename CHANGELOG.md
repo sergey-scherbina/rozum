@@ -1,5 +1,22 @@
 # Changelog
 
+## openai-client-stream-usage — BUG-033's client half: we parsed the token counts and never asked for them
+Completed: 2026-08-15
+
+`openai_http.rs` pinned, with a test, that a streamed chunk carries `usage` — and never sent
+`stream_options: {"include_usage": true}`, which is what OpenAI requires before it will. Against a
+spec-compliant upstream every `Done` reported 0 tokens in and 0 out: no error, a number that looks
+like a measurement.
+
+Deferred once because it changes an OUTBOUND request to servers that cannot be probed from here. The
+answer was neither a probe nor an operator flag: ask, and fall back on the one refusal that means "I
+do not know this field", remembered per endpoint so only the first request pays. Name-based, because
+retrying any 4xx would hide the real reason behind the second failure. `ROZUM_OPENAI_STREAM_USAGE=0`
+for a refusal shape the code does not recognise.
+
+Four tests, no network. What cannot be proven here — a real third-party server's behaviour — is what
+the fallback exists for.
+
 ## matrix-capability-rate — the headline counted cells that never measured the model
 Completed: 2026-08-15
 

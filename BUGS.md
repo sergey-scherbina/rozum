@@ -462,9 +462,11 @@ request on the endpoint codex drives. `text`, an unknown type, and an absent fie
 
 ## BUG-033 — `/v1/chat/completions` streaming reports no token usage at all, and `stream_options` is not parsed
 
-- **Status:** SERVER HALF FIXED 2026-08-14 (`stream_options.include_usage` parsed; `usage: null` on
-  every ordinary chunk; one extra final chunk with the real counts; a seventh golden case).
-  **Client half still open** — see the last paragraph.
+- **Status:** FIXED 2026-08-15, both halves. Server 2026-08-14 (`stream_options.include_usage`
+  parsed; `usage: null` on every ordinary chunk; one extra final chunk with the real counts; a
+  seventh golden case). Client 2026-08-15: `openai_http.rs` now SENDS the parameter it was already
+  parsing the answer to, and falls back once on the single refusal that means "I do not know this
+  field", remembering it per endpoint.
 - **Severity:** P2 for anyone metering tokens over that endpoint; P3 for the agents here, which
   drive `/v1/messages` and `/v1/responses`.
 
@@ -503,13 +505,22 @@ ordinary chunk carries `"usage": null` and the extra one carries the counts with
 The null is how a client tells "this build does not report usage" from "this chunk is not the one
 that does".
 
-**The client half is still open, deliberately.** `openai_http.rs` — rozum as a client of an upstream
-OpenAI — parses `usage` out of a streamed chunk and pins that with a test, while never sending
-`stream_options` to ask for it, so those token counts are 0 against a spec-compliant upstream. Not
-fixed here because it changes an OUTBOUND request to third-party servers I cannot test from this
-machine: an OpenAI-compatible server that validates unknown parameters strictly would 400 the whole
-request rather than ignore the field. It needs either a probe against the real providers or an
-escape hatch, and both are a different change from this one.
+**The client half, closed 2026-08-15 — and it needed neither of the two things this entry said it
+needed.** The worry was real: sending an unknown parameter to a third party can 400 the whole
+request, and the real providers cannot be probed from here. But "probe them" and "add a flag the
+operator must know about" were not the only options. It ASKS, and on the one refusal that means "I
+do not know this field" it retries once without it and remembers that per endpoint, so only the
+first request against such a server pays for finding out.
+
+The refusal test is name-based (`stream_options` / `include_usage` in a 4xx body) and that is the
+load-bearing choice: treating any 4xx as "must be the new parameter" would retry a request the
+server rejected for a real reason — a bad model, a context overflow — and then report the SECOND
+failure, hiding the first. `ROZUM_OPENAI_STREAM_USAGE=0` remains for a refusal shape this code does
+not recognise, because this is the one place rozum changes an outbound request.
+
+Four tests cover it, and none of them touches a network. What is still NOT proven is the thing that
+cannot be proven here: the behaviour of an actual third-party server. The fallback is what makes
+that acceptable rather than a gamble.
 
 ## BUG-032 — the OpenAI `seed` was never parsed, so the code's own comment described a branch nothing could reach
 
