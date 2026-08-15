@@ -1,5 +1,15 @@
 # Changelog
 
+## bench-keeps-evidence-on-a-red — a failed cell is now reopenable
+Completed: 2026-08-15
+
+The harness deleted every cell's workdir a second after writing its CSV row, so a red left no
+program, no transcript and no verify output; `results/runs/` stayed empty while the footer
+promised per-run logs. Twice that turned a measurement into an inference — most recently an `rpn`
+cell that printed 20 for `3 4 + 5 *`, where the program could no longer be read. Failed cells now
+copy themselves into the results directory (32 KB each, `target/` excluded), reps land side by
+side, and the footer says which of the two it is.
+
 ## bench-gateway-url-unreachable — a run may no longer name a gateway it did not use
 Completed: 2026-08-15
 
