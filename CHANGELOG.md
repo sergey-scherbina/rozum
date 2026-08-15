@@ -1,5 +1,24 @@
 # Changelog
 
+## determinism-through-the-launch-proxy — the matrix's greedy decode reaches a borrowed gateway again
+Completed: 2026-08-15
+
+`ROZUM_FORCE_GREEDY` / `ROZUM_SAMPLING_SEED` are read from the environment of the process serving
+the model, so they stopped applying the day the bench began borrowing a resident gateway
+(2026-08-07): `run_full_matrix.sh` exported greedy, `agentic.sh` passed it down, and the launchd
+daemon actually decoding never saw it. Eight days of cells were sampled at the client's temperature
+under a launcher that said greedy — which is how `rpn`, green 11 of 11, came back red on one sample.
+
+The policy now travels on the request (`x-rozum-decode` / `x-rozum-seed`): `rozum launch`'s proxy
+stamps it, the gateway honours it per-request, and a gateway someone else is using is never
+touched. Absent headers are byte-identical — `wire-golden.txt` gained eight lines and changed none.
+`request_start` now logs the EFFECTIVE decode, so the eight-day gap could not repeat unseen, and
+each bench cell gets its own seed so REPS still measures a rate over independent draws.
+
+Verified live end to end: same body, one header, `decode='sampled'` → `decode='greedy' seed=1234`;
+and an agent launched with `ROZUM_FORCE_GREEDY=1 ROZUM_SAMPLING_SEED=4242` produced a gateway
+request logged `greedy seed=4242` through the proxy.
+
 ## bench-keeps-evidence-on-a-red — a failed cell is now reopenable
 Completed: 2026-08-15
 
