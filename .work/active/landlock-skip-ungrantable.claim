@@ -1,6 +1,0 @@
-feature/landlock-skip-ungrantable 2026-08-15T00:20:37Z
-agent: nadia-ucc
-heartbeat: 2026-08-15T00:20:37Z
-status: not-started
-done-so-far:
-next: /dev/stdout is a pipe under cargo test — per-path add_rule must SKIP rather than fail the whole ruleset
