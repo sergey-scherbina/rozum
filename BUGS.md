@@ -46,6 +46,30 @@ is required; a refused re-admit admitted anyway):
 `gateway::tests::unload_gives_the_ram_back_on_the_ledger_and_the_reload_takes_it_again`,
 `share::tests::readmit_refuses_when_another_gateway_took_the_freed_ram`.
 
+### Self-caught the same day: the re-admit refused on free RAM and took the chat down
+
+The first cut ran the reload through the full `admits`, free-RAM lever included. Twenty minutes
+later, live:
+
+```
+POST /v1/chat/completions -> 503
+{"error":{"message":"model was unloaded to free RAM and the host is now committed elsewhere"}}
+
+available = total - (wired 5221 + anon 21445 + compressor 3098) = 7101 MB
+demand    = footprint 7527 + min_free 2048                      = 9575 MB
+```
+
+The host had the room. `footprint` is a padded startup estimate — weights + KV at full `n_ctx` +
+cache reserve — and the same model's MLX **active** memory measures 2893 MB once loaded, 2.6× less.
+Sizing a load to the host is `adapt_n_ctx_to_fit`'s job on the way in, and it was already doing it;
+this gate had no business re-deciding it with a worse number, on a live request.
+
+Free RAM was never a gate on the reload path before this function existed, so adding one fixed
+nothing and broke the chat. `readmit_my_reservation` now checks the two levers that the release
+actually opened: the **ledger** (did a sibling claim the RAM we published as free?) and **host
+pressure** (the kernel's jetsam signal, the no-reboot invariant). Pinned by
+`share::tests::readmit_does_not_gate_on_transient_free_ram`, which fails the old way round.
+
 **Shipped alongside:** the idle-unload default is now **300 s**, not 900 (operator's call). A warm
 reload measured **1.1 s** end-to-end — the weights are still in the OS page cache, MLX mmaps them —
 so the threshold trades about a second of latency against ~7.4 GiB, and ten further minutes of
