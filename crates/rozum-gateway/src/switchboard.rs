@@ -125,11 +125,17 @@ fn drain_secs() -> u64 {
 /// default 300 (5 min); `0` disables. Spec: `docs/specs/model-unload-on-idle.md`.
 ///
 /// 300, not the 900 it was: the threshold's only job is to trade "RAM held while nobody is
-/// asking" against "how long the next question waits". A warm reload was MEASURED at **1.1 s**
-/// end-to-end (unloaded → answer in hand) — the weights are still in the OS page cache and MLX
-/// mmaps them — so the cost side of that trade is about a second, and holding ~7.4 GiB for a
-/// further ten minutes to save it is not a trade worth making on a 36 GiB host. Operator's call
-/// (2026-08-16); the env var still overrides, and `0` still disables entirely for the bench.
+/// asking" against "how long the next question waits". Measured end-to-end on the live job
+/// (unloaded → answer in hand), 2026-08-16: **1.1–3.6 s** with the weights still in the OS page
+/// cache, which MLX mmaps; **15–23 s** once two release builds had churned the cache and they came
+/// back off disk. So the cost is seconds, against ~7.4 GiB held on a 36 GiB host, and a shorter
+/// window cuts both ways in our favour — it unloads more often, but each reload is likelier to
+/// still find its weights cached. Operator's call (2026-08-16); the env var still overrides, and
+/// `0` still disables entirely for the bench.
+///
+/// The first version of this comment quoted the 1.1 s alone. That was the best case measured
+/// immediately after an unload, and reporting it as "the" reload time would have oversold the
+/// trade to whoever tunes this next.
 pub(crate) fn unload_idle_secs() -> u64 {
     std::env::var("ROZUM_GATEWAY_UNLOAD_IDLE_SECS")
         .ok()

@@ -106,9 +106,12 @@ number, not designed up front.
   env-overridable; `0` disables. Independent of the idle-exit window.
   Was 15 min until 2026-08-16. The threshold trades RAM held while nobody is
   asking against how long the next question waits, and the second half was
-  finally MEASURED once BUG-052 made unload reachable: a warm reload is **1.1 s**
-  end-to-end (weights still in the OS page cache, MLX mmaps them). A second of
-  latency against ~7.4 GiB is not a trade worth waiting ten more minutes to make.
+  finally MEASURED once BUG-052 made unload reachable. End-to-end, unloaded →
+  answer in hand, on the live job: **1.1–3.6 s** while the weights are still in
+  the OS page cache (MLX mmaps them), **15–23 s** once two release builds had
+  churned the cache and they came off disk again. Seconds, against ~7.4 GiB on a
+  36 GiB host — and a shorter window helps twice over, since it unloads more
+  often but each reload is likelier to still find its weights cached.
   The durable plist deliberately does NOT pin this any more — it said 1200 while
   the code said 900, and only the plist decided anything.
 - **Relationship to idle-exit:** resolved — complementary, share one watchdog
