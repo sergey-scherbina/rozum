@@ -1,0 +1,10 @@
+feature/responses-previous-id 2026-08-15T00:30:18Z
+agent: claude-opus-5
+heartbeat: 2026-08-15T00:30:18Z
+status: in-progress
+done-so-far:
+next: the last item of wire-parameter-coverage. `previous_response_id` on /v1/responses is
+  unparsed, and the entry is explicit that the claim is UNVERIFIED: if codex sends it, ignoring it
+  drops conversation state rather than a knob. So measure first — BUG-038 made the gateway capture
+  every request field it does not act on, so the answer may already be in the observation log
+  without running anything.
