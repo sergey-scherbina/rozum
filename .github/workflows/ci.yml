@@ -113,6 +113,11 @@ jobs:
       # checked below instead. The thin dispatcher is portable (spawn+wait on Windows, exec on Unix).
       - name: Build the portable dispatcher
         run: cargo build --no-default-features -p rozum-cli --bin rozum
+      # The leaf crates are here because they are the ones with WINDOWS-ONLY branches: `rozum-paths`
+      # resolves `%USERPROFILE%`/`%LOCALAPPDATA%` and `rozum-confine` reports "no mechanism" off
+      # macOS/Linux. Adding a crate to the workspace without adding it here leaves that code
+      # compiled-but-never-run — which is exactly how a unix-shaped assertion in `rozum-core` sat
+      # red on this job for a day (BUG-043).
       - name: Test the declared portable-core packages
         run: >-
           cargo test --no-default-features --lib --no-fail-fast
@@ -123,6 +128,9 @@ jobs:
           -p rozum-mistralrs
           -p rozum-mlx
           -p rozum-x86
+          -p rozum-paths
+          -p rozum-confine
+          -p rozum-stamp
       # The seams are compile-only claims, and a compile-only claim rots silently: one
       # `std::os::unix` added anywhere in the gateway puts it back to where it was in July, and
       # nothing on a mac would notice. This is the guard, and it is the FIRST time these packages
