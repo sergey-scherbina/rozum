@@ -5,6 +5,32 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-050 — constrained decode emits a TRAILING COMMA, so "structured output" does not parse
+
+- **Status:** OPEN, found 2026-08-15 by the first live smoke of the day's work, before the matrix.
+- **Severity:** P1 for the feature. `SamplingParams::response_schema` promises that a backend which
+  supports it "guarantees the output parses and conforms". It does not parse.
+
+```
+{"capital": "Paris",
+  }
+```
+
+Both OpenAI dialects, same output, temperature 0:
+
+- `/v1/responses` with `text.format` — the path BUG-034 opened yesterday;
+- `/v1/chat/completions` with `response_format` — which has supported structured output all along.
+
+So this is the constraint machinery, not the new wiring: the grammar lets a `,` be followed by `}`
+instead of requiring another member. The schema half works — the object has exactly the required
+property, with the right type — which is what makes the failure quiet: it LOOKS like structured
+output right up until `json.loads` refuses it, and the client that asked for a schema is the one
+client guaranteed to call that.
+
+**Found by running it, not by reading it.** The unit tests and the wire golden are green, CI is green
+on three platforms, and the feature has been broken on the endpoint it shipped on. A live smoke of
+three endpoints took two minutes and found what a day of green suites did not.
+
 ## BUG-049 — granting `TMPDIR` handed back the right to delete the workspace inside it
 
 - **Status:** FIXED 2026-08-15. The root is a named argument now, and any extra grant that is an
