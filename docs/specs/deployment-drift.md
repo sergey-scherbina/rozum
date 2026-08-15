@@ -40,6 +40,13 @@ the operator's machine, after being deployed:
   constant, read zero hex digits after it, and reported "unstamped" for a stamped binary. It walks
   every occurrence and takes the first followed by a real sha.
 
+**And a fourth, checked rather than assumed (2026-08-15): the marker survives the MSVC linker.**
+Every lesson above came from Mach-O and `-dead_strip`, so "it survives linking" was a claim about
+ONE linker offered as a property of the mechanism. `rozum-stamp` is in the Windows CI job's package
+list now precisely because it was the crate most likely to fail there — and it passes, so
+deployment-drift detection works on a Windows host too. One assumption fewer, obtained by running
+the thing on the platform instead of reasoning about it from a mac.
+
 ## What is reported, and as what
 
 **The fact and the verdict are separate**, and separating them was a correction: the day this landed,
