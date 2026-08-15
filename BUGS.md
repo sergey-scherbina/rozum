@@ -7,8 +7,8 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ## BUG-050 — constrained decode emits a TRAILING COMMA, so "structured output" does not parse
 
-- **Status:** FIXED 2026-08-15 in the grammar; **live re-verification pending** — it needs a gateway
-  restart and the matrix is running on that gateway. Found by the first live smoke of the day's work.
+- **Status:** FIXED and VERIFIED LIVE 2026-08-15 on both dialects — `{"capital": "Paris, France."}`,
+  parses. Found by the first live smoke of the day's work, and closed the same way it was found.
 - **Severity:** P1 for the feature. `SamplingParams::response_schema` promises that a backend which
   supports it "guarantees the output parses and conforms". It does not parse.
 
