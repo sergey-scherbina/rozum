@@ -1,5 +1,26 @@
 # Changelog
 
+## idle-unload-never-fires — the health check was holding the model (BUG-051)
+Completed: 2026-08-15
+
+`services.rs` probes the gateway with `GET /v1/models`, the activity middleware bumped `last_active`
+on every request whatever the path, and `com.rozum.doctor` runs that probe every 300 s against a
+1200 s unload threshold. The idle timer was reset four times before it could expire, so the
+idle-unload was not disabled or misconfigured — it was unreachable.
+
+Found while waiting for the model slot to free for a benchmark: 93 minutes after the last client
+request the model was still resident, lease directory empty, no connections, 7.89 GiB reserved,
+`ROZUM_GATEWAY_UNLOAD_IDLE_SECS=1200` correct in the running process, and `rozum doctor` reporting
+`7 ok, 0 warn`.
+
+`last_active` now means USE. Deny-list rather than allow-list, because a missed probe leaves the
+model resident (today's behaviour) while a missed inference path would unload it under a live
+client. Two tests, one per direction. Not yet deployed: the running gateway is the installed binary.
+
+Also worth keeping: `ps` reports this gateway at RSS 0.03 GB with a model loaded, because MLX holds
+weights outside the process heap. The real numbers are `/stats` `mlx_memory_mb` and the ledger's
+`footprint_bytes`.
+
 ## determinism-through-the-launch-proxy — the matrix's greedy decode reaches a borrowed gateway again
 Completed: 2026-08-15
 
