@@ -1,0 +1,9 @@
+feature/model-upgrade-survey 2026-08-15T10:29:43Z
+agent: claude-opus-5
+heartbeat: 2026-08-15T10:29:43Z
+status: in-progress
+done-so-far: surveyed what has shipped since the resident model was frozen. Measured, not recalled:
+  Qwen3.5-9B is the same model_type/architecture we already run and needs no port; Gemma 4 exists
+  with small variants but is a new model_type; Qwen released nothing small after 3.5 and Qwen3.7
+  does not exist at all.
+next: write the plan into BACKLOG as a resume-cold entry — the operator said "попробуем".
