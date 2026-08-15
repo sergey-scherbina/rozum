@@ -7,7 +7,8 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ## BUG-050 — constrained decode emits a TRAILING COMMA, so "structured output" does not parse
 
-- **Status:** OPEN, found 2026-08-15 by the first live smoke of the day's work, before the matrix.
+- **Status:** FIXED 2026-08-15 in the grammar; **live re-verification pending** — it needs a gateway
+  restart and the matrix is running on that gateway. Found by the first live smoke of the day's work.
 - **Severity:** P1 for the feature. `SamplingParams::response_schema` promises that a backend which
   supports it "guarantees the output parses and conforms". It does not parse.
 
@@ -26,6 +27,15 @@ instead of requiring another member. The schema half works — the object has ex
 property, with the right type — which is what makes the failure quiet: it LOOKS like structured
 output right up until `json.loads` refuses it, and the client that asked for a schema is the one
 client guaranteed to call that.
+
+**The fix, and the second hole it exposed.** `match_object` starts its loop after a comma, and the
+loop's first branch accepts `}` — so a comma promising a member could be followed by the closer. A
+`after_comma` flag refuses that. But refusing only the closer would have left the grammar with NO
+legal continuation when every declared property is already named: the key list is empty, so the next
+token would be masked whatever it is, and the decode would be stuck. So **the comma itself is
+refused once nothing is left to name**, which keeps `}` the only way out. `match_any_object` — the
+`Schema::Any` path that tool ARGUMENTS use before the tool is known — had the same hole, where it
+produces an unparseable tool call rather than an unparseable answer.
 
 **Found by running it, not by reading it.** The unit tests and the wire golden are green, CI is green
 on three platforms, and the feature has been broken on the endpoint it shipped on. A live smoke of

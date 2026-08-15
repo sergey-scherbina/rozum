@@ -326,12 +326,20 @@ fn match_object<'a>(
     }
     let mut rest = &s[1..];
     let mut seen: Vec<&str> = Vec::new();
+    // A comma PROMISES another member. Without this the loop's own `}` branch accepted
+    // `{"capital":"Paris",}` as a finished object, and since this matcher is what masks the
+    // decoder's tokens, the model was free to emit exactly that — "structured output" that does
+    // not parse (BUG-050, found by a live smoke, not by the suite).
+    let mut after_comma = false;
     loop {
         let r = json_ws(rest);
         if r.is_empty() {
             return M::More;
         }
         if let Some(after) = r.strip_prefix('}') {
+            if after_comma {
+                return M::No;
+            }
             // Can only close once every required key is present.
             if required.iter().all(|req| seen.iter().any(|k| k == req)) {
                 return M::Done(after);
@@ -380,12 +388,20 @@ fn match_object<'a>(
             None => return M::No,
         };
 
+        after_comma = false;
         match match_value(kschema, after) {
             M::Done(av) => {
                 seen.push(kname);
                 let av = json_ws(av);
                 if let Some(next) = av.strip_prefix(',') {
+                    // …and refuse the comma itself when nothing is left to name, or the grammar
+                    // would have no legal continuation at all: every following token masked, the
+                    // decode stuck. Forbidding the comma keeps `}` the only way out.
+                    if !props.iter().any(|(n, _)| !seen.iter().any(|k| k == n)) {
+                        return M::No;
+                    }
                     rest = next;
+                    after_comma = true;
                 } else if av.starts_with('}') {
                     rest = av; // loop handles the close (checks required)
                 } else if av.is_empty() {
@@ -421,12 +437,18 @@ fn match_any(s: &str) -> M<'_> {
 /// Match a generic object (any string keys, any values).
 fn match_any_object(s: &str) -> M<'_> {
     let mut rest = &s[1..];
+    let mut after_comma = false;
     loop {
         let r = json_ws(rest);
         if r.is_empty() {
             return M::More;
         }
         if let Some(after) = r.strip_prefix('}') {
+            // Same rule as the schema-driven matcher: a comma promises another member. Here there
+            // is always another key possible, so only the closer has to be refused (BUG-050).
+            if after_comma {
+                return M::No;
+            }
             return M::Done(after);
         }
         // key (any string)
@@ -441,11 +463,13 @@ fn match_any_object(s: &str) -> M<'_> {
             None if after.is_empty() => return M::More,
             None => return M::No,
         };
+        after_comma = false;
         match match_any(after) {
             M::Done(av) => {
                 let av = json_ws(av);
                 if let Some(next) = av.strip_prefix(',') {
                     rest = next;
+                    after_comma = true;
                 } else if av.starts_with('}') {
                     rest = av;
                 } else if av.is_empty() {
@@ -686,6 +710,45 @@ mod tests {
 
     fn sc(v: serde_json::Value) -> Schema {
         Schema::parse(&v)
+    }
+
+    #[test]
+    fn a_trailing_comma_is_not_a_finished_object() {
+        // BUG-050, and it shipped: this matcher is what masks the decoder's tokens, so a grammar
+        // that accepts `{"a":"x",}` lets the model EMIT it — "structured output" that `json.loads`
+        // refuses. Found by a two-minute live smoke after a day of green suites.
+        let one = sc(json!({
+            "type": "object",
+            "properties": {"capital": {"type": "string"}},
+            "required": ["capital"]
+        }));
+        assert_eq!(one.prefix(r#"{"capital":"Paris"}"#), Prefix::Complete);
+        assert_eq!(one.prefix(r#"{"capital":"Paris",}"#), Prefix::Invalid);
+        // …and the comma itself is refused once nothing is left to name, or every continuation
+        // would be masked and the decode would have nowhere to go.
+        assert_eq!(one.prefix(r#"{"capital":"Paris","#), Prefix::Invalid);
+
+        // With a property still unnamed, the comma is legal and the object is NOT yet finished.
+        let two = sc(json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+            "required": ["a"]
+        }));
+        assert_eq!(two.prefix(r#"{"a":"x","#), Prefix::Partial);
+        assert_eq!(two.prefix(r#"{"a":"x",}"#), Prefix::Invalid);
+        assert_eq!(two.prefix(r#"{"a":"x","b":"y"}"#), Prefix::Complete);
+        assert_eq!(two.prefix(r#"{"a":"x"}"#), Prefix::Complete);
+    }
+
+    #[test]
+    fn a_schemaless_object_refuses_the_same_trailing_comma() {
+        // The `Schema::Any` path is what tool ARGUMENTS use before the tool is known, so the same
+        // hole there produces an unparseable tool call rather than an unparseable answer.
+        let any = sc(json!({}));
+        assert_eq!(any.prefix(r#"{"k":1}"#), Prefix::Complete);
+        assert_eq!(any.prefix(r#"{"k":1,}"#), Prefix::Invalid);
+        assert_eq!(any.prefix(r#"{"k":1,"#), Prefix::Partial, "another key may still follow");
+        assert_eq!(any.prefix(r#"{"k":1,"j":2}"#), Prefix::Complete);
     }
 
     #[test]
