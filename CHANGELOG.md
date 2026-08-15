@@ -1,5 +1,21 @@
 # Changelog
 
+## windows-tmux-bash-refusal — say it at the door, not four layers down
+Completed: 2026-08-15
+
+Terminal sessions drive `tmux` and the matrix drives a thousand lines of bash. Neither exists on
+Windows and neither is a platform arm — one is ConPTY plus a session manager written from scratch,
+the other is porting a harness. Both used to fail as the OS's own "program not found" from inside
+`Command::new`, after a registry entry or a queued job, a result directory and a `running` status row
+already existed. Now each route answers 501 naming the missing tool and what replacing it would take,
+before anything is created.
+
+Verified the `#[cfg(windows)]` bodies are actually compiled — the trap in writing them on a Mac: a
+deliberate undefined name inside made the cross-check fail, removing it returned it to 0.
+
+Closes `windows-tmux-bash-refusal`, and with it the last open line of `windows-portability` besides
+the engine work tracked elsewhere.
+
 ## anthropic-thinking — the last line of the wire sweep, and the entry named the wrong field
 Completed: 2026-08-15
 
