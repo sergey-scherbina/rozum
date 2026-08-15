@@ -253,3 +253,39 @@ unset is today's behaviour exactly; an unreachable origin answers 502 rather tha
 `SSC_HTTP_BIND=127.0.0.1` keeps the .ssc server off the network — demonstrated: unset binds `*:8412`,
 set binds `127.0.0.1:8412` and the host's own LAN address refuses, the same answer `:8411` gives.
 The one remaining deviation is a header: the .ssc runtime adds `Cache-Control: no-store`.
+
+## Slice 1 is IN PRODUCTION (2026-08-15, operator: "Да")
+
+`/control/public/matrix/cell` and `/view/{token}` on the live console are served by ScalaScript.
+
+    com.rozum.ucc-ssc      ~/.local/bin/rozum-ucc-ssc, SSC_HTTP_BIND=127.0.0.1, cwd = the repo
+    com.rozum.ucc-control  + ROZUM_UCC_SSC_ORIGIN=http://127.0.0.1:8412
+
+The working directory is load-bearing on both: the cell route resolves `scripts/bench/results`
+relative to the process, so a different cwd answers "no such cell" for every cell.
+
+**What was verified live, in this order, and one step of it failed the first time:**
+
+1. 371 cells captured from the Rust console BEFORE anything changed, so the comparison had a
+   reference that could not move under it.
+2. The .ssc service bound `127.0.0.1:8412` — checked with `lsof`, not assumed from the variable.
+3. `ROZUM_UCC_SSC_ORIGIN` set, console restarted with `kickstart -k`, all 371 answers identical.
+   **And the switch was not on.** `kickstart -k` restarts the process from the job definition
+   launchd already loaded; a plist edit needs `bootout` + `bootstrap`. Every answer looked right
+   because the Rust handler was still serving them — the identical result was evidence of nothing.
+4. Caught by stopping the .ssc and watching `:8411` answer **200** instead of 502. That probe is the
+   only reason this was not deployed believing itself switched. It is exactly what the 502 was for:
+   a switch that fell back silently would have passed every check in this list.
+5. Reloaded properly. The log now says
+   `control server: /control/public/matrix/cell and /view/{token} → http://127.0.0.1:8412 (.ssc)`,
+   the process carries the variable, and with the .ssc stopped `:8411` answers **502** while every
+   other route still answers 200.
+6. The deployed binary is byte-identical (md5) to the one measured at 1892/1892 on cells and
+   byte-identical on `/view`, so that result carries over rather than being re-asserted. Live spot
+   checks: `/view/<token>` 200 with the token injected, `/view/<bad>` 410, 120 sampled cell bodies
+   parse with exactly the six expected fields.
+
+**Rebuild path:** `clients/control/build-public-matrix.sh`, wired into `install-bins.sh` as
+`rozum-ucc-ssc`. When scalascript's shared toolchain is stale — it was, on first use — the script
+says which of "restage / our source / their compiler" it is and prints the three commands, instead
+of leaving cargo output to be read as a defect here.

@@ -1,5 +1,20 @@
 # Changelog
 
+## ucc-ssc-deploy — slice 1 in production, and the check that caught it not being
+Completed: 2026-08-15
+
+The live console serves `/control/public/matrix/cell` and `/view/{token}` from ScalaScript:
+`com.rozum.ucc-ssc` on loopback, `ROZUM_UCC_SSC_ORIGIN` on the console job.
+
+The first attempt LOOKED perfect and was not switched at all. `launchctl kickstart -k` restarts the
+process from the job definition already loaded, so the new environment entry never reached it; all
+371 sampled answers matched, because the Rust handler was still producing them. Stopping the .ssc
+and seeing `:8411` answer 200 instead of 502 is what found it — the switch refusing to fall back is
+the only reason this was not deployed believing itself live.
+
+Also lands the rebuild path this needed before it could be a service at all: a build script and an
+`install-bins.sh` arm. A deployed binary nobody can rebuild is BUG-030, which cost a week.
+
 ## openai-client-stream-usage — BUG-033's client half: we parsed the token counts and never asked for them
 Completed: 2026-08-15
 
