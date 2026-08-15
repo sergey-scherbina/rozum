@@ -64,7 +64,7 @@ targets() {
     # Emitted by the ScalaScript toolchain, not by cargo: `clients/control/deploy-ucc-web.sh` owns
     # it. Named here so that "this script does not update it" is a statement rather than a silence.
     # Built by the ScalaScript toolchain, not cargo — handled by `install_ssc`, not by `targets`.
-    rozum-meeting-ssc) echo "SSC" ;;
+    rozum-meeting-ssc|rozum-ucc-ssc) echo "SSC" ;;
     *) echo "unknown binary: $1 (known: rozum-gateway nadia rozum rozum-meet)" >&2; return 1 ;;
   esac
 }
@@ -149,18 +149,24 @@ install_to() {
 # BINARY RUNS, which is all the check is for (BUG-013: launchd could not exec; BUG-028: the runtime
 # could not find its metallib). So: run it briefly and accept either "bound the port" or "the port
 # was taken" — reject only a binary that cannot start at all.
+# $1 = installed binary name, $2 = build script relative to the repo root.
+#
+# PARAMETERISED once there were two. The meeting PWA and the UCC's public routes are the same job —
+# one .ssc source, one `build-rust`, one exec-check, one publish, one restart — and the second one
+# arriving is exactly when a copy-paste would have been made and then drifted. `rozum-meet` and
+# `rozum-meeting-ssc` already taught that lesson here (BUG-029).
 install_ssc() {
-  local dst
-  dst="$(extra_paths_for rozum-meeting-ssc | head -1)"
-  dst="${dst:-$HOME/.local/bin/rozum-meeting-ssc}"
+  local name="$1" script="$2" dst
+  dst="$(extra_paths_for "$name" | head -1)"
+  dst="${dst:-$HOME/.local/bin/$name}"
 
-  if [ ! -x "$ROOT/clients/meeting/build.sh" ]; then
-    echo "SKIP rozum-meeting-ssc: clients/meeting/build.sh missing" >&2; return 0
+  if [ ! -x "$ROOT/$script" ]; then
+    echo "SKIP $name: $script missing" >&2; return 0
   fi
-  echo "==> building rozum-meeting-ssc (ScalaScript → Rust)"
+  echo "==> building $name (ScalaScript → Rust)"
   local tmp="$dst.new.$$"
   local log="$tmp.log"
-  if ! "$ROOT/clients/meeting/build.sh" "$tmp" >"$log" 2>&1; then
+  if ! "$ROOT/$script" "$tmp" >"$log" 2>&1; then
     rm -f "$tmp"
     # SAY WHY, and say what it is TODAY — the reason has changed twice and a stale reason here is
     # worse than none, because it sends the next reader looking for a bug that is already fixed.
@@ -179,7 +185,7 @@ install_ssc() {
     # compiler" it is, at the moment it fails, from the machine's own state instead of from a comment.
     # Print that block whole — its last lines are the suggested commands, so a blind `tail` would
     # show the remedy and hide the diagnosis.
-    echo "SKIP rozum-meeting-ssc: the ssc build FAILED — $dst left as it is. Reason:" >&2
+    echo "SKIP $name: the ssc build FAILED — $dst left as it is. Reason:" >&2
     if grep -q 'build.sh: the ssc build FAILED' "$log"; then
       sed -n '/build.sh: the ssc build FAILED/,$p' "$log" | sed 's/^/      /' >&2
     else
@@ -197,7 +203,7 @@ install_ssc() {
     *"Address already in use"*) : ;;   # reached its serve call — the service holds the port
     *) if ! kill -0 %1 2>/dev/null && [ -z "$out" ] && [ "$rc" -ge 126 ]; then
          rm -f "$tmp"
-         echo "FAIL: freshly built rozum-meeting-ssc will not exec (rc=$rc) — $dst untouched" >&2
+         echo "FAIL: freshly built $name will not exec (rc=$rc) — $dst untouched" >&2
          exit 1
        fi ;;
   esac
@@ -245,6 +251,11 @@ restart_owner() {
     [ "$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null)" = "$dst" ] || continue
     label="$(basename "$plist" .plist)"
     echo "    restarting $label (its binary was just replaced)"
+    # `kickstart -k` restarts the PROCESS from the job definition launchd already loaded. That is
+    # exactly right here — the plist did not change, only the file it points at. It is NOT enough
+    # after editing a plist: measured 2026-08-15 while enabling the .ssc console routes, where the
+    # new `EnvironmentVariables` entry was invisible to the restarted process and the switch stayed
+    # off while every answer still looked correct. A plist edit needs `bootout` + `bootstrap`.
     launchctl kickstart -k "gui/$(id -u)/$label" >/dev/null 2>&1 || true
     # A pid is NOT proof. Measured on the very first run of this code: it reported "back (pid 6507)"
     # while the OLD process still held :8405, so the new one panicked on bind, exited, and launchd
@@ -320,7 +331,7 @@ declared_pair() {
     return 0
   fi
   case "$want:$have" in
-    rozum-gateway:rozum-gateway|nadia:nadia|rozum:rozum|rozum:rozum-ctrl|rozum-meet:rozum-meet|rozum-meeting-ssc:rozum-meeting-ssc) return 0 ;;
+    rozum-gateway:rozum-gateway|nadia:nadia|rozum:rozum|rozum:rozum-ctrl|rozum-meet:rozum-meet|rozum-meeting-ssc:rozum-meeting-ssc|rozum-ucc-ssc:rozum-ucc-ssc) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -359,10 +370,13 @@ extra_paths_for() {
 # invocation was the broken one.
 FAILED_RESTARTS=0
 
-[ $# -gt 0 ] || set -- rozum-gateway nadia rozum rozum-meet rozum-meeting-ssc
+[ $# -gt 0 ] || set -- rozum-gateway nadia rozum rozum-meet rozum-meeting-ssc rozum-ucc-ssc
 
 for name in "$@"; do
-  if [ "$name" = rozum-meeting-ssc ]; then install_ssc; continue; fi
+  case "$name" in
+    rozum-meeting-ssc) install_ssc rozum-meeting-ssc clients/meeting/build.sh; continue ;;
+    rozum-ucc-ssc)     install_ssc rozum-ucc-ssc clients/control/build-public-matrix.sh; continue ;;
+  esac
   install_one "$name"
   while read -r p; do
     [ -n "$p" ] || continue
