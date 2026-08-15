@@ -76,20 +76,33 @@ pub fn confine_child(cmd: &mut std::process::Command, writable: &[&Path]) -> Out
         .and_then(|r| {
             let mut r = r.no_new_privs(true);
             for p in writable {
-                if let Ok(fd) = PathFd::new(p) {
-                    // A DIRECTORY takes the whole write set; a file or device takes only the
-                    // rights that apply to one. Handing `MakeDir`/`RemoveDir` to `/dev/null`
-                    // fails the whole ruleset with EBADFD ("file descriptor in bad state") —
-                    // measured on Linux CI, where it took down BOTH consumers at once through a
-                    // single unbuilt ruleset: nadia then ran unconfined and the assistant's shell
-                    // refused every command.
-                    let granted = if p.is_dir() {
-                        rights
-                    } else {
-                        AccessFs::WriteFile.into()
-                    };
-                    r = r.add_rule(PathBeneath::new(fd, granted))?;
+                // FILTERED BEFORE ADDING, because `add_rule` consumes the ruleset: a failed add
+                // takes the whole thing with it and there is nothing left to continue from. So the
+                // decision has to be made from the path, not from the error.
+                //
+                // What must be skipped, both measured on Linux CI rather than guessed:
+                //   * a path that cannot be opened at all;
+                //   * anything that is not a filesystem object Landlock can rule on. Under
+                //     `cargo test`, `/dev/stdout` resolves to `/proc/self/fd/1`, which is a PIPE,
+                //     and `add_rule` answers EBADFD — one such entry disabled confinement
+                //     completely and took BOTH consumers down with it.
+                //
+                // Skipping costs nothing real: Landlock governs OPENING a path, not writing to an
+                // already-open descriptor, so a shell's inherited stdout keeps working whether or
+                // not `/dev/stdout` could be granted.
+                use std::os::unix::fs::FileTypeExt;
+                let Ok(md) = std::fs::metadata(p) else { continue };
+                let ft = md.file_type();
+                let grantable =
+                    ft.is_dir() || ft.is_file() || ft.is_char_device() || ft.is_block_device();
+                if !grantable {
+                    continue;
                 }
+                let Ok(fd) = PathFd::new(p) else { continue };
+                // A DIRECTORY takes the whole write set; a file or device takes only the rights
+                // that apply to one — `MakeDir`/`RemoveDir` on `/dev/null` is EBADFD too.
+                let granted = if ft.is_dir() { rights } else { AccessFs::WriteFile.into() };
+                r = r.add_rule(PathBeneath::new(fd, granted))?;
             }
             Ok(r)
         });
@@ -160,8 +173,12 @@ mod tests {
         // `/dev/null` is in the list ON PURPOSE: a device is not a directory, and asking for
         // directory rights on one fails the entire ruleset. That took both sandboxes down on Linux
         // and passed here, because on macOS this function is a no-op.
+        // `/dev/null` (a device) and `/dev/stdout` (under `cargo test`, a PIPE) are both here on
+        // purpose: each broke the whole ruleset once, and neither can break it on macOS, where
+        // `confine_child` does nothing.
         let dev_null = Path::new("/dev/null");
-        let paths: Vec<&Path> = vec![inside.as_path(), dev_null];
+        let dev_out = Path::new("/dev/stdout");
+        let paths: Vec<&Path> = vec![inside.as_path(), dev_null, dev_out];
         if !confine_child(&mut cmd, &paths).applied() {
             let _ = std::fs::remove_dir_all(&dir);
             return; // no mechanism here; the platform's own test covers that
@@ -188,7 +205,8 @@ mod tests {
         let mut cmd = std::process::Command::new("/bin/sh");
         cmd.arg("-c").arg("echo ok > inside.txt && cat inside.txt").current_dir(&dir);
         let dev_null = Path::new("/dev/null");
-        let paths: Vec<&Path> = vec![dir.as_path(), dev_null];
+        let dev_out = Path::new("/dev/stdout");
+        let paths: Vec<&Path> = vec![dir.as_path(), dev_null, dev_out];
         let outcome = confine_child(&mut cmd, &paths);
         if !outcome.applied() {
             eprintln!("skipped: confinement unavailable here ({outcome:?})");

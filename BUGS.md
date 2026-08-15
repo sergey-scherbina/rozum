@@ -5,6 +5,32 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-048 — the same EBADFD, from a second cause: under `cargo test`, `/dev/stdout` is a pipe
+
+- **Status:** FIXED 2026-08-15. Paths are filtered by FILE TYPE before being added, because a failed
+  `add_rule` consumes the ruleset and leaves nothing to continue from.
+- **Severity:** P1 on Linux, and it is the same P1 as BUG-047 — I fixed half a cause and shipped.
+
+BUG-047 fixed device rights (`MakeDir` on `/dev/null`). The next CI round returned the identical
+error, and the second cause is a different shape entirely: **`/dev/stdout` resolves to
+`/proc/self/fd/1`, which under `cargo test` is a PIPE** — not a filesystem object Landlock can rule
+on. `add_rule` answers EBADFD, the whole ruleset fails to build, and both consumers fall over in
+their own way exactly as before.
+
+**Why "skip the bad path" had to become "do not offer it": `add_rule` takes `self` by value.** A
+failed add consumes the ruleset, so there is nothing left to continue the loop with — recovery is
+impossible after the fact and the decision must be made from the PATH. Filtered now to directories,
+regular files and device nodes; pipes and sockets are skipped.
+
+Skipping costs nothing real, and the reason is worth knowing: **Landlock governs OPENING a path, not
+writing to an already-open descriptor.** A shell's inherited stdout keeps working whether or not
+`/dev/stdout` could ever be granted.
+
+**Both failing shapes are in the crate's own tests now** — a device and a pipe — because neither can
+fail on macOS, where `confine_child` is a no-op. Three CI rounds were spent learning what only that
+platform could tell me, and each round taught exactly one thing: handle writes only, then file
+rights for files, then do not offer what cannot be granted.
+
 ## BUG-047 — one rule on `/dev/null` failed the whole ruleset, and took both sandboxes down with it
 
 - **Status:** FIXED 2026-08-15. Directories get the whole write set; files and devices get only the
