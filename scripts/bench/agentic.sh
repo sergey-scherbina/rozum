@@ -259,6 +259,44 @@ EOF
   seed_manifest "$2"
 }
 
+# Does the endpoint this run ANNOUNCES match the one the agent will actually talk to?
+#
+# It does not follow from setting `BENCH_GATEWAY_URL`. That variable steers this harness — the
+# readiness probe, the header line, the CSV — and nothing else. Every agent gets its base URL from
+# `rozum launch`, which resolves its own: `ensure_shared_gateway` reads the ACTIVE-gateway registry
+# and reuses whatever it names (src/main.rs), so `--port` is where it would SPAWN one, not where it
+# will connect. Measured 2026-08-15 with a recording proxy: the run printed "sharing an existing
+# gateway at http://127.0.0.1:8199", the proxy logged ZERO request bodies, and every token came
+# from :8089 — a full pass/fail cell attributed to a gateway that never saw it.
+#
+# That is worth refusing rather than warning about, because the mislabel is invisible afterwards:
+# the CSV row, the console header and the results directory all name the endpoint that was asked
+# for, and nothing in them records which gateway (which build, which model, which n_ctx) actually
+# answered. A red then reads as evidence about the wrong binary.
+#
+# Pure, so `test-agentic-gateway-url.sh` can cover every branch with no model and no network.
+# $1 = announced base URL, $2 = port from `rozum gateway status --json` (empty = none registered).
+# Echoes the reason when the run would lie; echoes nothing when the two agree.
+agent_gateway_mismatch() {
+  local base="$1" active="${2:-}" want
+  want="$(printf '%s' "$base" | sed -n 's|^[a-zA-Z][a-zA-Z0-9+.-]*://[^/:]*:\([0-9]\{1,5\}\)\(/.*\)\{0,1\}$|\1|p')"
+  if [ -z "$want" ]; then
+    echo "BENCH_GATEWAY_URL='$base' has no explicit port, so it cannot be compared with the gateway \`rozum launch\` resolves"
+    return 0
+  fi
+  if [ -z "$active" ]; then
+    # No registered gateway: `rozum launch` spawns its own daemon — a SECOND copy of the weights,
+    # which on a one-model host is the eviction the share-by-default block exists to prevent.
+    echo "no gateway is registered as active, so \`rozum launch\` would start its own instead of using :$want"
+    return 0
+  fi
+  if [ "$want" != "$active" ]; then
+    echo "\`rozum launch\` will use :$active (the active gateway), not :$want — the agent never sees BENCH_GATEWAY_URL"
+    return 0
+  fi
+  echo ""
+}
+
 # Sourced rather than executed: helpers are defined, nothing runs. Must stay ABOVE the config
 # block, which calls `exit 1` when its preconditions are missing.
 (return 0 2>/dev/null) && return 0
@@ -978,6 +1016,16 @@ for spec in "${MODELS[@]}"; do
     echo "  sharing an existing gateway at $base — pass/fail only, timings are contended"
     if ! curl -s -m5 "$base/v1/models" >/dev/null 2>&1; then
       echo "  ! $base does not answer — nothing to share" >&2; exit 1
+    fi
+    # Answering is not the same as being the gateway the AGENT will use (`agent_gateway_mismatch`).
+    _active_port="$("$BIN" gateway status --json 2>/dev/null | tr -d '\n ' | sed -n 's/.*"port":\([0-9]*\).*/\1/p')"
+    _why="$(agent_gateway_mismatch "$base" "$_active_port")"
+    if [ -n "$_why" ]; then
+      echo "  ! $_why" >&2
+      echo "  ! refusing: this run would report a cell against a gateway that never served it." >&2
+      echo "  ! Point BENCH_GATEWAY_URL at the active gateway, unset it (it is borrowed by default)," >&2
+      echo "  ! or use BENCH_DEDICATED=1 for a private one." >&2
+      exit 1
     fi
     TIME_PID=""; GW_PID=""; SHARED_GW=1
   else

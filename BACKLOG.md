@@ -318,6 +318,17 @@ single-writer daemon). Each item below is its own spec+build later — listed to
 
 ## Agentic-bench fix candidates (from matrix-failure-analysis)
 
+- [ ] **launch-connect-to-a-named-gateway** — `rozum launch` cannot be TOLD which gateway to use.
+  `ensure_shared_gateway` (`src/main.rs:3653`) reads the active-gateway registry and reuses whatever
+  it names; `--port` only says where to spawn one if none is running. So `BENCH_GATEWAY_URL`, and
+  any other "measure THIS gateway" intent, cannot reach the agent — measured 2026-08-15 with a
+  recording proxy (the harness announced :8199, the agent talked to :8089, and nothing recorded the
+  difference). `agentic.sh` now refuses that run rather than mislabelling it, which closes the
+  reporting hazard but not the capability: there is still no way to A/B two gateway builds on one
+  host, which is exactly what "did my change move the matrix?" needs. The work is a design call,
+  not a flag: what should the failover watchdog, the client lease and the idle-takeover path do
+  when the target gateway is one this launch does not manage? Answer that first.
+
 - [x] **codex-reliability — CLOSED 2026-08-09: all four listed levers shipped, and today's run is the
   A/B the entry asked for.** The entry lists them as "Levers to A/B (NOT yet concluded)"; each is in
   the tree:

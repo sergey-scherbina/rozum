@@ -66,6 +66,11 @@ jobs:
       # not on a GitHub runner, and the test says SKIP out loud rather than passing quietly.
       - name: Test the matrix capability rate
         run: bash scripts/bench/test-summarize-matrix.sh
+      # And that a run cannot ANNOUNCE one gateway while the agent talks to another — the harness
+      # can only steer itself, so this is the check that keeps a cell attributable to the build it
+      # actually ran on. Pure function; no model, no gateway, no network.
+      - name: Test the bench gateway-URL agreement
+        run: bash scripts/bench/test-agentic-gateway-url.sh
 
   linux-core:
     name: linux — portable core (no native backends)
