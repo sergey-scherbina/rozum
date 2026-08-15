@@ -1128,15 +1128,46 @@ async fn auth_layer(
     }
     // Activity tracking for the idle watchdog: count this request as in-flight
     // for its whole duration so a long generation can't trip the idle timer.
+    //
+    // But `last_active` means USE, not traffic — see `is_liveness_probe`. `in_flight` still counts
+    // every request, including a probe: it is the "nothing is running right now" guard for exit and
+    // preemption, and a probe genuinely is running.
     let act = &state.activity;
+    let counts_as_use = !is_liveness_probe(req.uri().path());
     act.in_flight.fetch_add(1, Ordering::Relaxed);
-    act.last_active
-        .store(crate::share::now_unix(), Ordering::Relaxed);
+    if counts_as_use {
+        act.last_active
+            .store(crate::share::now_unix(), Ordering::Relaxed);
+    }
     let resp = next.run(req).await;
     act.in_flight.fetch_sub(1, Ordering::Relaxed);
-    act.last_active
-        .store(crate::share::now_unix(), Ordering::Relaxed);
+    if counts_as_use {
+        act.last_active
+            .store(crate::share::now_unix(), Ordering::Relaxed);
+    }
     resp
+}
+
+/// Paths that ask "are you alive" rather than using the model.
+///
+/// BUG-051. Without this the idle-unload could never fire on this machine, and the reason was a
+/// health check: `services.rs` probes the gateway with `GET /v1/models`, `com.rozum.doctor` runs
+/// that probe every 300 s, and the unload threshold is 1200 s — so the idle timer was reset four
+/// times before it could expire. Measured: 93 minutes with no client, no lease since the last
+/// request, and 7.89 GiB still reserved, while `ROZUM_GATEWAY_UNLOAD_IDLE_SECS=1200` sat correct
+/// and unreachable in the running process. The check that exists to say "this service is fine" was
+/// what stopped it releasing its model, and reported `7 ok, 0 warn` while doing so.
+///
+/// A DENY-LIST, and the direction of the error is the whole argument. Miss a probe here and the
+/// model stays resident — today's behaviour, recoverable. An allow-list of inference paths would
+/// fail the other way: a new endpoint nobody added to it would let the model unload UNDER A LIVE
+/// CLIENT, mid-conversation. Cheap wrong beats expensive wrong.
+fn is_liveness_probe(path: &str) -> bool {
+    matches!(
+        path,
+        // What `services.rs` and every external monitor actually call.
+        "/v1/models" | "/models" | "/health" | "/healthz" | "/stats" | "/ready" | "/ping"
+    )
 }
 
 // ─── Poison fast-refuse ─────────────────────────────────────────────────────
@@ -1561,6 +1592,33 @@ mod tests {
         // A request without it stays unconstrained, which is what every client that sends no schema
         // has always got.
         assert_eq!(parse_text_format(&Value::Null), None);
+    }
+
+    #[test]
+    fn a_health_probe_is_not_use_of_the_model() {
+        // The exact path `services.rs` probes, and the reason the idle-unload never fired.
+        assert!(is_liveness_probe("/v1/models"));
+        for p in ["/models", "/health", "/healthz", "/stats", "/ready", "/ping"] {
+            assert!(is_liveness_probe(p), "{p} should not count as use");
+        }
+    }
+
+    #[test]
+    fn every_inference_endpoint_still_counts_as_use() {
+        // The failure this deny-list must never cause: unloading the model under a live client.
+        // These are the four paths that actually generate, and each must keep the gateway awake.
+        for p in [
+            "/v1/chat/completions",
+            "/v1/completions",
+            "/v1/messages",
+            "/v1/responses",
+        ] {
+            assert!(!is_liveness_probe(p), "{p} must count as use");
+        }
+        // Anything unrecognised also counts as use — a deny-list errs toward staying loaded.
+        assert!(!is_liveness_probe("/v1/embeddings"));
+        assert!(!is_liveness_probe("/"));
+        assert!(!is_liveness_probe("/v1/models/extra"));
     }
 
     #[test]

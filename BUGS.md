@@ -1,5 +1,54 @@
 # Bugs
 
+## BUG-051 — the health check kept the model resident forever, so idle-unload could never fire
+
+- **Status:** FIXED 2026-08-15 (`gateway.rs`: `last_active` is bumped only for requests that USE the
+  model; `is_liveness_probe` is the deny-list). Not yet deployed — the running gateway is the
+  installed binary, and restarting it is the operator's call.
+- **Severity:** P2, and expensive in a way that shows up as something else. The host holds a
+  model's whole reservation — **7.89 GiB** measured here — indefinitely, so every later "the slot is
+  busy" and every RAM-blocked load is a downstream symptom of this.
+
+Three facts, each measured, and they only make sense together:
+
+| | |
+|---|---|
+| `src/services.rs:83` | the registry probes the gateway with `GET http://127.0.0.1:8089/v1/models` |
+| `gateway.rs` auth/activity middleware | bumped `last_active` on EVERY request, never looking at the path |
+| `com.rozum.doctor` | runs that probe **every 300 s**; the unload threshold is **1200 s** |
+
+300 < 1200, so the idle timer was reset four times before it could expire. The idle-unload was
+unreachable on this machine — not disabled, not misconfigured: **unreachable**.
+
+**What it looked like from outside**, which is why it went unnoticed: `ROZUM_GATEWAY_UNLOAD_IDLE_SECS=1200`
+sits in the launchd job, reaches the process (verified with `ps eww`), and is read correctly. The
+gateway answers every probe. `rozum doctor` reports `7 ok, 0 warn, 0 fail`. Everything is fine
+except the one thing nobody was looking at: 93 minutes after the last client request the model was
+still resident, with an empty lease directory and no established connections.
+
+**Two other explanations were ruled out before the real one, both by measurement.** Stale leases:
+the lease directory has been empty since the last request completed. A missing reload builder
+(`can_reload()` gates the unload and a `--dedicated` gateway has none): the daemon path passes
+`builder: Some(gateway_backend_builder(...))`, so it is true here.
+
+**A false signal worth recording.** `ps` shows this gateway at **RSS 0.03 GB** with a model loaded,
+because MLX holds weights in unified memory outside the process heap. Read that way the model looks
+unloaded already. The honest numbers are in `/stats` — `mlx_memory_mb {active: 3115, peak: 4560,
+cache: 2049}` — and in the residency ledger's `footprint_bytes: 7892971128`.
+
+**The fix is a DENY-LIST and the direction of the error is the argument.** `is_liveness_probe`
+names `/v1/models`, `/models`, `/health`, `/healthz`, `/stats`, `/ready`, `/ping`; everything else
+counts as use. Miss a probe and the model stays resident — today's behaviour, recoverable. An
+allow-list of inference paths would fail the other way: an endpoint nobody added to it would let the
+model unload UNDER A LIVE CLIENT, mid-conversation. `in_flight` still counts probes, because that
+counter answers "is anything running right now" for exit and preemption, and a probe is running.
+
+**What is proven and what is not.** Two tests cover both directions — the six probe paths, and that
+all four inference endpoints plus anything unrecognised still count as use. What is NOT proven here
+is the end-to-end behaviour, because observing an unload needs the model slot and the slot is what
+this bug is holding. The deploy is its own proof: with the fixed binary the model should be released
+~20 minutes after the last real request while the doctor keeps probing every 5.
+
 One entry per bug, newest first. Status flow: `open → needs-info → fixed → done`.
 See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
