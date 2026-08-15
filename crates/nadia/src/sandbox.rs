@@ -163,15 +163,17 @@ impl Sandbox {
             let dev_null = std::path::PathBuf::from("/dev/null");
             let dev_out = std::path::PathBuf::from("/dev/stdout");
             let dev_err = std::path::PathBuf::from("/dev/stderr");
-            let writable: Vec<&std::path::Path> = vec![
-                self.root.as_path(),
+            let extra: Vec<&std::path::Path> = vec![
                 std::path::Path::new(&cargo_home),
                 std::path::Path::new(&tmp),
                 &dev_null,
                 &dev_out,
                 &dev_err,
             ];
-            match rozum_confine::confine_child(&mut cmd, &writable) {
+            // The root is passed separately: `confine_child` drops any extra that would be an
+            // ANCESTOR of it, because granting one hands back the right to delete the workspace —
+            // and `TMPDIR` is an ancestor of every workspace a test creates.
+            match rozum_confine::confine_child(&mut cmd, self.root.as_path(), &extra) {
                 rozum_confine::Outcome::Applied => {}
                 other => Self::say_unconfined_once(&format!("{other:?}")),
             }

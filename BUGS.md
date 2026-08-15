@@ -5,6 +5,29 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-049 — granting `TMPDIR` handed back the right to delete the workspace inside it
+
+- **Status:** FIXED 2026-08-15. The root is a named argument now, and any extra grant that is an
+  ANCESTOR of it is dropped.
+- **Severity:** P1 on Linux — the one guarantee this sandbox exists for did not hold.
+
+Landlock grants rights BENEATH a path, and removing a directory needs the right on its PARENT. That
+is what made "the workspace root cannot be removed" fall out for free — **as long as no ancestor of
+the root is also granted.** nadia grants `TMPDIR`, and every workspace `tempfile` creates lives
+inside it, so `/tmp` was granted, `rm -rf <workspace>` succeeded, and the guarantee was worth
+nothing exactly where it was being tested.
+
+**I had this theory two rounds earlier and dropped it, correctly.** At that point the observed
+failure had a different cause (an unbuilt ruleset, BUG-047/048) and the log said so; acting on the
+theory then would have "fixed" something that was not broken yet while leaving the real cause. It
+became true only once the ruleset actually built. The sequence is the point: three rounds, three
+causes, each named by a log rather than by a hypothesis — and the hypothesis that was wrong twice
+was right the third time, for reasons the earlier rounds could not have shown.
+
+**The rule is a pure function on purpose.** `undermines_root(extra, root)` needs no kernel, so the
+half I got wrong by reasoning is now provable on any machine — including the component-wise detail
+that `/tmp/wor` is not an ancestor of `/tmp/work`. Only the enforcement still needs Linux.
+
 ## BUG-048 — the same EBADFD, from a second cause: under `cargo test`, `/dev/stdout` is a pipe
 
 - **Status:** FIXED 2026-08-15. Paths are filtered by FILE TYPE before being added, because a failed

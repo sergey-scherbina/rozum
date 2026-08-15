@@ -53,7 +53,7 @@ impl Outcome {
 /// some containers, and refusing to confine at all over one missing sink trades the whole sandbox
 /// for it.
 #[cfg(target_os = "linux")]
-pub fn confine_child(cmd: &mut std::process::Command, writable: &[&Path]) -> Outcome {
+pub fn confine_child(cmd: &mut std::process::Command, root: &Path, extra: &[&Path]) -> Outcome {
     use landlock::{
         ABI, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
     };
@@ -75,7 +75,11 @@ pub fn confine_child(cmd: &mut std::process::Command, writable: &[&Path]) -> Out
         .and_then(|r| r.create())
         .and_then(|r| {
             let mut r = r.no_new_privs(true);
-            for p in writable {
+            // The root first, then the extras that do not undermine it.
+            let grants: Vec<&Path> = std::iter::once(root)
+                .chain(extra.iter().copied().filter(|e| !undermines_root(e, root)))
+                .collect();
+            for p in grants {
                 // FILTERED BEFORE ADDING, because `add_rule` consumes the ruleset: a failed add
                 // takes the whole thing with it and there is nothing left to continue from. So the
                 // decision has to be made from the path, not from the error.
@@ -124,10 +128,25 @@ pub fn confine_child(cmd: &mut std::process::Command, writable: &[&Path]) -> Out
     Outcome::Applied
 }
 
+/// Would granting `extra` hand back the right to delete `root`?
+///
+/// Landlock grants rights BENEATH a path, and removing a directory needs the right on its PARENT.
+/// So the guarantee "an agent cannot delete its own workspace" holds only while no ANCESTOR of the
+/// workspace is granted — and nadia grants `TMPDIR`, which is an ancestor of every workspace a test
+/// creates with `tempfile`. Measured on Linux CI: with `/tmp` granted, `rm -rf <workspace>`
+/// succeeded and the guarantee was quietly worth nothing.
+///
+/// A pure function, deliberately: the enforcement needs a kernel this machine does not have, but
+/// the RULE can be proven anywhere, and it is the half I got wrong by reasoning.
+pub fn undermines_root(extra: &Path, root: &Path) -> bool {
+    // `starts_with` is component-wise, so `/tmp/work` is not an ancestor of `/tmp/workspace`.
+    root.starts_with(extra)
+}
+
 /// Not Linux: nothing to apply. macOS confines by WRAPPING the command in `sandbox-exec`, which
 /// changes the argv and is therefore the caller's job; anywhere else there is no mechanism.
 #[cfg(not(target_os = "linux"))]
-pub fn confine_child(_cmd: &mut std::process::Command, _writable: &[&Path]) -> Outcome {
+pub fn confine_child(_cmd: &mut std::process::Command, _root: &Path, _extra: &[&Path]) -> Outcome {
     if cfg!(target_os = "macos") {
         Outcome::Applied
     } else {
@@ -140,13 +159,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_ancestor_of_the_workspace_is_never_granted() {
+        // The rule that makes "an agent cannot delete its own workspace" true regardless of WHERE
+        // the workspace is. Landlock grants rights beneath a path and removing a directory needs
+        // the right on its PARENT, so granting an ancestor hands the deletion right straight back.
+        // nadia grants `TMPDIR`, and every workspace `tempfile` makes is inside it — measured on
+        // Linux CI, where `rm -rf <workspace>` succeeded and the guarantee was worth nothing.
+        assert!(undermines_root(Path::new("/tmp"), Path::new("/tmp/work-123")));
+        assert!(undermines_root(Path::new("/"), Path::new("/anywhere")));
+        assert!(undermines_root(Path::new("/tmp/work"), Path::new("/tmp/work")), "itself counts");
+
+        // Not ancestors: a sibling, a descendant, and a PREFIX that is not a path component —
+        // `starts_with` on `Path` is component-wise, which is the whole reason to use it.
+        assert!(!undermines_root(Path::new("/tmp/other"), Path::new("/tmp/work")));
+        assert!(!undermines_root(Path::new("/tmp/work/sub"), Path::new("/tmp/work")));
+        assert!(!undermines_root(Path::new("/tmp/wor"), Path::new("/tmp/work")));
+        assert!(!undermines_root(Path::new("/dev/null"), Path::new("/tmp/work")));
+    }
+
+    #[test]
+    fn a_workspace_inside_a_granted_extra_still_cannot_be_removed() {
+        // End to end where the mechanism exists: TMPDIR-as-extra is exactly nadia's shape.
+        let parent = std::env::temp_dir().join(format!("rozum-anc-{}", std::process::id()));
+        let root = parent.join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg(format!("rm -rf {}", root.display())).current_dir("/");
+        // The parent is offered as an extra and must be DROPPED, or it returns the right to
+        // remove the root.
+        if !confine_child(&mut cmd, root.as_path(), &[parent.as_path()]).applied() {
+            let _ = std::fs::remove_dir_all(&parent);
+            return;
+        }
+        let _ = cmd.output().expect("the confined child must still exec");
+        #[cfg(target_os = "linux")]
+        assert!(root.is_dir(), "the workspace root must survive its own agent");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
     fn this_platform_reports_what_it_can_actually_do() {
         // The three outcomes are not decoration: a caller has to tell "confined" from "this kernel
         // cannot" from "this OS has nothing", because only the first one lets it stay quiet.
         let mut cmd = std::process::Command::new("/bin/echo");
         let root = std::env::temp_dir();
-        let paths: Vec<&Path> = vec![root.as_path()];
-        let outcome = confine_child(&mut cmd, &paths);
+        let outcome = confine_child(&mut cmd, root.as_path(), &[]);
 
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert!(
@@ -178,8 +235,7 @@ mod tests {
         // `confine_child` does nothing.
         let dev_null = Path::new("/dev/null");
         let dev_out = Path::new("/dev/stdout");
-        let paths: Vec<&Path> = vec![inside.as_path(), dev_null, dev_out];
-        if !confine_child(&mut cmd, &paths).applied() {
+        if !confine_child(&mut cmd, inside.as_path(), &[dev_null, dev_out]).applied() {
             let _ = std::fs::remove_dir_all(&dir);
             return; // no mechanism here; the platform's own test covers that
         }
@@ -206,8 +262,7 @@ mod tests {
         cmd.arg("-c").arg("echo ok > inside.txt && cat inside.txt").current_dir(&dir);
         let dev_null = Path::new("/dev/null");
         let dev_out = Path::new("/dev/stdout");
-        let paths: Vec<&Path> = vec![dir.as_path(), dev_null, dev_out];
-        let outcome = confine_child(&mut cmd, &paths);
+        let outcome = confine_child(&mut cmd, dir.as_path(), &[dev_null, dev_out]);
         if !outcome.applied() {
             eprintln!("skipped: confinement unavailable here ({outcome:?})");
             let _ = std::fs::remove_dir_all(&dir);

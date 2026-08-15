@@ -310,14 +310,8 @@ impl Sandbox {
             let dev_tty = std::path::PathBuf::from("/dev/tty");
             let dev_out = std::path::PathBuf::from("/dev/stdout");
             let dev_err = std::path::PathBuf::from("/dev/stderr");
-            let writable: Vec<&Path> = vec![
-                self.root.as_path(),
-                &dev_null,
-                &dev_tty,
-                &dev_out,
-                &dev_err,
-            ];
-            match rozum_confine::confine_child(&mut std_cmd, &writable) {
+            let extra: Vec<&Path> = vec![&dev_null, &dev_tty, &dev_out, &dev_err];
+            match rozum_confine::confine_child(&mut std_cmd, self.root.as_path(), &extra) {
                 rozum_confine::Outcome::Applied => {}
                 other => {
                     return format!("error: shell confinement unavailable ({other:?})");
