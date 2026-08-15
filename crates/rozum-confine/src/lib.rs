@@ -77,7 +77,18 @@ pub fn confine_child(cmd: &mut std::process::Command, writable: &[&Path]) -> Out
             let mut r = r.no_new_privs(true);
             for p in writable {
                 if let Ok(fd) = PathFd::new(p) {
-                    r = r.add_rule(PathBeneath::new(fd, rights))?;
+                    // A DIRECTORY takes the whole write set; a file or device takes only the
+                    // rights that apply to one. Handing `MakeDir`/`RemoveDir` to `/dev/null`
+                    // fails the whole ruleset with EBADFD ("file descriptor in bad state") —
+                    // measured on Linux CI, where it took down BOTH consumers at once through a
+                    // single unbuilt ruleset: nadia then ran unconfined and the assistant's shell
+                    // refused every command.
+                    let granted = if p.is_dir() {
+                        rights
+                    } else {
+                        AccessFs::WriteFile.into()
+                    };
+                    r = r.add_rule(PathBeneath::new(fd, granted))?;
                 }
             }
             Ok(r)
@@ -146,7 +157,11 @@ mod tests {
         cmd.arg("-c")
             .arg("cat /etc/hostname >/dev/null 2>&1; echo in > ok.txt; echo out > ../escaped.txt")
             .current_dir(&inside);
-        let paths: Vec<&Path> = vec![inside.as_path()];
+        // `/dev/null` is in the list ON PURPOSE: a device is not a directory, and asking for
+        // directory rights on one fails the entire ruleset. That took both sandboxes down on Linux
+        // and passed here, because on macOS this function is a no-op.
+        let dev_null = Path::new("/dev/null");
+        let paths: Vec<&Path> = vec![inside.as_path(), dev_null];
         if !confine_child(&mut cmd, &paths).applied() {
             let _ = std::fs::remove_dir_all(&dir);
             return; // no mechanism here; the platform's own test covers that
@@ -172,7 +187,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut cmd = std::process::Command::new("/bin/sh");
         cmd.arg("-c").arg("echo ok > inside.txt && cat inside.txt").current_dir(&dir);
-        let paths: Vec<&Path> = vec![dir.as_path()];
+        let dev_null = Path::new("/dev/null");
+        let paths: Vec<&Path> = vec![dir.as_path(), dev_null];
         let outcome = confine_child(&mut cmd, &paths);
         if !outcome.applied() {
             eprintln!("skipped: confinement unavailable here ({outcome:?})");

@@ -5,6 +5,32 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-047 — one rule on `/dev/null` failed the whole ruleset, and took both sandboxes down with it
+
+- **Status:** FIXED 2026-08-15. Directories get the whole write set; files and devices get only the
+  rights that apply to a file.
+- **Severity:** P1 on Linux while it lasted, and it is the third round of the same afternoon.
+
+```
+ruleset: failed to add a rule: File descriptor in bad state (os error 77)
+```
+
+`AccessFs::from_write` includes directory-only rights — `MakeDir`, `RemoveDir`, `MakeReg` and the
+rest — and asking for those on `/dev/null`, a character device, is EBADFD. Landlock fails the whole
+`add_rule`, so **the entire ruleset never built**, and one bad entry in a six-path list disabled
+confinement completely.
+
+**One cause, two different-looking failures**, which is why it took a round to see: with no ruleset,
+nadia fell back to running UNCONFINED (so `rm -rf` over its own workspace succeeded, and the test
+reported "deleting the workspace root must be refused") while the assistant's shell REFUSED every
+command ("shell confinement unavailable"). Two symptoms, opposite in shape, from the same unbuilt
+ruleset.
+
+**The crate's own tests now carry a device in the writable list**, because they did not before —
+they granted a directory and passed on macOS, where `confine_child` is a no-op. A test that cannot
+fail on the machine that runs it has to at least fail on the machine that matters, and the only way
+to arrange that is to put the failing SHAPE in it.
+
 ## BUG-046 — the Landlock ruleset handled EVERY access right, so the confined child could not exec at all
 
 - **Status:** FIXED 2026-08-15, one CI round after BUG-044's implementation. Found by the test
