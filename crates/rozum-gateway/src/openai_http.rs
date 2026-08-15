@@ -21,6 +21,12 @@ pub struct OpenAiHttpBackend {
     /// servers (Ollama, llama.cpp) need none.
     api_key: Option<String>,
     client: reqwest::Client,
+    /// Whether this endpoint accepts `stream_options` — see [`OpenAiHttpBackend::chat`].
+    ///
+    /// Per-instance and not global: one process talks to several endpoints and they do not agree.
+    /// Starts optimistic, and only the FIRST request against a server that refuses pays for finding
+    /// out.
+    stream_options_ok: std::sync::atomic::AtomicBool,
 }
 
 impl OpenAiHttpBackend {
@@ -35,6 +41,7 @@ impl OpenAiHttpBackend {
             model: model.into(),
             api_key: None,
             client,
+            stream_options_ok: std::sync::atomic::AtomicBool::new(stream_usage_wanted()),
         }
     }
 
@@ -43,6 +50,74 @@ impl OpenAiHttpBackend {
         let k = key.into();
         self.api_key = (!k.is_empty()).then_some(k);
         self
+    }
+
+    /// The request body for one attempt. Pure — no I/O — so a test can read what goes on the wire.
+    pub(crate) fn build_body(&self, req: &ChatRequest, include_usage: bool) -> Value {
+        let mut body = json!({
+            "model": self.model,
+            "messages": messages_to_oai(&req.messages),
+            "stream": true,
+        });
+        if include_usage {
+            // The shape is OpenAI's: the object carries one flag, and the server answers with an
+            // extra final chunk whose `choices` is empty and whose `usage` is the real count.
+            body["stream_options"] = json!({ "include_usage": true });
+        }
+        if let Some(t) = req.sampling.temperature {
+            body["temperature"] = json!(t);
+        }
+        if let Some(p) = req.sampling.top_p {
+            body["top_p"] = json!(p);
+        }
+        if let Some(n) = req.sampling.max_tokens {
+            body["max_tokens"] = json!(n);
+        }
+        if !req.tools.is_empty() {
+            let tools: Vec<Value> = req
+                .tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.input_schema
+                        }
+                    })
+                })
+                .collect();
+            body["tools"] = json!(tools);
+        }
+        body
+    }
+
+    /// One POST. Separates "the server refused this parameter" from every other failure, so the
+    /// caller can retry the first and must not retry the second.
+    async fn post_chat(&self, req: &ChatRequest, include_usage: bool) -> ModelResult<Attempt> {
+        let body = self.build_body(req, include_usage);
+        let url = format!("{}/chat/completions", self.endpoint);
+        let mut request = self.client.post(&url).json(&body);
+        if let Some(key) = &self.api_key {
+            request = request.bearer_auth(key);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ModelError::BackendUnavailable(format!("http request: {e}")))?;
+
+        if response.status().is_success() {
+            return Ok(Attempt::Answered(response));
+        }
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if include_usage && refused_stream_options(status, &text) {
+            return Ok(Attempt::RefusedStreamOptions);
+        }
+        Err(ModelError::BackendUnavailable(format!(
+            "server returned {status}: {text}"
+        )))
     }
 
     /// Return `true` if the server answers to `GET /v1/models` within 3 s.
@@ -244,64 +319,83 @@ fn parse_sse_data_line(
     Some(events)
 }
 
+/// Whether to ask an upstream for streamed token usage at all.
+///
+/// `ROZUM_OPENAI_STREAM_USAGE=0` turns it off for every endpoint in the process. It exists because
+/// this is the one place rozum changes what it SENDS to a third-party server, and an operator who
+/// hits a refusal shape this code does not recognise needs a way to stop it that does not require a
+/// new build.
+fn stream_usage_wanted() -> bool {
+    !matches!(
+        std::env::var("ROZUM_OPENAI_STREAM_USAGE").ok().as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
+}
+
+/// Did the server refuse specifically because of `stream_options`?
+///
+/// NAME-BASED ON PURPOSE, and the alternative is worse. Treating any 4xx as "must be the new
+/// parameter" would retry a request the server rejected for a real reason — a bad model name, a
+/// context overflow — and then report the SECOND failure, hiding the first. A server that refuses an
+/// unknown field says which one; one that does not gets the operator's escape hatch instead of a
+/// guess.
+///
+/// `include_usage` is checked too: some servers name the inner field rather than the object.
+fn refused_stream_options(status: reqwest::StatusCode, body: &str) -> bool {
+    if !status.is_client_error() {
+        return false;
+    }
+    let b = body.to_ascii_lowercase();
+    b.contains("stream_options") || b.contains("include_usage")
+}
+
+/// What one POST produced: an answer, or the one refusal worth retrying without the parameter.
+enum Attempt {
+    Answered(reqwest::Response),
+    RefusedStreamOptions,
+}
+
 // ─── ChatBackend impl ─────────────────────────────────────────────────────────
 
 #[async_trait]
 impl ChatBackend for OpenAiHttpBackend {
     async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream> {
-        let oai_messages = messages_to_oai(&req.messages);
+        use std::sync::atomic::Ordering;
 
-        let mut body = json!({
-            "model": self.model,
-            "messages": oai_messages,
-            "stream": true,
-        });
-
-        if let Some(t) = req.sampling.temperature {
-            body["temperature"] = json!(t);
-        }
-        if let Some(p) = req.sampling.top_p {
-            body["top_p"] = json!(p);
-        }
-        if let Some(n) = req.sampling.max_tokens {
-            body["max_tokens"] = json!(n);
-        }
-
-        if !req.tools.is_empty() {
-            let tools: Vec<Value> = req
-                .tools
-                .iter()
-                .map(|t| {
-                    json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.input_schema
-                        }
-                    })
-                })
-                .collect();
-            body["tools"] = json!(tools);
-        }
-
-        let url = format!("{}/chat/completions", self.endpoint);
-        let mut request = self.client.post(&url).json(&body);
-        if let Some(key) = &self.api_key {
-            request = request.bearer_auth(key);
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| ModelError::BackendUnavailable(format!("http request: {e}")))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(ModelError::BackendUnavailable(format!(
-                "server returned {status}: {text}"
-            )));
-        }
+        // ASK FOR THE TOKEN COUNTS, which this client has always parsed and never requested.
+        //
+        // `parse_done_finish` pins the expectation that a streamed chunk carries `usage`, and
+        // OpenAI's contract is that it does NOT unless the request opted in with
+        // `stream_options: {"include_usage": true}`. So against a spec-compliant upstream every
+        // `Done` event reported 0 input and 0 output tokens — no error, no warning, a number that
+        // looks like a measurement. This is the client half of BUG-033; the server half landed
+        // separately.
+        //
+        // It was deferred once because it changes what we SEND to a third party: a server that
+        // validates unknown parameters strictly answers 400 for the whole request rather than
+        // ignoring the field, and there is no way to probe the real providers from here. The answer
+        // is not a probe and not a flag the operator has to know about — it is to ask, and to fall
+        // back on the ONE refusal that means "I do not know this parameter", remembering the answer
+        // per endpoint so only the first request pays.
+        let include_usage = self.stream_options_ok.load(Ordering::Relaxed);
+        let response = match self.post_chat(&req, include_usage).await? {
+            Attempt::Answered(r) => r,
+            Attempt::RefusedStreamOptions => {
+                // Remember, so every later request against this endpoint goes straight to the
+                // supported shape instead of paying for the round trip again.
+                self.stream_options_ok.store(false, Ordering::Relaxed);
+                match self.post_chat(&req, false).await? {
+                    Attempt::Answered(r) => r,
+                    // The second attempt does not carry the parameter, so it cannot be refused for
+                    // it; `post_chat` returns the error rather than this arm.
+                    Attempt::RefusedStreamOptions => {
+                        return Err(ModelError::BackendUnavailable(
+                            "server refused stream_options on a request that did not send it".into(),
+                        ));
+                    }
+                }
+            }
+        };
 
         let cancel = req.cancel.clone();
         let byte_stream = response.bytes_stream();
@@ -424,6 +518,82 @@ pub async fn try_lmstudio_http(model_spec: &str) -> Option<Arc<dyn ChatBackend>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn a_request() -> ChatRequest {
+        ChatRequest {
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "hi".into() }],
+            }],
+            tools: vec![],
+            sampling: Default::default(),
+            cancel: Default::default(),
+            session_id: None,
+        }
+    }
+
+    // ── asking an upstream for the token counts we were already parsing ──────────────────────────
+
+    #[test]
+    fn the_body_asks_for_usage_in_openais_shape() {
+        let b = OpenAiHttpBackend::new("http://x/v1", "m").build_body(&a_request(), true);
+        assert_eq!(b["stream_options"]["include_usage"], serde_json::json!(true));
+        // …and the rest of the request is untouched by the ask.
+        assert_eq!(b["stream"], serde_json::json!(true));
+        assert_eq!(b["model"], serde_json::json!("m"));
+    }
+
+    #[test]
+    fn without_it_the_body_is_exactly_what_it_always_was() {
+        // The fallback must be byte-for-byte the OLD request, or a server that refused the ask gets
+        // a second request that differs in some other way too and the retry proves nothing.
+        let b = OpenAiHttpBackend::new("http://x/v1", "m").build_body(&a_request(), false);
+        assert!(b.get("stream_options").is_none(), "{b}");
+    }
+
+    #[test]
+    fn only_a_4xx_that_names_the_parameter_is_treated_as_a_refusal() {
+        use reqwest::StatusCode;
+        // The shapes a server that does not know the field actually answers with.
+        assert!(refused_stream_options(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"Unrecognized request argument supplied: stream_options"}}"#
+        ));
+        assert!(refused_stream_options(
+            StatusCode::BAD_REQUEST,
+            "unknown field `include_usage`"
+        ));
+        // A 400 for a REAL reason must not be retried: retrying it would report the second failure
+        // and hide the first, which is worse than not retrying at all.
+        assert!(!refused_stream_options(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"model `nope` not found"}}"#
+        ));
+        // Neither is a server error — that is not a statement about the parameter.
+        assert!(!refused_stream_options(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stream_options exploded"
+        ));
+    }
+
+    #[test]
+    fn the_escape_hatch_is_off_by_absence_not_by_presence() {
+        // Unset must mean ON: the whole point is that a spec-compliant upstream reports usage
+        // without anyone configuring anything.
+        let saved = std::env::var("ROZUM_OPENAI_STREAM_USAGE").ok();
+        unsafe { std::env::remove_var("ROZUM_OPENAI_STREAM_USAGE") };
+        assert!(stream_usage_wanted());
+        for off in ["0", "false", "off", "no"] {
+            unsafe { std::env::set_var("ROZUM_OPENAI_STREAM_USAGE", off) };
+            assert!(!stream_usage_wanted(), "{off} should disable it");
+        }
+        unsafe { std::env::set_var("ROZUM_OPENAI_STREAM_USAGE", "1") };
+        assert!(stream_usage_wanted());
+        match saved {
+            Some(v) => unsafe { std::env::set_var("ROZUM_OPENAI_STREAM_USAGE", v) },
+            None => unsafe { std::env::remove_var("ROZUM_OPENAI_STREAM_USAGE") },
+        }
+    }
 
     #[test]
     fn parse_text_delta() {
