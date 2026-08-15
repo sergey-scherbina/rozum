@@ -1,6 +1,0 @@
-feature/residency-release-on-unload 2026-08-15T23:13:43Z
-agent: claude-code
-heartbeat: 2026-08-15T23:13:43Z
-status: in-progress
-done-so-far: traced it — unload() frees the backend but never lowers the residency ledger entry; the reservation is tied to the PROCESS guard, released only at exit
-next: publish true residency on unload, re-admit before lazy reload, drop idle-unload default to 300s

@@ -1,5 +1,31 @@
 # Changelog
 
+## residency-release-on-unload — the freed RAM stayed reserved, so nobody could use it (BUG-053)
+Completed: 2026-08-16
+
+BUG-052's fix finally made idle-unload reachable, and the ledger showed what happened next: the
+model's ~7.4 GiB went back to the host and the reservation did not. `/stats` reported
+`loaded: false` with `mlx_memory_mb.active: 0` while `residents/82685` still claimed 7 892 971 128
+bytes. Any sibling gateway asking for that memory waited out its 240 s and refused, against a
+machine that had it free. Freeing memory that no one may then allocate is not freeing it.
+
+The reservation belonged to the PROCESS: `acquire_residency`'s guard is bound to `_residency` in
+`main.rs` for the daemon's lifetime, and `Switchboard::unload` dropped the backend and nothing else.
+From the other direction every republish path derived the primary's footprint from its model ID, a
+question that has the same answer loaded or not — so no path in the code could publish "loaded: no".
+
+Fixed in two halves that are only correct together. `residency_to_publish` counts the primary while
+`backend.is_some()`, which is what makes the freed RAM allocatable by anyone else; and
+`share::readmit_my_reservation` asks again on the way back up, deciding and republishing under the
+admit lock, with the lazy reload building nothing until it says yes. Whatever we give back a sibling
+may take — lowering without re-admitting is a plain overcommit hole, BUG-003's cascade reached from
+the far side. Both regression tests were checked to fail against the old code.
+
+Shipped with it: the idle-unload default drops to 300 s. A warm reload measured 1.1 s end-to-end
+(the weights are still in the page cache and MLX mmaps them), so the threshold trades about a second
+against ~7.4 GiB. The durable plist stops pinning `ROZUM_GATEWAY_UNLOAD_IDLE_SECS` altogether — it
+said 1200 while the code said 900, and only the plist decided anything.
+
 ## idle-exit-beats-unload — the durable gateway reloaded its model every 15 minutes (BUG-052)
 Completed: 2026-08-16
 
