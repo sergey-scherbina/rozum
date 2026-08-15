@@ -1,6 +1,0 @@
-feature/bench-gateway-url-unreachable 2026-08-15T14:25:55Z
-agent: claude-code
-heartbeat: 2026-08-15T14:25:55Z
-status: not-started
-done-so-far: proven by a recording proxy — the harness announced sharing :8199 and the agent sent nothing there
-next: make the harness resolve the gateway rozum launch will actually pick, and refuse to mislabel the run
