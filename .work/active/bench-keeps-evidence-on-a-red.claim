@@ -1,6 +1,0 @@
-feature/bench-keeps-evidence-on-a-red 2026-08-15T14:31:33Z
-agent: claude-code
-heartbeat: 2026-08-15T14:31:33Z
-status: not-started
-done-so-far: measured — a failed cell deletes the program, the transcript and the samples; results/runs/ stays empty while the footer promises per-run logs
-next: preserve a red cell into the results dir (everything but target/), unit-tested
