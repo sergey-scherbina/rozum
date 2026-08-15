@@ -1,0 +1,6 @@
+feature/landlock-file-vs-dir-rights 2026-08-15T00:06:55Z
+agent: nadia-ucc
+heartbeat: 2026-08-15T00:06:55Z
+status: not-started
+done-so-far:
+next: EBADFD — directory rights on /dev/null; grant file rights to non-directories, and put a device in the crate test so CI catches it
