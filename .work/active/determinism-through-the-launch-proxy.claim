@@ -1,6 +1,0 @@
-feature/determinism-through-the-launch-proxy 2026-08-15T15:21:10Z
-agent: claude-code
-heartbeat: 2026-08-15T15:21:10Z
-status: not-started
-done-so-far: proven — share-by-default (2026-08-07) silently disabled ROZUM_FORCE_GREEDY and ROZUM_SAMPLING_SEED, both gateway-process env vars, for every borrowed run
-next: carry the decode policy on the REQUEST (launch proxy stamps it, gateway honours it) so greedy works without owning the daemon
