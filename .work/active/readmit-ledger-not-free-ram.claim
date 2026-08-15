@@ -1,0 +1,6 @@
+feature/readmit-ledger-not-free-ram 2026-08-15T23:41:39Z
+agent: claude-code
+heartbeat: 2026-08-15T23:41:39Z
+status: in-progress
+done-so-far: BUG-053 fix deployed; its re-admit refuses on transient free RAM using a padded startup estimate - chat is 503 right now
+next: re-admit on the LEDGER + pressure only, redeploy, verify the reload
