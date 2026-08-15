@@ -411,7 +411,37 @@ single-writer daemon). Each item below is its own spec+build later — listed to
 
 ## Model Quality
 
-- [ ] **resident-model-upgrade** — **operator 2026-08-15: "попробуем".** The resident model has been
+- [x] **resident-model-upgrade — MEASURED 2026-08-15, and the answer is to stay on the 4B.**
+  Qwen3.5-9B runs (a loader fix was needed and is in master), and on our tasks it buys nothing:
+
+  | | 4B | 9B |
+  |---|---|---|
+  | 8 tasks × 3 reps, identical conditions | **24/24** | **24/24** |
+  | total wall time for those cells | 16 min | 30 min (**1.84×**) |
+  | per-cell spread | 6–71 s | 12–262 s |
+
+  Equal where both cope, twice as slow, and a long tail the 4B does not have. No task was found on
+  which the 9B is better. The 4B stays; the 9B is verified and rejected, which is a result and not
+  a non-result. Weights are on disk (5.98 GB) if anyone wants to re-check.
+
+  **Three attempts at a discriminating task, all three missed, and the reason is the same each
+  time: difficulty was set by the SHAPE of the task instead of by what the models lack.**
+  - `leapday` — defect two calls below the failing test, no signpost. 4B: **3/3**. Too easy: the
+    Gregorian rule is known to every model, the task only asked where to apply it.
+  - `board` — four interacting rules, nothing to recall. 4B **0/3**, 9B **0/3** with two repair
+    rounds each, 314–637 s per cell. Too hard, and not on the intended axis.
+  - The evidence says why: 4B dies on `expected &str, found String`, 9B on `cannot borrow as
+    mutable because it is also borrowed as immutable`. **Neither reaches the rules.** The ceiling on
+    this stack is Rust's type and borrow system, not reasoning — so any "write something non-trivial
+    from scratch" task hits that wall first and hides the difference behind it.
+
+  **What the next attempt must look like**, now derived rather than guessed: a COMPILING skeleton
+  where the change is to logic, not to ownership structure — the shape of `debug`, with real
+  difficulty in the logic and no comment pointing at the line. Both new tasks are committed and
+  usable (`leapday` is a fair ninth task; `board` is currently unpassable and is NOT in the default
+  list), so nobody rebuilds them from scratch.
+
+- [ ] **resident-model-upgrade (original entry, kept for the reasoning)** — **operator 2026-08-15: "попробуем".** The resident model has been
   frozen on `mlx-community:Qwen3.5-4B-MLX-4bit` since 2026-08-04. This is the survey of what has
   shipped since, measured off the model cards and configs rather than recalled, and the staged plan
   the operator approved. **Do the steps in order; step 1 is cheap and may end the item.**
