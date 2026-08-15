@@ -157,9 +157,23 @@ single-writer daemon). Each item below is its own spec+build later — listed to
     a real bug of the set, and it was one: `text.format` was unparsed while Chat's `response_format`
     worked, so the same capability existed on one OpenAI dialect and not the other. One parser now
     reads either nesting.
-  - **Anthropic `thinking`** — `{type: enabled, budget_tokens}` is unparsed; `SamplingParams` has
-    `reasoning_effort`, so there is somewhere for it to go. Worth checking whether Claude Code sends
-    it before wiring anything.
+  - [x] **Anthropic `thinking` — MEASURED AND DONE 2026-08-15, and the entry named the wrong
+    field.** Claude Code does send `thinking`, but as `{"type":"disabled"}` and
+    `{"type":"adaptive","display":"omitted"}` — never `{type: enabled, budget_tokens}`. It is a
+    switch, not a budget, and our only lever (`reasoning_effort`) is a LEVEL with no "off": `None`
+    means unset and the chat template then applies `medium`, the opposite of `disabled`. So it is
+    declared, read, and deliberately not mapped.
+    **What the capture actually found was bigger.** Every request carries `output_config`, holding
+    both `{"effort": "high"|"xhigh"}` and `{"format": {"type":"json_schema","schema":{…}}}` — so
+    structured output existed on a THIRD dialect and was dropped, which is BUG-034's shape one
+    dialect on, and the code comment asserting the Messages API "genuinely does not define" it was
+    simply wrong. Neither half needed a new parser: `.format` is the nesting `parse_text_format`
+    already reads, `.effort` is what `reasoning_effort` already carries.
+    **And one gap that only a real capture would show:** the shared validator accepts
+    `low|medium|high`, so `xhigh` — a client asking for MORE — parsed to `None` and the template
+    fell back to `medium`, giving LESS. Clamped to `high`.
+    Method as for `previous_response_id`: a fake endpoint, a real client, the bodies logged. The
+    remaining unparsed fields on this dialect are `context_management` and `metadata`, both inert.
   - [x] **`previous_response_id` — MEASURED 2026-08-15, and the answer is that there is nothing to
     fix.** codex does not send it: not on the first turn, not on a continuation. It sends
     `store: false` and RESENDS the whole conversation in `input` — 3 items on the opening request,

@@ -1,5 +1,22 @@
 # Changelog
 
+## anthropic-thinking — the last line of the wire sweep, and the entry named the wrong field
+Completed: 2026-08-15
+
+Claude Code sends `thinking` as `{"type":"disabled"}` / `{"type":"adaptive"}` — a switch, not the
+`{type: enabled, budget_tokens}` budget the entry assumed. Declared and read, deliberately not
+mapped: `reasoning_effort` is a level with no "off", and `None` makes the template apply `medium`,
+the opposite of `disabled`.
+
+The capture found more than it went looking for. Every request carries `output_config` with
+`{"effort": …}` and `{"format": {"type":"json_schema", …}}`, so structured output existed on a third
+dialect and was dropped — BUG-034's shape one dialect on — while the code comment asserted the
+Messages API "genuinely does not define" it. Both halves reuse the existing parsers.
+
+`xhigh` is the part only a real capture shows: the shared validator accepts `low|medium|high`, so a
+client asking for MORE thinking parsed to `None` and the template applied `medium`. Clamped to
+`high`. Four tests; golden wire files untouched.
+
 ## responses-previous-id — measured instead of wired: codex does not send it
 Completed: 2026-08-15
 
