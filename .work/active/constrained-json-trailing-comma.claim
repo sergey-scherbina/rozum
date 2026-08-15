@@ -1,7 +1,0 @@
-feature/constrained-json-trailing-comma 2026-08-15T10:28:41Z
-agent: nadia-ucc
-heartbeat: 2026-08-15T10:28:41Z
-status: not-started
-note: matrix is RUNNING on the live gateway — do not restart services until it finishes.
-done-so-far:
-next: BUG-050 — the grammar lets a comma be followed by }; find it in constrain.rs
