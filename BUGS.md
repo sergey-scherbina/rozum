@@ -5,6 +5,36 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-046 — the Landlock ruleset handled EVERY access right, so the confined child could not exec at all
+
+- **Status:** FIXED 2026-08-15, one CI round after BUG-044's implementation. Found by the test
+  written to catch exactly this, on the platform I cannot run.
+- **Severity:** P1 for anyone on Linux — nadia's `exec` and the assistant's shell were dead there,
+  refusing every command with `EACCES` — and it shipped for the length of one CI round.
+
+```
+the confined child must still spawn: Os { code: 13, kind: PermissionDenied }
+```
+
+A Landlock ruleset denies every right it HANDLES except where explicitly granted. I handled
+`AccessFs::from_all(abi)` and granted read+write beneath six paths, so reads and **execute** were
+confined to those six — and `/bin/sh` is not one of them. The child died before running a byte.
+
+**The docs I had just written say "writes only, reads free", and the code did the opposite one
+function below them.** The seatbelt profile spells the same policy `(allow default) (deny
+file-write*)`, and the reason is in a comment there too: confining reads is what aborts dyld's
+shared-cache mapping on macOS. I quoted that and then handled every right anyway. Handling only
+`AccessFs::from_write` leaves reads and exec untouched.
+
+**What this vindicates is the un-gating.** The whole point of removing `#[cfg(target_os = "macos")]`
+from the deletion test was that a guarantee nobody can check is not a guarantee — and the first
+thing CI did with the new code was prove it wrong. Three tests failed on Linux and one of them was
+`rozum-confine`'s own, which exists for no other purpose. From a mac all three had passed, because
+on macOS `confine_child` is a no-op by design.
+
+A second test now pins BOTH halves together — a read from outside the grant must still work, a write
+outside it must not — because getting the first half wrong is invisible on macOS and fatal on Linux.
+
 ## BUG-045 — one Linux failure hid three more, because cargo stops at the first failing test binary
 
 - **Status:** FIXED 2026-08-15 — all four causes repaired, and CI now runs its suites with

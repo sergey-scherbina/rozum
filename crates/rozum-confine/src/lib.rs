@@ -55,16 +55,23 @@ impl Outcome {
 #[cfg(target_os = "linux")]
 pub fn confine_child(cmd: &mut std::process::Command, writable: &[&Path]) -> Outcome {
     use landlock::{
-        ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
-        RulesetStatus,
+        ABI, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
     };
     use std::os::unix::process::CommandExt;
 
     let abi = ABI::V1;
-    let rights = AccessFs::from_write(abi) | AccessFs::from_read(abi);
+    // WRITES ONLY — `from_write`, not `from_all`.
+    //
+    // A Landlock ruleset denies every right it HANDLES except where granted, so handling all of
+    // them confines reads and EXECUTE as well: the child then cannot exec `/bin/sh` and dies with
+    // `EACCES` before running a byte. That is not a theory — it is what CI reported the first time
+    // this ran on Linux, on the very test written to catch it, one commit after these docs said
+    // "writes only, reads free". Handling only the write rights leaves reads and exec untouched,
+    // which is what the seatbelt profile means by `(allow default) (deny file-write*)`.
+    let rights = AccessFs::from_write(abi);
 
     let built = Ruleset::default()
-        .handle_access(AccessFs::from_all(abi))
+        .handle_access(rights)
         .and_then(|r| r.create())
         .and_then(|r| {
             let mut r = r.no_new_privs(true);
@@ -124,6 +131,36 @@ mod tests {
         );
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert_eq!(outcome, Outcome::NoMechanism);
+    }
+
+    #[test]
+    fn reads_stay_free_and_writes_outside_the_grant_are_refused() {
+        // The two halves of "writes only, reads free", pinned together because getting the first
+        // one wrong is silent on macOS and fatal on Linux: handling every access right instead of
+        // the write ones denied EXECUTE, and the child died with EACCES before running.
+        let dir = std::env::temp_dir().join(format!("rozum-confine-halves-{}", std::process::id()));
+        let inside = dir.join("work");
+        std::fs::create_dir_all(&inside).unwrap();
+        let mut cmd = std::process::Command::new("/bin/sh");
+        // Reads something well outside the grant, writes inside it, then tries to write outside.
+        cmd.arg("-c")
+            .arg("cat /etc/hostname >/dev/null 2>&1; echo in > ok.txt; echo out > ../escaped.txt")
+            .current_dir(&inside);
+        let paths: Vec<&Path> = vec![inside.as_path()];
+        if !confine_child(&mut cmd, &paths).applied() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return; // no mechanism here; the platform's own test covers that
+        }
+        let out = cmd.output().expect("a confined child must still exec");
+        assert!(inside.join("ok.txt").exists(), "a write INSIDE the grant must succeed");
+        #[cfg(target_os = "linux")]
+        assert!(
+            !dir.join("escaped.txt").exists(),
+            "a write OUTSIDE the grant must be refused; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = out;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
