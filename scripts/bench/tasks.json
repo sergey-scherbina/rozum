@@ -63,6 +63,13 @@
       "prompt": "There is a Rust library in the current directory. \"cargo test\" fails. Fix the code so ALL tests pass. Do NOT modify the tests. Make the minimal change. Before editing, read the file and copy the exact current text for Edit.old_string. If Edit says \"String to replace not found\", re-read the file and use an exact current substring (or Write the tiny file); do not claim success until \"cargo test\" really passes. The moment it passes, you are DONE — reply with one short confirmation line and STOP.",
       "expected": "cargo test green (all five cases)",
       "tool_hint": true
+    },
+    "board": {
+      "label": "Leaderboard",
+      "difficulty": 10,
+      "prompt": "There is a Rust library in the current directory with an unimplemented `render` function and two tests. Implement `render` so BOTH tests pass. Do NOT modify the tests. The rules the tests encode: sort by score descending; break ties by name compared case-insensitively, and any remaining tie by the raw name; a name longer than 10 characters is shown as its first 9 characters followed by the single character U+2026; if two shown names come out identical, the second and later get \" (2)\", \" (3)\" appended in output order; a score of 1000 or more is written with \"_\" between groups of three digits from the right, below 1000 plain; each line is \"<shown name>: <score>\" and lines are joined by newlines with no trailing newline. Sorting uses the FULL name, not the shortened one. Run \"cargo test\" to confirm; do not claim success until it really passes. The moment it passes you are DONE — reply with one short line and STOP.",
+      "expected": "cargo test green (both fixtures)",
+      "tool_hint": true
     }
   }
 }

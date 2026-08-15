@@ -222,6 +222,84 @@ EOF
       # `apple 3` / `banana 3` / `cherry 2`.
       printf 'Apple banana apple Cherry BANANA apple date banana cherry\n' >"$2/input.txt"
       ;;
+    board)
+      # FOUR RULES THAT INTERACT, AND EVERY ONE OF THEM IS OBSERVABLE IN THE OUTPUT.
+      #
+      # `leapday` (below) failed as a discriminator: the 4B cleared it 3/3, because the defect it
+      # hides is the Gregorian leap rule and every model KNOWS that rule — the task only asked where
+      # to apply it. So this one asks for nothing to be recalled. It states four requirements and
+      # measures whether they are all held at once while one function is written.
+      #
+      # The interaction is the ORDER: sort on the FULL name, truncate after, disambiguate after
+      # that. An implementation that truncates first still sorts plausibly and still fails, because
+      # the disambiguation suffix then lands on the wrong row.
+      #
+      # WHAT WAS TRIED AND DROPPED, so nobody rebuilds it: a fifth trap on truncation ORDER is
+      # unobservable by construction. Two names sharing their first nine characters render
+      # identically, so with equal scores both orderings produce the same two lines. Truncation is
+      # lossy; a rule cannot be tested through output it erases.
+      printf '[package]\nname = "board"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
+      mkdir -p "$2/src"
+      cat >"$2/src/lib.rs" <<'EOF'
+/// Render a leaderboard. See the tests for the exact expected output.
+pub fn render(rows: &[(String, u64)]) -> String {
+    todo!("implement me")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(pairs: &[(&str, u64)]) -> Vec<(String, u64)> {
+        pairs.iter().map(|(n, s)| ((*n).to_string(), *s)).collect()
+    }
+
+    #[test]
+    fn ordering_case_and_thousands() {
+        let got = render(&rows(&[
+            ("alice", 1200),
+            ("Bob", 1200),
+            ("bob", 1200),
+            ("christopherson", 999),
+            ("dan", 1000),
+            ("eve", 42),
+            ("Zoe", 42),
+        ]));
+        assert_eq!(
+            got,
+            "alice: 1_200\n\
+             Bob: 1_200\n\
+             bob: 1_200\n\
+             dan: 1_000\n\
+             christoph…: 999\n\
+             eve: 42\n\
+             Zoe: 42"
+        );
+    }
+
+    #[test]
+    fn truncation_collision_and_zero() {
+        let got = render(&rows(&[
+            ("abcdefghiXX", 77),
+            ("abcdefghiAA", 77),
+            ("verylongname99", 1234567),
+            ("ann", 1234567),
+            ("ANN", 1234567),
+            ("x", 0),
+        ]));
+        assert_eq!(
+            got,
+            "ANN: 1_234_567\n\
+             ann: 1_234_567\n\
+             verylongn…: 1_234_567\n\
+             abcdefghi…: 77\n\
+             abcdefghi… (2): 77\n\
+             x: 0"
+        );
+    }
+}
+EOF
+      ;;
     leapday)
       # THE DEFECT IS TWO CALLS BELOW THE FAILING TEST, AND NOTHING POINTS AT IT.
       #
@@ -532,7 +610,7 @@ mkdir -p "$OUT/runs"
 CSV="$OUT/per-run.csv"
 TRIAGE_PY="$here/agentic_triage.py"
 echo "agent,model,task,difficulty,seconds,pass,rc,timeout,turns,tool_uses,agent_peak_mb,peak_cpu_pct,model_footprint_mb,repairs,verifier_kind,verdict,verdict_confidence,gateway_generation,context_window,mlx_active_mb,mlx_peak_mb,mlx_cache_mb" > "$CSV"
-declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 [wordcount]=7 [multibug]=8 [leapday]=9 )
+declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 [wordcount]=7 [multibug]=8 [leapday]=9 [board]=10 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -697,7 +775,7 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
       *)
         [ -f Cargo.toml ] || { echo "    FAIL  Cargo.toml missing"; fail=1; }
         ls src/*.rs >/dev/null 2>&1 || { echo "    FAIL  no src/*.rs"; fail=1; }
-        if [ "$t" = test ] || [ "$t" = debug ] || [ "$t" = multibug ] || [ "$t" = leapday ]; then
+        if [ "$t" = test ] || [ "$t" = debug ] || [ "$t" = multibug ] || [ "$t" = leapday ] || [ "$t" = board ]; then
           cargo test -q >/dev/null 2>"$w/cargo.err" && echo "    PASS  cargo test green" || { echo "    FAIL  cargo test red"; fail=1; }
         fi
         if [ "$t" = build ] || [ "$t" = test ] || [ "$t" = fix ]; then
