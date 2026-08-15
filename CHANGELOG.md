@@ -1,5 +1,22 @@
 # Changelog
 
+## idle-exit-beats-unload — the durable gateway reloaded its model every 15 minutes (BUG-052)
+Completed: 2026-08-16
+
+Idle-exit defaults to 900 s and idle-unload is 1200, so the smaller always won and the unload branch
+was dead code. The process exited, KeepAlive returned it within seconds, and it eagerly reloaded the
+weights — no RAM freed for any useful time, a full load paid every quarter hour.
+
+Surfaced by BUG-051 rather than caused by it: while the doctor's probe reset the idle clock every
+300 s neither threshold could be reached, so the ordering was wrong but invisible. The same log line
+proves both — `gateway_exit {reason: idle, idle_secs: 900}` is the first time that clock ever
+reached 900.
+
+A gateway that can reload now does not idle-exit at all. "Later" would only lengthen the cycle;
+unload is strictly better for it in every case. Idle-exit remains where it is the only lever — no
+builder, or unload switched off, which is what the bench harness sets so its per-run gateways still
+go away.
+
 ## resident-model-upgrade — Qwen3.5-9B measured against the resident 4B, and rejected
 Completed: 2026-08-15
 
