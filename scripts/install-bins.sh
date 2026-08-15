@@ -17,9 +17,15 @@
 #   4. prints what it replaced and with what, because "installed" without a version is how the
 #      stale one hid.
 #
-# It does NOT restart services. Bouncing a job is `deploy-ucc-web.sh`'s business, which knows the
-# right order; a script that restarts things while the operator is mid-task is a lesson this
-# project has already paid for once.
+# It DOES restart the job that execs a binary it replaced, and waits for it to come back — see
+# `restart_owner` for why: publishing over a running service's binary IS a restart of that service,
+# so the only question is whether it happens visibly now or as an outage later. macOS kills a
+# process whose executable is replaced, and launchd's respawn throttle then keeps the port dark for
+# about a minute while an installer that "does not restart services" reports success.
+#
+# This header said the opposite until 2026-08-15, having been written before that behaviour landed.
+# A comment that contradicts its own file is worse than no comment: the operator who read it
+# deployed expecting nothing to bounce.
 #
 #   scripts/install-bins.sh                # all three, to their usual homes
 #   scripts/install-bins.sh nadia          # just one
