@@ -1,5 +1,29 @@
 # Changelog
 
+## resident-model-upgrade — Qwen3.5-9B measured against the resident 4B, and rejected
+Completed: 2026-08-15
+
+Same 24 cells, same conditions, same day: **24/24 for both**. The 9B costs 1.84× the wall time
+(30 min vs 16) and has a tail the 4B does not (12–262 s per cell against 6–71). No task was found
+where it is better, so the 4B stays. Getting there needed a loader fix — `Qwen3.5-9B` states
+`tie_word_embeddings` only at the wrapper level, which the fork required inside `text_config`
+(BUG in the fork, pinned as `d15537e`).
+
+**Three attempts at a task that separates them, all three missed for one reason: difficulty was set
+by the shape of the task, not by what the models lack.** `leapday` (defect two calls below the
+failing test, no signpost) went 3/3 on the 4B — the Gregorian rule is known, only its application
+was hidden. `board` (four interacting rules, nothing to recall) went 0/3 on BOTH, with two repair
+rounds and 314–637 s per cell.
+
+The evidence names the real ceiling: the 4B dies on `expected &str, found String`, the 9B on
+`cannot borrow as mutable because it is also borrowed as immutable`. Neither reaches the rules. On
+this stack the wall is Rust's type and borrow system, so any from-scratch task hits it first and
+hides the difference. The next attempt needs a COMPILING skeleton where the change is to logic
+rather than to ownership — the shape of `debug`, with the difficulty in the logic and no signpost.
+
+Both tasks are committed rather than discarded: `leapday` is a fair ninth task, `board` is currently
+unpassable and stays out of the default list.
+
 ## idle-unload-never-fires — the health check was holding the model (BUG-051)
 Completed: 2026-08-15
 
