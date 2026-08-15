@@ -705,6 +705,66 @@ pub fn update_my_reservation(model: &str, footprint_bytes: u64) {
     let _ = write_resident_entry(&path, model, footprint_bytes);
 }
 
+/// Raise this process's EXISTING reservation back to `footprint_bytes` **under the admit lock** —
+/// the counterpart of the lowering an idle-unload does. Returns `false` when the host can no
+/// longer take it, and the caller must then NOT load: between the unload and now, another gateway
+/// may have admitted itself into exactly the RAM we gave back, and loading anyway is the
+/// overcommit → jetsam → reboot cascade [`acquire_residency`] exists to prevent. Taking the admit
+/// lock is what makes "decide" and "publish" one step against that other gateway.
+///
+/// Why not just call [`acquire_residency`] again: that function *creates* a reservation — writes
+/// `residents/<pid>` and takes its lifetime flock. We still hold ours (lowered, not dropped), so a
+/// second acquire would contend with our own live lock. It also joins the waiter queue, which is
+/// right for a new arrival and wrong here: a reload resumes RAM this process already had, and
+/// parking a live chat request behind the queue would turn a ~1 s warm reload into a multi-second
+/// stall. This fails fast instead; the caller surfaces the refusal and the next request retries.
+///
+/// `footprint_bytes` is the TOTAL to publish (primary + warm). When a warm set is resident this is
+/// deliberately conservative — `available_ram_for_admission` already excludes the warm models'
+/// RAM, so checking the total against it double-counts them and can refuse a reload that would in
+/// fact fit. Refusing a load that fits costs a retry; admitting one that does not costs the host.
+///
+/// No reservation held (gate bypassed, or never reserved) ⇒ `true`, fail open, matching
+/// [`update_my_reservation`]'s no-op.
+pub fn readmit_my_reservation(model: &str, footprint_bytes: u64) -> bool {
+    if concurrent_resident_allowed() {
+        return true;
+    }
+    let pid = std::process::id();
+    let path = resident_path(pid);
+    if !path.exists() || !resident_lock_path(pid).exists() {
+        return true;
+    }
+    let Ok(admit) = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(residency_lock_path())
+    else {
+        return true; // can't open the admit lock → fail open, as `acquire_residency` does
+    };
+    // Blocking, not `try_lock`: the critical section under this lock is a directory scan, and
+    // every holder drops it before sleeping (see `acquire_residency`), so the wait is bounded by
+    // one scan. A `try_lock` here would have to choose between failing open (overcommit) and
+    // failing closed (a reload refused because someone else was mid-scan) — both worse.
+    if admit.lock().is_err() {
+        return true;
+    }
+    let (in_use, _holders) = scan_residents(pid);
+    let ok = admits(
+        in_use,
+        footprint_bytes,
+        host_ram_budget_bytes(),
+        available_ram_for_admission(),
+        min_free_ram_bytes(),
+        crate::shed::read_host_pressure(),
+    );
+    if ok {
+        let _ = write_resident_entry(&path, model, footprint_bytes);
+    }
+    ok
+}
+
 /// Scan the ledger under the admit lock: reap dead reservations (their lifetime lock is
 /// free) and sum the live ones (skipping our own pid). Returns `(sum_bytes, holders)`.
 fn scan_residents(skip_pid: u32) -> (u64, Vec<(u32, String)>) {
@@ -1654,6 +1714,56 @@ mod tests {
         let g = acquire_residency("m", 3 * GB).expect("ok").expect("guard");
         update_my_reservation("m+warm", 12 * GB);
         assert_eq!(committed_by_others_bytes(other), 12 * GB, "free-fn republish visible");
+        drop(g);
+        residency_env_clear(&dir);
+    }
+
+    #[test]
+    fn readmit_raises_a_lowered_reservation_when_the_ram_is_still_free() {
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = residency_env(20 * GB);
+        let other = std::process::id().wrapping_add(1);
+
+        // Nothing reserved (gate bypassed / never reserved) ⇒ fail open, publish nothing.
+        assert!(readmit_my_reservation("m", 8 * GB), "no reservation ⇒ nothing to re-admit");
+        assert_eq!(committed_by_others_bytes(other), 0, "and it must not invent an entry");
+
+        let g = acquire_residency("m", 8 * GB).expect("ok").expect("guard");
+        // An idle-unload gives the RAM back: the daemon lives on, the reservation goes to 0.
+        update_my_reservation("m", 0);
+        assert_eq!(committed_by_others_bytes(other), 0, "unload releases it on the ledger");
+
+        // Nobody took it while we idled → the lazy reload gets it back.
+        assert!(readmit_my_reservation("m", 8 * GB), "free RAM ⇒ re-admitted");
+        assert_eq!(committed_by_others_bytes(other), 8 * GB, "and republished at full size");
+
+        drop(g);
+        residency_env_clear(&dir);
+    }
+
+    #[test]
+    fn readmit_refuses_when_another_gateway_took_the_freed_ram() {
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = residency_env(20 * GB);
+        let other = std::process::id().wrapping_add(1);
+
+        let g = acquire_residency("mine/8g", 8 * GB).expect("ok").expect("guard");
+        update_my_reservation("mine/8g", 0); // idle-unload
+
+        // A sibling gateway moves into the RAM we just published as free — which is the POINT
+        // of publishing it, and exactly why the way back up has to ask again.
+        let _sibling = fake_resident(920_001, "sibling/15g", 15 * GB);
+
+        assert!(
+            !readmit_my_reservation("mine/8g", 8 * GB),
+            "8 + 15 > 20 GB budget ⇒ the reload must be refused, not squeezed in"
+        );
+        assert_eq!(
+            committed_by_others_bytes(other),
+            15 * GB,
+            "a refused re-admit leaves our entry lowered — it must not publish RAM it was denied"
+        );
+
         drop(g);
         residency_env_clear(&dir);
     }

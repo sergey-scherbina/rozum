@@ -5,9 +5,15 @@
   model (Qwen3.5-4B) resident on :8089, so the UCC chat (/chat.html -> coder/launch ->
   `rozum launch`) reuses it instead of cold-loading a fresh gateway per message.
 
-  Auto-sleep on idle (the operator's chosen RAM policy): ROZUM_GATEWAY_UNLOAD_IDLE_SECS
-  =1200 makes the watchdog UNLOAD the model after 20 min idle — freeing ~7 GiB — while
-  KEEPING the daemon alive; the next chat message lazily reloads it. It is a MANUAL
+  Auto-sleep on idle (the operator's chosen RAM policy): the watchdog UNLOADS the model
+  after 5 min idle — freeing ~7.4 GiB, on the ledger as well as in RAM — while KEEPING the
+  daemon alive; the next chat message lazily reloads it in ~1.1 s.
+
+  That 5 min is NOT set here. This file used to pin ROZUM_GATEWAY_UNLOAD_IDLE_SECS=1200
+  while the code's default said 900, so the documented policy and the compiled one disagreed
+  and only the installed plist decided anything — the same "two copies, one goes stale" that
+  cost this repo a three-days-behind binary (see the Binary note below). The number lives in
+  `switchboard::unload_idle_secs` now; set the env var here only to deviate from it. It is a MANUAL
   gateway (ROZUM_GATEWAY_LAUNCH_MANAGED deliberately NOT set), so it survives the
   lease gaps between one-shot `claude -p` agents instead of self-exiting on
   "clients_gone" — only idle-unload and preemption move it.
@@ -18,17 +24,20 @@
   times out it exits and KeepAlive retries — self-healing, never a crash-loop that
   overcommits.
 
-  Binary: ~/.rozum/bin/rozum-gateway (the deploy-managed stable copy, kept fresh by
-  clients/control/deploy-ucc-web.sh with rm-before-cp). Install: see that script's
-  gateway-service block, or `launchctl bootstrap gui/$UID <this>` after copying it to
-  ~/Library/LaunchAgents/.
+  Binary: ~/.cargo/bin/rozum-gateway — the ONE copy, which every other job here already execs.
+  It used to be a second copy at ~/.rozum/bin/rozum-gateway, "the deploy-managed stable copy",
+  and on 2026-08-08 that copy was found three days behind: hand installs went to ~/.cargo/bin,
+  this service ran the other file, and nothing said so. Two files that must be identical are two
+  files that will not be. `scripts/install-bins.sh` publishes to every path this roster names, so
+  a future second copy would be kept in step — but not having one is better.
+  Install: `launchctl bootstrap gui/$UID <this>` after copying it to ~/Library/LaunchAgents/.
 -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.rozum.gateway</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/sergiy/.rozum/bin/rozum-gateway</string>
+    <string>/Users/sergiy/.cargo/bin/rozum-gateway</string>
     <string>gateway</string>
     <string>--model</string>
     <string>mlx-community:Qwen3.5-4B-MLX-4bit</string>
@@ -41,7 +50,6 @@
   <dict>
     <key>HOME</key><string>/Users/sergiy</string>
     <key>PATH</key><string>/Users/sergiy/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>ROZUM_GATEWAY_UNLOAD_IDLE_SECS</key><string>1200</string>
   </dict>
   <key>WorkingDirectory</key><string>/Users/sergiy/work/my/rozum</string>
   <key>RunAtLoad</key><true/>

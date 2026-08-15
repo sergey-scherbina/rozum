@@ -3347,6 +3347,45 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn unload_gives_the_ram_back_on_the_ledger_and_the_reload_takes_it_again() {
+        // The defect this pins: an idle-unload freed ~7.4 GiB of real memory while the residency
+        // ledger went on publishing the full footprint, because the number was derived from the
+        // model ID — knowable whether or not the weights are loaded. Observed live: `/stats` said
+        // `loaded: false`, `mlx_memory_mb.active: 0`, and `residents/` still held one 7.35 GiB
+        // entry, so a sibling gateway was refused RAM that nobody was using. Freeing memory no
+        // one may then allocate is not freeing it.
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(20, &[("model-old", 8)]));
+        assert_eq!(
+            sb.residency_to_publish(&[]),
+            Some(8 * GB),
+            "loaded ⇒ the primary's footprint is published"
+        );
+
+        sb.unload().await.unwrap();
+        assert!(sb.current().is_none(), "precondition: the model really is freed");
+        assert_eq!(
+            sb.residency_to_publish(&[]),
+            Some(0),
+            "unloaded ⇒ nothing is held, so nothing may be claimed"
+        );
+
+        // ...and the way back up re-asserts it (the reload re-admits first — see `ensure_loaded`).
+        let lease = sb.enter(None).await.expect("lazy reload");
+        assert_eq!(
+            sb.residency_to_publish(&[]),
+            Some(8 * GB),
+            "reloaded ⇒ the reservation is published again"
+        );
+        drop(lease);
+
+        // An unsizeable primary publishes NOTHING rather than a zero: `None` leaves whatever
+        // startup reserved standing, because under-stating the biggest entry invites a sibling
+        // into RAM we are in fact holding.
+        let unsizeable = test_sb_cfg(Some(ok_builder()), true, warm_cfg(20, &[("other", 8)]));
+        assert_eq!(unsizeable.residency_to_publish(&[]), None);
+    }
+
     #[test]
     fn is_loaded_and_can_reload_reflect_state() {
         assert!(test_sb(Some(ok_builder()), true).is_loaded());

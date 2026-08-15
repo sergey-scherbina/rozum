@@ -122,12 +122,19 @@ fn drain_secs() -> u64 {
 
 /// Idle seconds before the watchdog auto-unloads the resident model (keeping the
 /// daemon alive; the next chat lazily reloads). `ROZUM_GATEWAY_UNLOAD_IDLE_SECS`,
-/// default 900 (15 min); `0` disables. Spec: `docs/specs/model-unload-on-idle.md`.
+/// default 300 (5 min); `0` disables. Spec: `docs/specs/model-unload-on-idle.md`.
+///
+/// 300, not the 900 it was: the threshold's only job is to trade "RAM held while nobody is
+/// asking" against "how long the next question waits". A warm reload was MEASURED at **1.1 s**
+/// end-to-end (unloaded → answer in hand) — the weights are still in the OS page cache and MLX
+/// mmaps them — so the cost side of that trade is about a second, and holding ~7.4 GiB for a
+/// further ten minutes to save it is not a trade worth making on a 36 GiB host. Operator's call
+/// (2026-08-16); the env var still overrides, and `0` still disables entirely for the bench.
 pub(crate) fn unload_idle_secs() -> u64 {
     std::env::var("ROZUM_GATEWAY_UNLOAD_IDLE_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(900)
+        .unwrap_or(300)
 }
 
 // ── Multi-resident warm cache (shared-gateway-multislot Phase 2) ─────────────────
@@ -256,6 +263,20 @@ pub(crate) fn published_reservation(primary_fp: u64, warm_fps: &[u64]) -> u64 {
     naive.saturating_sub(redundant)
 }
 
+/// [`published_reservation`] for a primary that may be **unloaded** (`None` — idle-unload gave its
+/// RAM back). With no primary, the first warm model takes its place as the one entry that carries
+/// the process-shared activation reserve, so the reserve is still counted exactly once; with
+/// nothing resident at all the honest number is 0 — this process holds no host RAM.
+pub(crate) fn published_for(primary_fp: Option<u64>, warm_fps: &[u64]) -> u64 {
+    match primary_fp {
+        Some(fp) => published_reservation(fp, warm_fps),
+        None => match warm_fps.split_first() {
+            Some((head, rest)) => published_reservation(*head, rest),
+            None => 0,
+        },
+    }
+}
+
 impl Switchboard {
     pub(crate) fn current(&self) -> Option<Arc<dyn ChatBackend>> {
         self.backend.read().unwrap().clone()
@@ -303,6 +324,32 @@ impl Switchboard {
             return Err("model is unloaded and this gateway cannot reload it");
         };
         let spec = self.spec.lock().unwrap().clone();
+        // Re-admit BEFORE allocating. The unload published the RAM as free, so it is no longer
+        // ours by default — a sibling gateway may have taken it while we idled. Reserve first,
+        // load second: the reverse order is how a host gets overcommitted.
+        // An unsizeable primary was never lowered on unload (see `republish_residency_with`), so
+        // there is nothing to re-admit — the reservation still stands.
+        if let Some(sized) = (self.warm_cfg.weight)(&spec.model_id) {
+            let warm_fps: Vec<u64> =
+                self.warm.lock().await.values().map(|e| e.weight_bytes).collect();
+            let want = published_for(Some(sized), &warm_fps);
+            let model_id = spec.model_id.clone();
+            let admitted = tokio::task::spawn_blocking(move || {
+                crate::share::readmit_my_reservation(&model_id, want)
+            })
+            .await
+            .unwrap_or(false);
+            if !admitted {
+                crate::obs::log_event(json!({
+                    "event": "gateway_reload_refused",
+                    "model": spec.model_id,
+                    "footprint_bytes": want,
+                }));
+                return Err(
+                    "model was unloaded to free RAM and the host is now committed elsewhere",
+                );
+            }
+        }
         crate::obs::log_event(json!({
             "event": "gateway_lazy_reload", "model": spec.model_id, "n_ctx": spec.n_ctx,
         }));
@@ -312,7 +359,12 @@ impl Switchboard {
                 self.bump_and_republish(&spec);
                 Ok(b)
             }
-            None => Err("model failed to reload"),
+            None => {
+                // The RAM we just reserved never materialised — hand it back rather than sit on
+                // a reservation for a model that is not there (the very defect above, reprised).
+                self.republish_residency().await;
+                Err("model failed to reload")
+            }
         }
     }
 
@@ -384,11 +436,7 @@ impl Switchboard {
         // set changed. `model_id` is read with the warm lock RELEASED → no lock-order risk.
         // The process-shared activation reserve is counted ONCE (see `published_reservation`).
         if removed_any {
-            let primary_fp = (self.warm_cfg.weight)(&self.model_id()).unwrap_or(0);
-            crate::share::update_my_reservation(
-                &self.model_id(),
-                published_reservation(primary_fp, &warm_fps),
-            );
+            self.republish_residency_with(&warm_fps);
         }
     }
 
@@ -477,9 +525,8 @@ impl Switchboard {
         // admission accounts for the warm set, not just the primary (residency-unify U1
         // wiring). `primary_id` is in hand and `update_my_reservation` does ledger-file IO
         // only — no map/spec lock — so this is deadlock-safe under the held `warm` lock.
-        let primary_fp = (self.warm_cfg.weight)(&primary_id).unwrap_or(0);
         let warm_fps: Vec<u64> = warm.values().map(|e| e.weight_bytes).collect();
-        crate::share::update_my_reservation(&primary_id, published_reservation(primary_fp, &warm_fps));
+        self.republish_residency_with(&warm_fps);
         self.usage.record(model, weight, now);
         crate::obs::log_event(json!({ "event": "warm_built", "model": model }));
         Some((backend, handle))
@@ -653,12 +700,56 @@ impl Switchboard {
     /// ledger, counting the process-shared activation reserve once. Caller holds the `warm` guard.
     fn republish_warm_reservation(
         &self,
-        primary_id: &str,
+        _primary_id: &str,
         warm: &std::collections::HashMap<String, WarmEntry>,
     ) {
-        let primary_fp = (self.warm_cfg.weight)(primary_id).unwrap_or(0);
         let warm_fps: Vec<u64> = warm.values().map(|e| e.weight_bytes).collect();
-        crate::share::update_my_reservation(primary_id, published_reservation(primary_fp, &warm_fps));
+        self.republish_residency_with(&warm_fps);
+    }
+
+    /// Publish this process's **true** residency: the primary's footprint only while it is
+    /// actually loaded, plus the warm set.
+    ///
+    /// The primary's `Option` is the whole point. An idle-unload frees the model's RAM but keeps
+    /// the daemon (and its `residents/<pid>` reservation) alive — and every republish used to
+    /// re-assert the primary's footprint from its *model id*, which is knowable whether or not
+    /// the weights are in memory. So a gateway that had given ~7.4 GiB back to the host went on
+    /// telling every other gateway that it still held it: `/stats` reported `loaded: false` with
+    /// `mlx_memory_mb.active: 0` while the ledger blocked a sibling from RAM nobody was using.
+    /// Freeing memory that no one is then allowed to allocate is not freeing it.
+    ///
+    /// Lowering it is only half: whatever we give back, another gateway may take, so the lazy
+    /// reload must re-admit before it allocates (see `ensure_loaded` /
+    /// [`crate::share::readmit_my_reservation`]). Publishing the drop without re-admitting on the
+    /// way back up would be a straight overcommit hole.
+    fn republish_residency_with(&self, warm_fps: &[u64]) {
+        if let Some(total) = self.residency_to_publish(warm_fps) {
+            crate::share::update_my_reservation(&self.model_id(), total);
+        }
+    }
+
+    /// The number [`Self::republish_residency_with`] would publish; `None` ⇒ publish nothing.
+    ///
+    /// Split from the write so the decision — the part that had the bug — is testable without a
+    /// live residency ledger: these tests run in parallel and never mutate process env, which is
+    /// what a ledger fixture would require (the ledger side is covered in `share::tests`).
+    pub(crate) fn residency_to_publish(&self, warm_fps: &[u64]) -> Option<u64> {
+        let primary_id = self.model_id(); // spec lock taken and released BEFORE `backend`
+        // Unsizeable primary (a raw snapshot path, an id the catalog never matched): leave the
+        // ledger exactly as startup reserved it. The alternative — the `unwrap_or(0)` this used
+        // to do — publishes a primary of zero, which under-states the one entry that dominates
+        // the sum and invites another gateway into RAM we are actually holding. Not lowering is
+        // the safe direction to be wrong in; `acquire_residency` already refuses such specs at
+        // the gate, so in production this is a corner, not a path.
+        let sized = (self.warm_cfg.weight)(&primary_id)?;
+        let loaded = self.backend.read().unwrap().is_some();
+        Some(published_for(loaded.then_some(sized), warm_fps))
+    }
+
+    /// [`Self::republish_residency_with`] for callers that do not already hold the `warm` guard.
+    async fn republish_residency(&self) {
+        let warm_fps: Vec<u64> = self.warm.lock().await.values().map(|e| e.weight_bytes).collect();
+        self.republish_residency_with(&warm_fps);
     }
 
     /// Cache-when-fits swap (multislot on). Promotes a warm target with no rebuild; otherwise plans
@@ -864,6 +955,11 @@ impl Switchboard {
         if old.is_some() {
             tokio::task::spawn_blocking(move || drop(old)).await.ok();
         }
+        // Give the RAM back on the LEDGER too, and only now — the drop above has completed, so
+        // the memory is genuinely free before we tell other gateways they may have it. Ordering
+        // it the other way would advertise RAM that is still allocated for as long as the free
+        // takes (~GB of MLX buffers), which is exactly the window an admitting sibling would use.
+        self.republish_residency().await;
         crate::obs::log_event(json!({
             "event": "gateway_unloaded", "model": spec.model_id, "generation": g,
         }));

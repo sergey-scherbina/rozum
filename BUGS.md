@@ -1,5 +1,58 @@
 # Bugs
 
+## BUG-053 — an idle-unload frees the model's RAM but keeps its residency reservation, so no other gateway may use the memory it just released
+
+- **Status:** FIXED 2026-08-16 (`switchboard.rs`: `residency_to_publish` / `republish_residency`;
+  `share.rs`: `readmit_my_reservation`). Found by reading the ledger after BUG-052's fix finally
+  made idle-unload reachable — the unload worked, and then nothing could use the result.
+- **Severity:** P2. Not a crash: a correctness hole in the one mechanism that decides whether the
+  host gets overcommitted. It makes idle-unload a no-op for its stated purpose.
+
+The reservation was tied to the **process**, not to the model. `acquire_residency` hands back a
+`ResidencyGuard` whose `Drop` removes `residents/<pid>`, and `main.rs` binds it to `_residency` for
+the lifetime of the daemon. `Switchboard::unload` drops the backend — and touches nothing else. So
+the daemon lives on, still publishing the footprint of a model it no longer has.
+
+Every republish path had the same shape from the other direction: they derived the primary's
+footprint from its **model id** via `warm_cfg.weight`, which answers whether or not the weights are
+in memory. There was no path in the code that could ever publish "loaded: no".
+
+**Observed on the live job (:8089, Qwen3.5-4B, 2026-08-16):**
+
+```
+/stats   loaded: False   mlx_memory_mb.active: 0
+/stats   resident_models: ['mlx-community:Qwen3.5-4B-MLX-4bit']
+~/.local/state/rozum/gateway/residents/82685
+         {"model":"mlx-community:Qwen3.5-4B-MLX-4bit","footprint_bytes":7892971128,"prio":0}
+```
+
+7.35 GiB of real memory back in the host's hands, and 7.35 GiB still on the ledger telling every
+other gateway it was taken. A sibling asking for that RAM waits out `ROZUM_GATEWAY_RESIDENCY_WAIT_SECS`
+and then refuses, against a machine that has the memory free.
+
+**The fix is two halves and neither works alone.** Publishing the drop (`republish_residency`, the
+primary counted only while `backend.is_some()`) is what makes the freed RAM allocatable. But
+whatever we give back, a sibling may take — so the lazy reload must ask again before it allocates
+(`readmit_my_reservation`, deciding and republishing under the admit lock, refusing with a 503 when
+the host is now committed elsewhere). Lowering without re-admitting would be a straight overcommit
+hole: exactly the jetsam→reboot cascade of BUG-003, arrived at from the other side.
+
+`readmit_my_reservation` is not `acquire_residency`: that one *creates* a reservation and would
+contend with our own live lock, and it joins the waiter queue — right for a new arrival, wrong for a
+process resuming RAM it already had, where the queue would turn a 1.1 s warm reload into a stall.
+
+**Regression tests, both verified to fail against the old behaviour** (`Some(8 GiB)` where `Some(0)`
+is required; a refused re-admit admitted anyway):
+`gateway::tests::unload_gives_the_ram_back_on_the_ledger_and_the_reload_takes_it_again`,
+`share::tests::readmit_refuses_when_another_gateway_took_the_freed_ram`.
+
+**Shipped alongside:** the idle-unload default is now **300 s**, not 900 (operator's call). A warm
+reload measured **1.1 s** end-to-end — the weights are still in the OS page cache, MLX mmaps them —
+so the threshold trades about a second of latency against ~7.4 GiB, and ten further minutes of
+holding is not worth it. The durable plist no longer pins `ROZUM_GATEWAY_UNLOAD_IDLE_SECS` at all:
+it said 1200 while the code said 900, which is the two-copies-one-goes-stale failure this repo keeps
+paying for. One number, in `unload_idle_secs`.
+
 ## BUG-052 — idle-exit fires before idle-unload, so a supervised gateway reloads its model every 15 minutes instead of releasing it
 
 - **Status:** FIXED 2026-08-16 (`gateway.rs`: `idle_exit_after` — a gateway that can reload does not

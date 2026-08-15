@@ -2,7 +2,7 @@
 
 > **Status: core implemented** (`feature/model-unload-on-idle`). The timed
 > auto-unload trigger, `gateway_idle_unload` obs event, `--dedicated` guard, and
-> `ROZUM_GATEWAY_UNLOAD_IDLE_SECS` (default 900) are done, reusing `gateway-switch`'s
+> `ROZUM_GATEWAY_UNLOAD_IDLE_SECS` (default 300) are done, reusing `gateway-switch`'s
 > `Switchboard::unload()` + serialized lazy reload, on the existing idle watchdog
 > tick. **Still open:** the cold-vs-warm reload *measurement* and any fast-reload
 > tier beyond the OS page cache (needs a real model on Metal, not runnable in CI);
@@ -56,7 +56,7 @@ exiting wins — it's strictly more freeing. So unload-on-idle is "free the mode
 - A background watchdog in the daemon tracks "time since last generation
   finished" (reuse the `generating` counter `gateway-switch` already added, plus
   a `last_active: Instant`).
-- When idle for `ROZUM_GATEWAY_UNLOAD_IDLE_SECS` (**default 900 s / 15 min**;
+- When idle for `ROZUM_GATEWAY_UNLOAD_IDLE_SECS` (**default 300 s / 5 min**;
   `0` disables) **and** the model is currently loaded, the watchdog calls the
   existing `Switchboard::unload()`. The threshold is the one tunable, "as always".
 - The next inference request lazily reloads via the existing serialized
@@ -102,8 +102,15 @@ number, not designed up front.
 
 ## Decisions
 
-- **Threshold:** default **15 min** (`ROZUM_GATEWAY_UNLOAD_IDLE_SECS=900`),
+- **Threshold:** default **5 min** (`ROZUM_GATEWAY_UNLOAD_IDLE_SECS=300`),
   env-overridable; `0` disables. Independent of the idle-exit window.
+  Was 15 min until 2026-08-16. The threshold trades RAM held while nobody is
+  asking against how long the next question waits, and the second half was
+  finally MEASURED once BUG-052 made unload reachable: a warm reload is **1.1 s**
+  end-to-end (weights still in the OS page cache, MLX mmaps them). A second of
+  latency against ~7.4 GiB is not a trade worth waiting ten more minutes to make.
+  The durable plist deliberately does NOT pin this any more — it said 1200 while
+  the code said 900, and only the plist decided anything.
 - **Relationship to idle-exit:** resolved — complementary, share one watchdog
   tick (see the section above).
 - **Idle clock:** "no generation in progress" (`generating==0`) + `last_active`
@@ -127,7 +134,14 @@ number, not designed up front.
   `Switchboard::unload()`; reuse `last_active`/`generating`; `--dedicated` guard.
 - No new control-plane verb (reuses `unload` + lazy reload).
 - Bench harness for cold/warm reload to pick the fast-reload tier.
-- Env: `ROZUM_GATEWAY_UNLOAD_IDLE_SECS` (default 900, 0=off).
+- Env: `ROZUM_GATEWAY_UNLOAD_IDLE_SECS` (default 300, 0=off).
+- **Unload must release the RESIDENCY RESERVATION, not just the memory** (BUG-053).
+  The reservation was bound to the process guard, so a gateway that had freed
+  7.35 GiB went on publishing it and no sibling could use the RAM. The primary is
+  now published only while `backend.is_some()`, and — necessarily paired — the
+  lazy reload re-admits under the admit lock before it allocates
+  (`share::readmit_my_reservation`), refusing with a 503 when the host has since
+  been committed elsewhere. Lowering without re-admitting is an overcommit hole.
 - Follow-up: pre-warm reload on a `channel-wakeup`/MCP turn signal.
 
 ## Out of scope (for the first cut)
