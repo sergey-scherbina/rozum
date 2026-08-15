@@ -400,6 +400,84 @@ single-writer daemon). Each item below is its own spec+build later — listed to
 
 ## Model Quality
 
+- [ ] **resident-model-upgrade** — **operator 2026-08-15: "попробуем".** The resident model has been
+  frozen on `mlx-community:Qwen3.5-4B-MLX-4bit` since 2026-08-04. This is the survey of what has
+  shipped since, measured off the model cards and configs rather than recalled, and the staged plan
+  the operator approved. **Do the steps in order; step 1 is cheap and may end the item.**
+
+  **The landscape, so nobody re-derives it.** Qwen released nothing small after 3.5: Qwen3.6 is 27B
+  and 35B-A3B, Qwen3.8 is 27B and 2.4T-A95B, and **Qwen3.7 does not exist** — everything found under
+  that name is a community merge. Within 3.5 the sizes are 0.8B / 2B / 4B / 9B / 27B / 35B-A3B and
+  up. Gemma 4 shipped and is the only genuinely new small family (below). Nothing else small was
+  trending in MLX 4-bit.
+
+  ### Step 1 — `mlx-community/Qwen3.5-9B-MLX-4bit`. No port, measure it.
+
+  It is not a similar model, it is **the same architecture, wider** — so our runtime loads it with
+  no new code, and it already serves both the 4B and the 27B of this family:
+
+  | | resident 4B | 9B |
+  |---|---|---|
+  | `model_type` | `qwen3_5` / `qwen3_5_text` | identical |
+  | layers / hidden | 32 / 2560 | 32 / **4096** |
+  | KV heads / `head_dim` | 4 / 256 | **4 / 256** |
+  | `full_attention_interval`, `attn_output_gate` | 4, true | 4, true |
+  | vocab / max ctx | 248320 / 262144 | identical |
+  | quantisation | 4-bit, group 64, affine | identical |
+  | vision | yes | yes |
+  | on disk | 2.9 GB | **5.98 GB** (2 shards) |
+
+  **The KV cost does not change at all**, which is the part worth not re-deriving: both have 8
+  full-attention layers of 32 with 4 KV heads at `head_dim` 256 → **32,768 bytes per position** for
+  each. Long context costs the same; only the weights grow.
+
+  | | weights | footprint @ `n_ctx 8192` | admission needs |
+  |---|---|---|---|
+  | resident 4B | 2.83 GiB | 8.6 GiB | 10.6 GiB available |
+  | 9B | 5.57 GiB | **11.3 GiB** | **13.3 GiB available** |
+
+  (footprint = weights + KV×n_ctx + the 5.5 GiB cache/prefill reserve; admission adds `min_free` 2 GiB.)
+
+  **Expect it to be ~2× slower per token** — same depth, wider. The 4B runs ~100 t/s, so plan for
+  50–60. For agentic work latency matters more than a few points of quality, so this is the number
+  to watch alongside the score.
+
+  **Done when:** the 9B has run the same 88 matrix cells the resident model has, and we know three
+  things — it is not WORSE, it fits at a usable `n_ctx`, and what it costs in tokens/second.
+
+  ### Step 2 — only if step 1 disappoints: `mlx-community/gemma-4-E4B-it-qat-4bit`.
+
+  The one genuinely new small family. `google/gemma-4-E4B-it` is ~8B, and the mlx-community build is
+  **QAT** — quantisation-aware trained, which holds quality far closer to bf16 than a post-hoc 4-bit.
+  Its KV is CHEAPER than ours: 42 layers of which only 7 are full attention, 2 KV heads, `head_dim`
+  256, and the other 35 are sliding-window at 512 positions — a bounded, fixed-size state.
+
+  **But it is a port.** `model_type: gemma4` against our `gemma3`, `Gemma4ForConditionalGeneration`,
+  a sliding/full hybrid, and — per its config — an AUDIO tower beside the vision one, a modality this
+  runtime has never handled. Do not start it before step 1 has a number.
+
+  ### The measurement problem, which is the real risk to this item
+
+  **Our matrix cannot show an improvement, because it is saturated.** The resident 4B scores
+  **51/52** on it (the one red is a single `wordcount` rep in a run archived as BUG-014 evidence,
+  where the same agent passed the same task on another rep). A better model has nowhere to go. So
+  step 1 answers "not worse, fits, costs this much" and nothing more; demonstrating that 9B is
+  BETTER needs harder tasks than the matrix has, and inventing them is its own item — do not smuggle
+  it into this one. Read the result with `summarize_matrix.py`, which since 2026-08-15 excludes
+  cells that did not measure the model.
+
+  ### Gotchas before running anything
+
+  - **Take the model slot properly.** Announce in the rozum room, check no resident gateway holds
+    `residency.lock`, and never start a second model load (SPRINT's reboot-safety protocol; BUG-003
+    was a kernel-watchdog reboot).
+  - **Tidy the host first.** Measured 2026-08-15: 24.2 GiB of 36 was anonymous memory, mostly sbt
+    daemons from scalascript toolchain builds, leaving **5.1 GiB available** — not enough even for
+    the model we already run. `available` in the gate's own sense is
+    `total − (wired + anonymous + compressor)`, so file cache does not count against you and JVMs do.
+  - **Do not delete the 4B until the 9B has a score.** `models-cleanup` deleted the bf16 build on the
+    strength of an equal score; that was right, but only because the score existed first.
+
 - [ ] model-catalog-refresh - Expand and verify tiny model catalog.
   - Include current small Qwen/Gemma/Phi candidates with exact file sizes.
   - Record license and expected strengths.
