@@ -1,0 +1,6 @@
+feature/landlock-root-ancestors 2026-08-15T00:29:36Z
+agent: nadia-ucc
+heartbeat: 2026-08-15T00:29:36Z
+status: not-started
+done-so-far:
+next: granting an ANCESTOR of the workspace hands back the right to delete it; make the root explicit in the API and drop ancestor grants
