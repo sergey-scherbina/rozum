@@ -42,6 +42,30 @@ pub(crate) struct AnthropicReq {
     pub(crate) stop_sequences: Value,
     #[serde(default)]
     pub(crate) stream: Option<bool>,
+    /// `output_config` — measured 2026-08-15, and the comment it replaces was wrong. The dialect
+    /// note beside `into_internal` said the Messages API "genuinely does not define" structured
+    /// output, so its absence was the dialect and not an omission. Claude Code sends this on every
+    /// request to `/v1/messages?beta=true`:
+    ///
+    /// ```json
+    /// {"effort": "high", "format": {"type": "json_schema", "schema": {…}}}
+    /// {"effort": "xhigh"}
+    /// ```
+    ///
+    /// Both halves have a home already: `.format` is the same nesting `parse_text_format` reads for
+    /// the Responses dialect, and `.effort` is what `reasoning_effort` carries — a field with a live
+    /// consumer (the gpt-oss harmony level). Captured from a real Claude Code run against a fake
+    /// endpoint, because the belief in the comment had survived precisely by never being checked.
+    #[serde(default)]
+    pub(crate) output_config: Option<Value>,
+    /// `thinking` — declared so it is READ rather than merely unknown, and deliberately NOT mapped.
+    /// Claude Code sends `{"type":"disabled"}` and `{"type":"adaptive","display":"omitted"}` — not
+    /// the `{type: enabled, budget_tokens}` the backlog entry assumed. The only lever we have is
+    /// `reasoning_effort`, a LEVEL, and it cannot express "off": `None` means unset and the chat
+    /// template then defaults to `medium`, which is the opposite of what `disabled` asks for.
+    /// Mapping it to a level would be inventing an answer; see the note in `into_internal`.
+    #[serde(default)]
+    pub(crate) thinking: Option<Value>,
     /// See `OaiChatReq::unknown` (BUG-038).
     #[serde(flatten)]
     pub(crate) unknown: serde_json::Map<String, Value>,

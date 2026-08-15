@@ -857,6 +857,41 @@ struct AnthropicWire {
     req: AnthropicReq,
 }
 
+/// `output_config.effort` → the internal reasoning level, in the client's own vocabulary.
+///
+/// TWO THINGS ARE MEASURED HERE, not assumed. Claude Code sends `high` and `xhigh`; the shared
+/// `reasoning_effort_of` accepts only `low|medium|high`, so `xhigh` — a client asking for MORE
+/// thinking — would have parsed to `None` and the chat template would then have defaulted to
+/// `medium`, giving it LESS. Clamping to `high` is the closest thing the downstream template can
+/// express, and it is a clamp rather than a rename: if the template ever learns a higher level this
+/// is the one line to change.
+///
+/// `thinking` is READ and deliberately not mapped. `{"type":"disabled"}` asks for no reasoning at
+/// all, and `reasoning_effort` is a level with no "off" — `None` means unset, which the template
+/// turns into `medium`. So a request that says "do not think" is honoured by refusing to raise the
+/// level, and nothing more; inventing a level for it would answer a question we were not asked.
+fn anthropic_effort(output_config: &Option<Value>, thinking: &Option<Value>) -> Option<String> {
+    let disabled = thinking
+        .as_ref()
+        .and_then(|t| t.get("type"))
+        .and_then(Value::as_str)
+        == Some("disabled");
+    if disabled {
+        return None;
+    }
+    let e = output_config
+        .as_ref()?
+        .get("effort")?
+        .as_str()?
+        .trim()
+        .to_ascii_lowercase();
+    match e.as_str() {
+        "low" | "medium" | "high" => Some(e),
+        "xhigh" => Some("high".into()),
+        _ => None,
+    }
+}
+
 impl WireDialect for AnthropicWire {
     const ENDPOINT: &'static str = "/v1/messages";
     /// Anthropic's error envelope, not OpenAI's `backend_error` — a client switching on the
@@ -880,15 +915,25 @@ impl WireDialect for AnthropicWire {
                 &parse_anthropic_tool_choice(&self.req.tool_choice),
             ),
             // `top_p`/`top_k` are Messages API parameters and were silently dropped until
-            // BUG-031 — the gap this dialect's own golden line exposed. No `response_schema`
-            // and no `seed`: those two the Messages API genuinely does not define, so their
-            // absence here is the dialect, not an omission.
+            // BUG-031 — the gap this dialect's own golden line exposed. No `seed`: that one the
+            // Messages API genuinely does not define, so its absence here is the dialect.
+            //
+            // `response_schema` USED to be in that sentence too, and the sentence was wrong.
+            // Measured 2026-08-15 by capturing a real Claude Code request: it sends
+            // `output_config.format = {"type":"json_schema","schema":{…}}` on every call to
+            // `/v1/messages?beta=true`. That is the same nesting `parse_text_format` already reads
+            // for the Responses dialect, so structured output existed on a third dialect and was
+            // dropped — the same shape as BUG-034, one dialect further on.
             sampling: SamplingParams {
                 temperature: self.req.temperature,
                 top_p: self.req.top_p,
                 top_k: self.req.top_k,
                 max_tokens: self.req.max_tokens,
                 stop: parse_stop(&self.req.stop_sequences),
+                response_schema: parse_text_format(
+                    self.req.output_config.as_ref().unwrap_or(&Value::Null),
+                ),
+                reasoning_effort: anthropic_effort(&self.req.output_config, &self.req.thinking),
                 ..Default::default()
             },
         }
@@ -1437,6 +1482,58 @@ mod tests {
     use crate::codex_patch::*;
     use axum::response::sse::Event;
     use std::convert::Infallible;
+
+    #[test]
+    fn anthropic_effort_maps_what_claude_code_actually_sends() {
+        // The two shapes captured from a real run against a fake `/v1/messages?beta=true`.
+        let oc = |v: serde_json::Value| Some(v);
+        assert_eq!(
+            anthropic_effort(&oc(json!({"effort": "high", "format": {"type": "json_schema"}})), &None)
+                .as_deref(),
+            Some("high")
+        );
+        // `xhigh` is a client asking for MORE. The shared validator rejects it, which would have
+        // produced `None` → the template's own default `medium` → LESS. Clamp, do not drop.
+        assert_eq!(anthropic_effort(&oc(json!({"effort": "xhigh"})), &None).as_deref(), Some("high"));
+        assert_eq!(anthropic_effort(&oc(json!({"effort": "MEDIUM"})), &None).as_deref(), Some("medium"));
+        // Nothing invented for a level the downstream template does not know.
+        assert_eq!(anthropic_effort(&oc(json!({"effort": "ultra"})), &None), None);
+        assert_eq!(anthropic_effort(&None, &None), None);
+    }
+
+    #[test]
+    fn thinking_disabled_never_raises_the_level() {
+        // `{"type":"disabled"}` asks for no reasoning; the only lever is a LEVEL with no "off", so
+        // the honest answer is to refuse to raise it rather than to invent one.
+        assert_eq!(
+            anthropic_effort(&Some(json!({"effort": "xhigh"})), &Some(json!({"type": "disabled"}))),
+            None
+        );
+        // `adaptive` is not "off" — it is the model choosing, so the requested level still applies.
+        assert_eq!(
+            anthropic_effort(
+                &Some(json!({"effort": "high"})),
+                &Some(json!({"type": "adaptive", "display": "omitted"}))
+            )
+            .as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn anthropic_structured_output_reads_the_same_nesting_as_responses() {
+        // `output_config.format` is `{"type":"json_schema","schema":{…}}` — the Responses shape,
+        // which `parse_text_format` already handles. This asserts the reuse rather than a new parser.
+        let oc = json!({"format": {"type": "json_schema",
+                                   "schema": {"type": "object", "properties": {"title": {"type": "string"}}}}});
+        assert_eq!(
+            parse_text_format(&oc),
+            Some(json!({"type": "object", "properties": {"title": {"type": "string"}}}))
+        );
+        // A request without it stays unconstrained, which is what every client that sends no schema
+        // has always got.
+        assert_eq!(parse_text_format(&Value::Null), None);
+    }
 
     #[test]
     fn reasoning_effort_of_parses_and_validates() {
