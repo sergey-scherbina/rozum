@@ -1,0 +1,6 @@
+feature/ucc-ssc-plist-in-repo 2026-08-16T12:37:44Z
+agent: claude-code
+heartbeat: 2026-08-16T12:37:44Z
+status: not-started
+done-so-far: surfaced during slice 4 — com.rozum.ucc-ssc exists only in ~/Library/LaunchAgents
+next: find how the other seven plists are installed, then carry this one the same way
