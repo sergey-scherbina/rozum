@@ -1,0 +1,6 @@
+feature/bench-task-apportion 2026-08-16T00:37:05Z
+agent: claude-code
+heartbeat: 2026-08-16T00:37:05Z
+status: in-progress
+done-so-far: fourth discriminating task designed and hand-verified in a scratch crate - skeleton 2/4, front-load half-fix 3/4, correct 4/4
+next: wire apportion into agentic.sh + tasks.json, then run 4B against it
