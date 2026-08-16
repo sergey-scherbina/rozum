@@ -1,0 +1,6 @@
+feature/tool-call-body-heartbeat 2026-08-16T19:12:49Z
+agent: claude-code
+heartbeat: 2026-08-16T19:12:49Z
+status: in-progress
+done-so-far: ROOT CAUSE of the 14-token stall - BatchSeq::push emits nothing once tool_seen is set, so the whole tool-call body generates in silence and with_gen_timeout kills a healthy generation. At 2-3 tok/s any tool body over ~360 tokens is doomed
+next: measure the blast radius of a ChatEvent::Progress variant vs an empty TextDelta, then fix
