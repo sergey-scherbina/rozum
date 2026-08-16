@@ -1,0 +1,6 @@
+feature/ucc-ssc-action-routes 2026-08-16T11:21:15Z
+agent: claude-code
+heartbeat: 2026-08-16T11:21:15Z
+status: not-started
+done-so-far: slice 3 landed; the gate+door shape is proven on real traffic
+next: classify the 23 action routes by what they MUTATE, and check whether the toolkit can spawn a process at all
