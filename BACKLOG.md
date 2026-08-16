@@ -459,9 +459,32 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   `"1d 1h 1m 1s"`. 3661 seconds has no day in it. It left the suite red and reported success. The
   third run did not compile. So the axis that separates is not "can it reason" but **"does it keep
   an invariant it was told to keep while changing something else"** — and that is visible per-run
-  rather than as a bare 0/3. Whether the 9B keeps it is the measurement that has not been run:
-  it needs the 4B unloaded and takes the phone chat offline for ~30-45 min, so it is the
-  operator's call.
+  rather than as a bare 0/3.
+
+  **The 9B was then run on it, twice, and could not reach the task at all** — a clock result, not
+  a capability one, and the distinction is the one `summarize_matrix.py` already enforces:
+
+  | run | limit | turns | tool calls | files changed |
+  |---|---|---|---|---|
+  | 1 | 1200 s, ctx auto (79872) | 6 | 6 | none |
+  | 2 | 1800 s, ctx 32768 (matched to the 4B) | 9 | 8 | none |
+
+  Both ended `rc=124 RUN_TIMEOUT` with `src/lib.rs` byte-identical to the seed, so the four
+  "failures" printed in each row are the untouched skeleton's own and say nothing about the model.
+  The first run's conditions were wrong and mine to fix: it had a 79872-token context against the
+  4B's 32768, which is slower prefill rather than an advantage. Matched and given half again as
+  long, it still did not get past reading — its last act was `cargo run -- 86400`, exactly what
+  the task asks for, with no clock left to edit anything. Eight tool calls in thirty minutes is
+  ~3.7 minutes per round trip.
+
+  So "equal at 24/24, 1.84x slower" was too kind to it. That was measured on eight tasks averaging
+  ~75 s a cell; on one needing eight to ten tool round trips the 9B does not finish on this host,
+  while the 4B finished every cell in 385-615 s. **Staying on the 4B is a firmer call than the tie
+  suggested, not a closer one.**
+
+  `duration` stays as the bench's discriminating task: the only one of the five that produced a
+  readable failure instead of a bare zero, and it grades a single model without needing a second
+  one to compare against.
 
   **What the next attempt must look like**, now derived rather than guessed: a COMPILING skeleton
   where the change is to logic, not to ownership structure — the shape of `debug`, with real
