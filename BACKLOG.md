@@ -316,6 +316,22 @@ single-writer daemon). Each item below is its own spec+build later — listed to
     ever built, this is a two-line addition to `call_result_value`, not a rediscovery.
   - Spec so far: `docs/specs/mcp-toolsource.md`.
 
+## ScalaScript rust-lane divergences found by the UCC port (2026-08-16)
+
+Three, all SILENT — wrong answers or a dead server, never a compile error. Measured with probes
+that ran the same source on `ssc run` and `ssc build-rust`; the interpreter is right in all three.
+Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
+
+- [ ] **ssc-jsonparse-panics-poisons-server** — `jsonParse` panics on unparseable input and the http
+  runtime's `unwrap()` then poisons its mutex, so every LATER request on that server fails with
+  `PoisonError` while the process stays up. One blank line at the end of one `.jsonl` file did it.
+  Carry upstream first: a server that dies permanently on one malformed byte is a different class
+  from a wrong answer.
+- [ ] **ssc-map-pattern-matches-array** — `case m: Map[String, Any]` also matches a JSON array, so
+  arm ORDER silently decides the result.
+- [ ] **ssc-take-after-map-empty** — `take(n)` on the result of `map` over a `List[Any]` returns
+  empty; `drop`/`filter`/`sorted` on the same list are correct.
+
 ## Agentic-bench fix candidates (from matrix-failure-analysis)
 
 - [ ] **launch-connect-to-a-named-gateway** — `rozum launch` cannot be TOLD which gateway to use.

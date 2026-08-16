@@ -25,7 +25,7 @@ written.
 
 ```scalascript
 [route, serve, Request, Response](std/http.ssc)
-[readFile, exists](std/fs.ssc)
+[readFile, exists, isDir, listDir](std/fs.ssc)
 [jsonParse, jsonStringify](std/json.ssc)
 [envOrElse](std/os.ssc)
 
@@ -243,6 +243,16 @@ def benchTasksPath(): String =
 def taskInfoUnknown(task: String): String =
   "{\"label\":" + jsonStringify(task) + ",\"difficulty\":null,\"prompt\":null,\"expected\":null}"
 
+// The FILE's key order, not the parser's. `jsonStringify` of a parsed entry emits keys sorted
+// (`difficulty, expected, label, …`) while the Rust handler clones the parsed value and its
+// serde_json preserves the source order (`label, difficulty, prompt, expected, tool_hint`) — so a
+// re-serialized entry is the same data and a different byte string. Every task in
+// `scripts/bench/tasks.json` carries exactly these five keys in exactly this order (checked across
+// all twelve), so naming them here is a description of the file rather than a guess about it; an
+// unknown key would be dropped, which is why the check is written down next to the list.
+def taskFieldsInFileOrder(): List[String] =
+  ["label", "difficulty", "prompt", "expected", "tool_hint"]
+
 def taskInfoJson(task: String): String =
   val path = benchTasksPath()
   if exists(path) then
@@ -250,10 +260,23 @@ def taskInfoJson(task: String): String =
     doc.get("tasks") match
       case Some(tasks) =>
         tasks.get(task) match
-          case Some(entry) => jsonStringify(entry)
+          case Some(entry) => entryInFileOrder(entry)
           case None        => taskInfoUnknown(task)
       case None => taskInfoUnknown(task)
   else taskInfoUnknown(task)
+
+def entryInFileOrder(entry: Any): String =
+  entry match
+    case m: Map[String, Any] =>
+      val parts = taskFieldsInFileOrder()
+        .filter(k => m.get(k).map(v => true).getOrElse(false))
+        // The value is stringified INSIDE the `map` over the Option: `getOrElse("")` on an
+        // `Option[Any]` would default a `Value` with a `String` and does not type-check.
+        .map(k => jsonStringify(k) + ":" + m.get(k).map(v => jsonStringify(v)).getOrElse("null"))
+      "{" + parts.mkString(",") + "}"
+    // Bound, not `entry` again: the match MOVES the scrutinee, so naming it in an arm is the only
+    // way to use it there (E0382 otherwise).
+    case other => jsonStringify(other)
 
 def rowToJson(header: List[String], row: List[String]): String =
   val pairs = header.zipWithIndex.map(hi =>
@@ -274,21 +297,36 @@ def tailLines(text: String, n: Int): String =
 // `if !viewTokenOk(t)`. `build-rust` rejects a unary `!` on a call ("unsupported expression:
 // Term.ApplyUnary") while `run` accepts it, so the negated form compiles on one path only. Second
 // instance of that seam found while writing this file; the first was `join`.
+// Slice 3: the AUTHENTICATED twin of the route below. Same bytes, two differences, both measured
+// rather than chosen: no view token (the console's `require_perm_read` layer is what admits it, and
+// the door is what stops anything else), and `tail` defaults to 120 (`default_tail()`) where the
+// public route defaults to 200. One body serving both is the point of the slice — the alternative
+// is the same cell logic written twice, which is what this file already replaced once.
+def cellAuthedRoute(req: Request): Response =
+  cellBody(req, true)
+
 def cellRoute(req: Request): Response =
-  val q = req.query
-  val t = q.get("t").getOrElse("")
-  if viewTokenOk(t) then
+  val t = req.query.get("t").getOrElse("")
+  if viewTokenOk(t) then cellBody(req, false) else forbidden()
+
+// `authed` picks BOTH differences between the two Rust handlers, and there is no third: the tail
+// default (120 vs 200) and the KEY ORDER — the authenticated one puts `task_info` second, the
+// public one puts it fifth. Key order is not cosmetic for a drop-in replacement; it is part of the
+// bytes an existing reader already parses, and the two orders are matched rather than unified for
+// the same reason the payload shapes were: fixing an inconsistency breaks whoever reads it.
+def cellBody(req: Request, authed: Boolean): Response =
+    val q = req.query
     val stamp = q.get("stamp").getOrElse("")
     val agent = q.get("agent").getOrElse("")
     val model = q.get("model").getOrElse("")
     val task  = q.get("task").getOrElse("")
     val sm    = safeModel(model)
     if safePathSeg(stamp) && safePathSeg(agent) && safePathSeg(task) && safePathSeg(sm) then
-      // 200, not 120: the PUBLIC route defaults differently from the authenticated one, which uses
-      // `default_tail()`. Two defaults for one idea in the same file — matched here to the public
-      // handler this replaces, since that is the observable behaviour. Found by comparing whole
-      // logs across runs: a 123-line log came back entire from Rust and capped from here.
-      val tail = q.get("tail").map(s => s.toInt).getOrElse(200)
+      // The default is the CALLER's, because the two Rust handlers disagree: the public one caps at
+      // 200 and the authenticated one at `default_tail()` = 120. Two defaults for one idea, matched
+      // rather than tidied — this is a drop-in replacement of both. Found by comparing whole logs
+      // across runs: a 123-line log came back entire from Rust and capped from here.
+      val tail = q.get("tail").map(s => s.toInt).getOrElse(if authed then 120 else 200)
       val capped = if tail > 3000 then 3000 else tail
       val rows = csvRows(benchResultsDir() + "/" + stamp + "/per-run.csv")
       if rows.length < 2 then ok(jsonStringify(Map("cell" -> "", "agent_log" -> "", "verify_out" -> "")))
@@ -313,14 +351,194 @@ def cellRoute(req: Request): Response =
         val triagePath = cellDir + "/triage.out"
         val triageOut = if exists(triagePath) then jsonStringify(readFile(triagePath)) else "null"
         val hasLogs = if exists(cellDir) then "true" else "false"
+        // ONE order, because the two Rust handlers agree with each other — and this file did not
+        // agree with EITHER. `task_info` belongs second; it sat fifth here, which means the public
+        // route has been serving a different byte string from the handler it replaced ever since
+        // `task_info` was added to it. Yesterday's 1975-cell acceptance could not see that: it
+        // compared this server against ITSELF across a deploy. Comparing against Rust, live and
+        // side by side, is what found it.
         ok("{\"cell\":" + cellJson +
+          ",\"task_info\":" + taskInfoJson(task) +
           ",\"agent_log\":" + agentLog +
           ",\"verify_out\":" + verifyOut +
           ",\"triage_out\":" + triageOut +
-          ",\"task_info\":" + taskInfoJson(task) +
           ",\"has_logs\":" + hasLogs + "}")
     else badRequest("invalid stamp/agent/model/task segment")
-  else forbidden()
+
+// ── /chat/messages and /chat/incidents ─────────────────────────────────────────────────────────
+//
+// Slice 3. Both go straight to the room files on disk — the gateway's own doc comment says so, and
+// it is why they are portable at all: nothing here can see the console's process state.
+//
+// The room's directory is NOT derived from its name. `rooms.json` maps name → root, so a room can
+// live anywhere, and reading that mapping is what makes this a port rather than a guess about
+// layout. `state_dir()` on the Rust side is `rozum_paths::state_dir()`, which is the same
+// `XDG_STATE_HOME`-or-`~/.local/state` rule `stateRoot()` already implements above.
+
+def roomsJsonPath(): String = stateRoot() + "/rooms.json"
+
+// Non-empty, at most 128, and none of CR / LF / NUL / `/`. Matched to the Rust guard exactly: it
+// is what keeps a room name from walking out of the mapping, and a stricter version here would
+// answer 400 where the console answers 200.
+def validRoomName(n: String): Boolean =
+  n.length > 0 && n.length <= 128 &&
+    n.contains("/") == false && n.contains("\n") == false && n.contains("\r") == false
+
+def roomRootIn(entries: Any, name: String): String =
+  entries match
+    case l: List[Any] =>
+      // Indexed rather than `headOption`: this lane lowers a parenless collection member as a Rust
+      // FIELD access and refuses it, which the compiler says in so many words.
+      // NOT `take(1)`, and this one cost a build to find: after a `map` over a `List[Any]`,
+      // `take(n)` returns EMPTY in the rust lane while `drop`, `filter` and `sorted` on the same
+      // list are correct — measured with a probe built both ways (the interpreter is right). A
+      // silent wrong answer rather than a compile error, which is why it reached a running server
+      // before it was noticed. `filter` + `mkString` is exact here for a second reason worth
+      // stating: `rooms.json` is a name→root MAPPING, so at most one entry matches and joining
+      // them cannot differ from taking the first.
+      l.map(e => roomRootOf(e, name)).filter(r => r.length > 0).mkString("")
+    case _ => ""
+
+def roomRootOf(e: Any, name: String): String =
+  e match
+    case m: Map[String, Any] =>
+      val nm = m.get("name").map(v => v.toString).getOrElse("")
+      if nm == name then m.get("root").map(v => v.toString).getOrElse("") else ""
+    case _ => ""
+
+def roomRoot(name: String): String =
+  val path = roomsJsonPath()
+  if exists(path) == false then ""
+  else
+    val parsed = jsonParse(readFile(path))
+    parsed match
+      // Two shapes, both accepted by the Rust reader: a bare array, or `{ "rooms": [...] }`.
+      //
+      // ARRAY FIRST, and the order is load-bearing rather than stylistic: in the rust lane a JSON
+      // ARRAY also matches `case m: Map[String, Any]`, so with the object arm first every bare-array
+      // `rooms.json` — which is the shape this machine actually has — took the object branch, found
+      // no `rooms` key, and returned "no such room" for every room. Measured with a probe running
+      // this exact function both ways; the interpreter picks the List arm and is right. `tokenListHas`
+      // above has always matched the list first, which is why the deployed routes never hit this.
+      case l: List[Any]        => roomRootIn(l, name)
+      case m: Map[String, Any] => m.get("rooms").map(v => roomRootIn(v, name)).getOrElse("")
+      case _                   => ""
+
+// `ts` is unix seconds; the Rust reader formats HH:MM in UTC by plain arithmetic, with no timezone
+// and no date. Ported as arithmetic for the same reason — a `Date` here would render the operator's
+// local time and silently disagree with the console it replaces.
+def two(n: Int): String =
+  if n < 10 then "0" + n.toString else n.toString
+
+def hhmm(ts: Int): String =
+  two((ts / 3600) % 24) + ":" + two((ts / 60) % 60)
+
+// One message line → its JSON object, or "" when the line is not one. A line without `content` is
+// SKIPPED rather than defaulted: the Rust reader drops it, and a placeholder would put a message
+// in the console that nobody wrote.
+def messageJson(line: String): String =
+  val parsed = jsonParse(line)
+  parsed match
+    // `map` over the Option, so an ABSENT `content` and an EMPTY one stay distinguishable: the Rust
+    // reader skips the first and keeps the second, and a `strField` returning "" for both would
+    // have quietly dropped every empty message.
+    // Only STRINGS cross this boundary. Passing the `Map[String, Any]` itself made the rust lane
+    // emit `(m.clone()).into_iter()` on a `Value`, which does not compile — a divergence, not a
+    // dialect rule, and cheap to route around by resolving the fields at the call site.
+    case m: Map[String, Any] =>
+      // Every read is `m.get(...)` INSIDE this arm. Two rules of this lane meet here and leave one
+      // shape standing: a `Map[String, Any]` passed to a def is lowered as an iteration over a
+      // `Value` (does not compile), and a value passed to a def is MOVED, so a second read of the
+      // same binding is a borrow-after-move. Only helpers taking Strings and Ints are called.
+      val content = m.get("content").map(v => v.toString)
+      val display = m.get("display_name").map(v => v.toString).getOrElse("")
+      val author2 = m.get("author").map(v => v.toString).getOrElse("")
+      val ts = m.get("ts").map(v => v.toString.toInt).getOrElse(0)
+      val author = if display.length > 0 then display
+                   else if author2.length > 0 then author2
+                   else "?"
+      // ABSENT is skipped, EMPTY is kept — the Rust reader drops a line with no `content` and
+      // keeps one whose content is "". Only the Option can tell those apart.
+      content.map(c => messageOf(author, ts, c)).getOrElse("")
+    case _ => ""
+
+def messageOf(author: String, ts: Int, content: String): String =
+  "{\"time\":" + jsonStringify(hhmm(ts)) +
+    ",\"author\":" + jsonStringify(author) +
+    ",\"content\":" + jsonStringify(content) + "}"
+
+// The files are read and JOINED before parsing, rather than mapped file-by-file: `flatMap` has no
+// lowering in this lane, and joining preserves the same order (name-sorted files, lines in order)
+// that the Rust reader produces by appending as it goes.
+def jsonlLines(root: String, files: List[String]): List[String] =
+  files.map(f => if exists(root + "/" + f) then readFile(root + "/" + f) else "")
+    .mkString("\n").split("\n").toList
+
+def isJsonl(name: String): Boolean =
+  name.length > 6 && name.substring(name.length - 6, name.length) == ".jsonl"
+
+def chatMessagesRoute(req: Request): Response =
+  val room = req.query.get("room").getOrElse("")
+  if validRoomName(room) == false then Response(400, JSON_CT, "")
+  else
+    val root = roomRoot(room)
+    if root.length == 0 || isDir(root) == false then ok("[]")
+    else
+      // Sorted by NAME, which is what the Rust reader does and what makes the daily files read in
+      // date order (`2026-08-16.jsonl`). Then the LAST 80 across all files, not per file.
+      val files = listDir(root).filter(f => isJsonl(f)).sorted
+      // ONLY lines that look like a JSON object reach `jsonParse`, and that is not tidiness: in
+      // the rust lane `jsonParse` PANICS on input it cannot parse ("EOF while parsing a value"),
+      // the http runtime's mutex is then poisoned, and every later request on that server dies
+      // with `PoisonError` — one blank line at the end of one `.jsonl` file killed the whole
+      // process for good. The Rust reader trims and skips empties; this skips anything that does
+      // not start with `{`, which is the same set for a message log and cannot panic.
+      val objects = jsonlLines(root, files).filter(l => l.length > 0 && l.substring(0, 1) == "{")
+      val all = objects.map(l => messageJson(l)).filter(j => j.length > 0)
+      // The count is taken BEFORE the drop: `all.drop(all.length - 80)` moves the list and then
+      // reads its length, which the generated Rust rejects (E0382).
+      val n = all.length
+      val keep = if n > 80 then all.drop(n - 80) else all
+      ok("[" + keep.mkString(",") + "]")
+
+// `threads.json`, one object per incident. Field order is the Rust struct's declaration order —
+// severity, state, title, owner — because that is what serde emits and this is a drop-in.
+def incidentJson(e: Any): String =
+  e match
+    // Same Option-`map` as the messages: an incident with no `title` is dropped by the Rust reader,
+    // and only the Option can say "absent" apart from "empty".
+    case m: Map[String, Any] =>
+      val title = m.get("title").map(v => v.toString)
+      val sev   = m.get("severity").map(v => v.toString).getOrElse("low")
+      val state = m.get("state").map(v => v.toString).getOrElse("open")
+      val owner = m.get("owner").map(v => v.toString).getOrElse("")
+      title.map(t => incidentOf(sev, state, t, owner)).getOrElse("")
+    case _ => ""
+
+def incidentOf(sev: String, state: String, title: String, owner: String): String =
+  "{\"severity\":" + jsonStringify(sev) +
+    ",\"state\":" + jsonStringify(state) +
+    ",\"title\":" + jsonStringify(title) +
+    ",\"owner\":" + jsonStringify(owner) + "}"
+
+def incidentsIn(parsed: Any): List[String] =
+  parsed match
+    case l: List[Any] => l.map(e => incidentJson(e)).filter(j => j.length > 0)
+    case _            => []
+
+def chatIncidentsRoute(req: Request): Response =
+  val room = req.query.get("room").getOrElse("")
+  if validRoomName(room) == false then Response(400, JSON_CT, "")
+  else
+    val root = roomRoot(room)
+    val path = root + "/threads.json"
+    if root.length == 0 || exists(path) == false then ok("[]")
+    else
+      // Same guard as the messages: an empty or truncated `threads.json` must answer `[]` like the
+      // Rust reader, not panic and poison the server.
+      val raw = readFile(path)
+      if raw.length == 0 || (raw.substring(0, 1) != "[" && raw.substring(0, 1) != "{") then ok("[]")
+      else ok("[" + incidentsIn(jsonParse(raw)).mkString(",") + "]")
 
 // ── /view/{token} ──────────────────────────────────────────────────────────────────────────────
 // The read-only console page. The token is the LAST path segment, and it is checked before the file
@@ -407,6 +625,12 @@ def main(): Unit =
   // middleware hook — measured, not preferred.
   route("GET", "/control/public/matrix/cell", req => if doorOpen(req) then cellRoute(req) else noDoor())
   route("GET", "/view/", r => if doorOpen(r) then viewRoute(r) else noDoor())
+  // Slice 3 — the gated read routes. They carry no token of their own: the console's
+  // `require_perm_read` layer admits the caller and the door is what stops anything else reaching
+  // this port. That order is the whole of `docs/specs/ucc-ssc-session.md`.
+  route("GET", "/control/matrix/cell", req => if doorOpen(req) then cellAuthedRoute(req) else noDoor())
+  route("GET", "/chat/messages", req => if doorOpen(req) then chatMessagesRoute(req) else noDoor())
+  route("GET", "/chat/incidents", req => if doorOpen(req) then chatIncidentsRoute(req) else noDoor())
   serve(8412)
 main()
 ```

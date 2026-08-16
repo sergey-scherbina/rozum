@@ -121,16 +121,35 @@ use axum::{response::IntoResponse, routing::{delete, get, post, put}, Router};
         .route("/control/messenger/bot/remove", post(messenger_bot_remove_route))
         .route_layer(axum::middleware::from_fn(require_admin));
     // Read-only dashboard data — needs the `read` permission (every role has it by default).
+    //
+    // Three of these are served by the `.ssc` program when it is configured (slice 3 of
+    // `docs/specs/ucc-ssc-backend.md`), and the gate is the point: `require_perm_read` below still
+    // decides who gets in, the proxy carries the door, and the `.ssc` server refuses anything that
+    // did not come through here. The other five stay Rust because they read state that lives
+    // INSIDE this process — `matrix_queue()`, `matrix_live()`, the gateway's own status — which no
+    // separate server can see. Classified by data source, measured, in the spec's table.
     let reads = Router::new()
         .route("/control/status", get(status_route))
-        .route("/chat/messages", get(chat_messages_route))
-        .route("/chat/incidents", get(chat_incidents_route))
         .route("/control/matrix/status", get(matrix_status_route))
         .route("/control/matrix/log", get(matrix_log_route))
-        .route("/control/matrix/cell", get(matrix_cell_route))
         .route("/control/matrix/live", get(matrix_live_route))
-        .route("/control/model/info", get(model_info_route))
-        .route_layer(axum::middleware::from_fn(require_perm_read));
+        .route("/control/model/info", get(model_info_route));
+    // Chosen BEFORE registration, like the public pair above: `.route()` twice on one path panics
+    // at startup, and that panic is invisible to the compiler.
+    let reads = match std::env::var("ROZUM_UCC_SSC_ORIGIN").ok().filter(|v| !v.is_empty()) {
+        None => reads
+            .route("/chat/messages", get(chat_messages_route))
+            .route("/chat/incidents", get(chat_incidents_route))
+            .route("/control/matrix/cell", get(matrix_cell_route)),
+        Some(origin) => {
+            eprintln!("control server: /chat/messages, /chat/incidents and /control/matrix/cell → {origin} (.ssc)");
+            reads
+                .route("/chat/messages", get(ucc_ssc_proxy))
+                .route("/chat/incidents", get(ucc_ssc_proxy))
+                .route("/control/matrix/cell", get(ucc_ssc_proxy))
+        }
+    };
+    let reads = reads.route_layer(axum::middleware::from_fn(require_perm_read));
     let chat = Router::new()
         .route("/chat/post", post(chat_post_route))
         // Conversational chat: talk to the resident model DIRECTLY (streamed), no agent, no repo

@@ -289,3 +289,45 @@ relative to the process, so a different cwd answers "no such cell" for every cel
 `rozum-ucc-ssc`. When scalascript's shared toolchain is stale — it was, on first use — the script
 says which of "restage / our source / their compiler" it is and prints the three commands, instead
 of leaving cargo output to be read as a defect here.
+
+
+## Slice 3 — the gated read routes (2026-08-16)
+
+**The census said 19 read routes; the `require_perm_read` group is 8, and only 3 of those are
+portable.** Classified by DATA SOURCE, which is the only thing that decides it — the same question
+slice 1 answered for the public four:
+
+| route | source | portable |
+|---|---|---|
+| `/chat/messages` | room `.jsonl` files on disk | **yes** |
+| `/chat/incidents` | room `threads.json` | **yes** |
+| `/control/matrix/cell` | `scripts/bench/results` | **yes** — the `.ssc` already serves its public twin |
+| `/control/status` | the gateway's own process state | no |
+| `/control/matrix/status` | `matrix_queue()`, process-global | no |
+| `/control/matrix/log` | `matrix_queue()` + files | no |
+| `/control/matrix/live` | `matrix_live()`, process-global | no |
+| `/control/model/info` | filesystem, but through `scan_all_installed` + `same_model` | **not now** — porting it copies the model-catalog matching rule into a second language, which is the duplication this whole item exists to reduce |
+
+The authenticated cell route is served by the SAME `.ssc` body as the public one, with `authed`
+picking the two differences the two Rust handlers actually have: the `tail` default (120 vs 200)
+and the KEY ORDER (`task_info` second vs fifth). That is the shape this item wants — one
+implementation behind two doors, not a third copy.
+
+### Three compiler divergences, all of them SILENT (found by this slice)
+
+Slice 1 filed five; these are the next three, and what makes them expensive is that none is a
+compile error. Each was found by building a probe that ran the same code on both lanes.
+
+1. **`case m: Map[String, Any]` matches a JSON ARRAY.** With the object arm written first, every
+   bare-array `rooms.json` — the shape this machine has — took the object branch, found no `rooms`
+   key, and answered "no such room" for every room. Ordering the List arm first is the workaround;
+   `tokenListHas` has always done that, which is why the deployed routes never hit it.
+2. **`take(n)` after `map` over a `List[Any]` returns EMPTY.** `drop`, `filter` and `sorted` on the
+   same list are correct, and `take` on a list literal is correct.
+3. **`jsonParse` PANICS on unparseable input, and the http runtime then poisons its mutex.** One
+   blank line at the end of one `.jsonl` file killed every subsequent request on that server with
+   `PoisonError` — the process stays up and answers nothing. Guarded by only handing `jsonParse`
+   text that starts with `{` or `[`.
+
+(3) is the one worth carrying upstream first: a server that dies permanently on one malformed byte
+is a different class of problem from a wrong answer.
