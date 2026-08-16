@@ -1,5 +1,19 @@
 # Changelog
 
+## ucc-ssc-backend slice 2 — the session question, answered by measurement
+Completed: 2026-08-16
+
+The question that blocked every remaining route: how does a `.ssc` server participate in a session
+it does not own? Answered by counting rather than arguing — `require_auth` injects the user id and
+no route handler reads it (`grep -c Extension control.rs` → 0), so the gate stays in Rust and the
+ported server needs no principal at all. Re-implementing the session chain would have duplicated a
+security decision whose result the ported code never sees.
+
+What that arrangement actually needs is a door: `:8412` is reachable by every local process, and
+the toolkit binds TCP only. One shared secret, resolved env-then-file like `ROZUM_WEB_SECRET`; the
+`.ssc` half fails closed, the proxy deliberately does not. Built and NOT yet closed — the deployed
+binary predates it — with the three steps to close it, and slice 3 blocked until they are done.
+
 ## meeting-socket-ownership — accepted on the host, and one thing the acceptance found
 Completed: 2026-08-16
 

@@ -2307,6 +2307,16 @@ survives exactly one context rotation. Order is mine to change; scope and the re
   routes once spawn/registry primitives exist, terminal and auth staying Rust longest. First slice
   should be a spec that states which of those gaps is actually on the critical path — measured
   against `clients/control`, not assumed.
+  - [x] **slice 1 — the two public routes.** IN PRODUCTION 2026-08-15 (`docs/specs/ucc-ssc-backend.md`).
+  - [x] **slice 2 — the session question, answered 2026-08-16** (`docs/specs/ucc-ssc-session.md`).
+    Measured: `require_auth` injects the user id and NO handler reads it (`grep -c Extension
+    control.rs` → 0), so the gate stays in Rust and the `.ssc` server serves what it admitted.
+    Built the door that arrangement needs — a shared secret, since `:8412` is reachable by every
+    local process and the toolkit has no unix socket. **Built, not yet closed:** the deployed
+    `rozum-ucc-ssc` predates it. Three steps in the spec's "What is NOT live yet"; the first is
+    restaging the scalascript toolchain, which is the operator's shared tree.
+  - [ ] **slice 3 — the 19 read routes.** BLOCKED until the door is closed, deliberately: porting a
+    gated route before then puts it, ungated, on `:8412`.
 
 ## Sprint
 
