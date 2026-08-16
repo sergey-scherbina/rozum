@@ -331,3 +331,28 @@ compile error. Each was found by building a probe that ran the same code on both
 
 (3) is the one worth carrying upstream first: a server that dies permanently on one malformed byte
 is a different class of problem from a wrong answer.
+
+
+## Slice 4 — measured, not started (2026-08-16)
+
+Classified before any porting, the same way slices 1 and 3 were, because the answer again decides
+the size of the slice rather than the order of the work:
+
+| routes | what they touch | portable |
+|---|---|---|
+| `matrix/{run,pause,resume,stop}` | `matrix_queue()` inside the gateway process | no |
+| `gateway/{load,stop}`, `task`, `chat/stream` | the gateway's own model + state | no |
+| `agent/{launch,stop}`, `coder/*`, `session/*` | DETACHED child processes + registry files | not yet — see below |
+| `messenger/*` (7) | shell out to the `messenger` CLI (`messenger_json(&args)`) | only if `exec` works on the rust lane |
+| `project/add` | `create_dir_all` + a file | **yes** |
+| `chat/post` | proxies to the meeting daemon on `:8405` | **yes**, it is an HTTP call |
+
+**The blocking gap is real and it is not "spawn/kill" in general — it is DETACHED spawn.**
+`std/process.ssc` offers exactly one primitive, `exec(cmd, args, opts) -> ProcessResult`, which
+WAITS for the child and returns its output. Every launch route here starts something that must
+outlive the request. Whether even `exec` is lowered on the rust lane is unmeasured — its own
+header names JVM, Node and Browser backends and not Rust.
+
+So slice 4 is two routes' worth of porting behind one toolkit question, and the honest order is:
+measure `exec` on the rust lane first; if it works, the messenger seven come with it; the launch
+routes need a `spawn` that does not exist yet in any backend.
