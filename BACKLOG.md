@@ -592,6 +592,28 @@ Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
 
   ⚠️ Three reps is three reps. This is a signal, not a pass rate to quote as settled.
 
+  **Then the losses were looked into (operator: "may be it can be fixed"), and part of them was
+  ours again — BUG-056.** The 9B's only `duration` loss ended on an Edit whose `old_string` and
+  `new_string` were identical; the tool refused it, and signature 3 counted the refusal as the
+  third edit. Two of the day's six stops had that shape. With it fixed, `duration` re-run on the
+  9B passes again (334.5 s, 19 turns, 13 tool calls).
+
+  Running tally on the 9B, all post-BUG-055: `apportion` 3/3, `duration` 3 passes and 1 loss (the
+  loss predates BUG-056; 1/1 since), `board` 0/1 on genuine churn.
+
+  **What is left is the model's, and there is nothing to fix on our side for it.** Both models lose
+  the same way: they write a test of their own that contradicts the stated rule — the 9B's was
+  `assert_eq!(format(3661), "0d 1h 1m 1s")`, a zero day component the rule forbids, and it defended
+  the mistake in its own reasoning before making it. Suppressing that by telling the model not to
+  add tests would hide the weakness the task exists to measure, not fix it.
+
+  **Cost to be aware of before running more:** a 9B bench and the operator's chat do not both fit
+  on this host. The 4B gateway spent 240 s refused and then gave up while a bench held the RAM —
+  visible in `~/.rozum-gateway.log` as "9284 MB already reserved by [pid … 9B]". The chat recovers
+  by itself afterwards (measured 0.9 s), but during a 9B run it is down. Two of the runs were also
+  killed after their first cell for reasons not established; completed cells survive a kill, so
+  small batches lose less.
+
   Worth keeping for whoever runs the rest: `gateway --dry-run` gives the admission verdict with the
   real load-path math and loads nothing, so headroom can be checked before committing an hour.
 
