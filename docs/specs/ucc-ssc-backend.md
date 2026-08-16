@@ -417,3 +417,27 @@ under `examples/reported/` built and measured with `build-rust`:
 Filed as FEATURES and registered rather than routed (their P-3.3: `lane`/`area` are the triager's
 judgement). If either lands, the corresponding routes become a port rather than a design question —
 which is the whole reason to write them down as primitives instead of as "the rest of slice 4".
+
+
+## Both reported defects are fixed upstream — and our workarounds stay (2026-08-16)
+
+Filed in the morning, fixed the same day, confirmed by re-running the repros against a toolchain
+built from their `b0b67f739`:
+
+| report | fixed-in | verified |
+|---|---|---|
+| `rust-type-pattern-on-a-local-val-matches-anything` | `0f8482f54` | an array no longer takes the `Map` arm — all four lines agree with the interpreter |
+| `rust-serve-dies-permanently-after-one-handler-panic` | `b876ca0d8` | `/boom` answers 500 and `/ok` keeps answering |
+
+**Only ONE half of the second report landed, and the distinction matters to this file.** The
+handler panic no longer takes the server down; `jsonParse` still aborts its thread on unparseable
+input. So the guard in `public-matrix.ssc` — hand `jsonParse` only text starting with `{` or `[` —
+is still load-bearing, not belt-and-braces.
+
+**The type-pattern workaround stays too, and for a reason that is not caution.** Our
+`rozum-ucc-ssc` is built with whatever toolchain is staged in the operator's shared scalascript
+checkout, and that is older than `0f8482f54`. Source that relies on the fix would build correctly
+here today and SILENTLY produce the old wrong answer on the next rebuild from the shared staging —
+the exact failure the workaround exists to prevent, arriving by a different road. The workaround is
+version-independent and costs nothing; it can go once the shared toolchain is past that commit, and
+the comment in the file says so.

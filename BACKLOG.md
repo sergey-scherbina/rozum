@@ -336,13 +336,21 @@ which is the argument for reducing before filing. Both SILENT — wrong answers 
 that ran the same source on `ssc run` and `ssc build-rust`; the interpreter is right in all three.
 Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
 
-- [ ] **ssc-serve-dies-permanently-after-one-handler-panic** — one `jsonParse` on a blank line
+- [x] ~~**ssc-serve-dies-permanently-after-one-handler-panic**~~ — HALF FIXED UPSTREAM 2026-08-16
+  (`b876ca0d8`), confirmed: a handler panic no longer takes the server down (`/boom` → 500, `/ok`
+  keeps answering). `jsonParse` still ABORTS its thread on bad input, so the pre-parse guard in
+  `public-matrix.ssc` is still required — that was the report's second half and it did not land.
+- [x] ~~superseded — original text:~~ **ssc-serve-dies-permanently-after-one-handler-panic** — one `jsonParse` on a blank line
   panics a worker, the http runtime's `unwrap()` on its own mutex then fails for every LATER
   request, and the process stays up answering nothing. Filed upstream 2026-08-16 with a repro that
   shows `/ok` alive → `/boom` panic → `/ok` silent forever. Note the interpreter REFUSES cleanly
   (`ssc: invalid JSON`), so the report is about the server's survival, not about the two lanes
   disagreeing.
-- [ ] **ssc-type-pattern-on-a-local-val-matches-anything** — `case m: Map[String, Any]` takes a
+- [x] ~~**ssc-type-pattern-on-a-local-val-matches-anything**~~ — FIXED UPSTREAM 2026-08-16
+  (`scalascript` `0f8482f54`), confirmed by re-running the repro. Our workaround stays until the
+  shared toolchain is past that commit: source relying on the fix would build correctly here and
+  silently produce the old answer on the next rebuild from stale staging.
+- [x] ~~superseded — original text:~~ **ssc-type-pattern-on-a-local-val-matches-anything** — `case m: Map[String, Any]` takes a
   JSON ARRAY when the scrutinee is a local `val`; the same match on a PARAMETER is correct. Filed
   upstream 2026-08-16 (`scalascript` INBOX, repro
   `examples/reported/rust-type-pattern-on-a-local-val-matches-anything.ssc`).
