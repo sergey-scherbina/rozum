@@ -49,6 +49,25 @@ adding twenty new lines that repeats one is doing new work. A share rather than 
 because the genuine one-line toggle already in the suite (`collect::<String>()` ⟷ `collect()`) is
 1 of 1 and must still fire — and does.
 
+**Measured after the fix, same task, same model, same three reps:**
+
+| | before | after |
+|---|---|---|
+| pass rate | 0/3 | **1/3** |
+| turns / tool calls | 9-11 / 5-6, all aborted at call 4 | 13-18 / 7-11 |
+| reached `cargo test` | never | every run |
+
+One clean pass. One run with all eight durations correct, every seeded assertion intact, and a
+red suite from a test the model wrote itself (`format(86399) == "1d 23h 59m 59s"` — 86399 is one
+second SHORT of a day). One run where the implementation was genuinely wrong, shifting every unit
+by one (`59` rendered `59m`). Those last two are the model's, and now they are measurable, which
+they were not while the harness was stopping the run at call four.
+
+The verifier line was corrected alongside: it used to call both defects "the seeded tests were
+broken", and after the fix that was actively misleading — it said a seeded assertion had been
+changed when none had. It now checks the three seeded assertions verbatim and says which case it
+is. Both branches verified against the kept evidence of the runs that produced them.
+
 **Regression test:** `gateway::tests::reading_a_file_then_editing_it_twice_is_not_churn`, the
 sequence transcribed from the transcripts, plus one assertion per defect so neither can be quietly
 restored. Verified to fail against each old behaviour separately. Both pre-existing churn tests

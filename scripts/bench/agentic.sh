@@ -933,13 +933,25 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
         # nothing at all, and everything from a day upward is rendered in hours.
         [ -f Cargo.toml ] || { echo "    FAIL  Cargo.toml missing"; fail=1; }
         ls src/*.rs >/dev/null 2>&1 || { echo "    FAIL  no src/*.rs"; fail=1; }
-        # Say WHICH assertion, not just "tests red". Measured on the first live run: the 4B wrote a
-        # CORRECT implementation, then rewrote a seeded expectation from "1h 1m 1s" to
-        # "1d 1h 1m 1s" — 3661 seconds has no day in it — and stopped with the suite red. A row
-        # that only said "the seeded tests were broken" would have buried the most useful thing
-        # this task has produced: the logic was right and the invariant was not kept.
+        # Say WHICH assertion, and whether the agent CHANGED a seeded one or shipped a bad test of
+        # its own — those are different defects and the row used to call both "the seeded tests were
+        # broken". Both have now been measured on this task: 2026-08-16 the 4B rewrote the seeded
+        # `format(3661)` expectation to "1d 1h 1m 1s" (3661 seconds has no day in it), and after
+        # the loop-breaker fix it left every seeded assertion intact and added its own
+        # `format(86399) == "1d 23h 59m 59s"` — 86399 is one second SHORT of a day. Reporting the
+        # second as the first would have sent the next reader looking for a fault we had fixed.
         if ! cargo test -q >"$w/cargo.out" 2>"$w/cargo.err"; then
-          echo "    FAIL  the seeded tests were broken"
+          seeded_intact=1
+          for a in 'assert_eq!(format(3661), "1h 1m 1s");' \
+                   'assert_eq!(format(3600), "1h");' \
+                   'assert_eq!(format(61), "1m 1s");'; do
+            grep -qF "$a" src/lib.rs 2>/dev/null || seeded_intact=0
+          done
+          if [ "$seeded_intact" = 1 ]; then
+            echo "    FAIL  cargo test is red (the seeded assertions are intact — a test the agent added is failing)"
+          else
+            echo "    FAIL  a seeded assertion was changed, and cargo test is red"
+          fi
           grep -hE "^(thread .* panicked|  left:| right:)" "$w/cargo.out" "$w/cargo.err" 2>/dev/null \
             | head -6 | sed 's/^/          /'
           fail=1
