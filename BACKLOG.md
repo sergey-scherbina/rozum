@@ -539,9 +539,24 @@ Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
   working the whole time. A gateway defect, recorded against the model. A mean over a bimodal
   distribution described neither mode.
 
-  So the 9B's agentic capability on this task is **still unmeasured**. "Equal at 24/24, 1.84×
-  slower" remains the only real comparison until it is re-run against the fix, and the decision to
-  stay on the 4B rests on that measurement — not on these two runs.
+  **Re-run against the BUG-055 fix, 2026-08-16 — and the 9B PASSED it.** First cell, first real
+  agentic measurement of this model on this task:
+
+  | model | task | pass | seconds | turns | tool calls |
+  |---|---|---|---|---|---|
+  | Qwen3.5-9B | `duration` | **1/1** | 288.6 | 19 | 16 |
+  | Qwen3.5-4B | `duration` | 1/3 | 733 / 384 / 440 | 15 / 18 / 13 | 9 / 11 / 7 |
+
+  One cell is one cell, and it is not a pass rate — but it is the first time this model has been
+  allowed to finish anything here, and it finished by doing MORE work than the 4B did (16 tool
+  calls to the 4B's 7-11), not less. The run was stopped after that cell by the harness, and the
+  host has since gone to 7.65 GiB available against the 10.19 the 9B needs, so `apportion` and
+  `board` on the 9B are still unrun. **Nothing here overturns staying on the 4B** — that rests on
+  the eight-task 24/24 at 1.84× — but "the 9B cannot finish agentic work on this host" is now
+  positively disproven, by the model finishing.
+
+  Worth keeping for whoever runs the rest: `gateway --dry-run` gives the admission verdict with the
+  real load-path math and loads nothing, so headroom can be checked before committing an hour.
 
   `duration` stays as the bench's discriminating task: the only one of the five that produced a
   readable failure instead of a bare zero, and it grades a single model without needing a second
