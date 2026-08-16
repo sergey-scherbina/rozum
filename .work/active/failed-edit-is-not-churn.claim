@@ -1,6 +1,0 @@
-feature/failed-edit-is-not-churn 2026-08-16T14:10:15Z
-agent: claude-code
-heartbeat: 2026-08-16T14:10:15Z
-status: in-progress
-done-so-far: signature 3 counts edits that ERRORED and changed nothing; measured 2 of 6 stops today triggered that way, one of them the 9B duration loss
-next: count only edits that landed, same rule signature 5 already uses; test; re-run the 9B
