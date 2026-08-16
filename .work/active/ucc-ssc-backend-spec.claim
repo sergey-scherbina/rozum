@@ -1,6 +1,0 @@
-feature/ucc-ssc-backend-spec 2026-08-16T01:09:09Z
-agent: claude-code
-heartbeat: 2026-08-16T01:09:09Z
-status: not-started
-done-so-far: measured 66 backend routes and the 28 the SPA actually calls
-next: read the existing .ssc slice (public-matrix) and the toolkit gaps, then write the critical-path spec
