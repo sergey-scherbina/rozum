@@ -254,18 +254,27 @@ pub(crate) fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
     let mut edits_per_file: HashMap<String, usize> = HashMap::new();
     let mut removed_seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let mut pingpong_files: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for m in messages {
-        for b in &m.content {
-            if let ContentBlock::ToolUse { input, .. } = b {
-                if let Some((file, removed, added)) = edit_target_and_lines(input) {
-                    *edits_per_file.entry(file.clone()).or_default() += 1;
-                    let seen = removed_seen.entry(file.clone()).or_default();
-                    if is_pingpong(&added, seen) {
-                        pingpong_files.insert(file.clone());
-                    }
-                    seen.extend(removed.into_iter().filter(|l| is_substantive(l)));
-                }
+    // Only edits that LANDED. An edit whose tool call errored changed nothing, so it cannot be
+    // evidence that the file's content is going in circles — the same rule signature 5 already
+    // applies, and signature 3 not applying it was a second way to count a non-edit as an edit.
+    //
+    // Measured on today's stops (2026-08-16): two of six were triggered by a failed call, and in
+    // both the shape was the same — the model re-sent an Edit whose `old_string` and `new_string`
+    // were identical, the tool answered "No changes to make", and that non-event became the third
+    // edit that tripped the threshold. One of the two was the 9B's only `duration` loss, where the
+    // implementation on disk was already correct. Signature 1 is the signature for repeated FAILING
+    // calls, and it needs three of them in a row; this one is about content churn.
+    for (_, input, is_error, _) in &calls {
+        if *is_error {
+            continue;
+        }
+        if let Some((file, removed, added)) = edit_target_and_lines(input) {
+            *edits_per_file.entry(file.clone()).or_default() += 1;
+            let seen = removed_seen.entry(file.clone()).or_default();
+            if is_pingpong(&added, seen) {
+                pingpong_files.insert(file.clone());
             }
+            seen.extend(removed.into_iter().filter(|l| is_substantive(l)));
         }
     }
     let churn = edits_per_file.iter().find(|(f, c)| {

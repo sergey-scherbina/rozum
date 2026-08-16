@@ -2311,6 +2311,43 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_that_errored_is_not_one_of_the_three() {
+        // Transcribed from the 9B's only `duration` loss (2026-08-16). Two edits landed — the
+        // implementation fix and the test module — and the third was an Edit whose `old_string`
+        // and `new_string` were IDENTICAL, which the tool refuses with "No changes to make". That
+        // non-event was counted as the third edit and tripped the threshold, on a workdir whose
+        // implementation was already correct.
+        //
+        // Signature 1 is the one for repeated FAILING calls, and it wants three in a row.
+        // Signature 3 is about the file's content going in circles, and a call that changed
+        // nothing cannot be evidence of that.
+        let same = "#[cfg(test)]\nmod tests {\n    use super::*;\n    \
+                    fn hours_minutes_seconds() { assert_eq!(format(3661), \"1h 1m 1s\"); }\n}";
+        let msgs = vec![
+            Message::user("extend it to days"),
+            cc_edit(
+                "e0",
+                "src/lib.rs",
+                "pub fn format(secs: u64) -> String {\n    let h = secs / 3600;\n    \
+                 let m = (secs % 3600) / 60;\n    let s = secs % 60;\n}",
+                "pub fn format(secs: u64) -> String {\n    let d = secs / 86400;\n    \
+                 let h = (secs % 86400) / 3600;\n    let m = (secs % 3600) / 60;\n}",
+            ),
+            tool_out("e0", "ok"),
+            cc_edit("e1", "src/lib.rs", same, &format!("{same}\n// plus a days test")),
+            tool_out("e1", "ok"),
+            // The no-op: identical strings, refused by the tool.
+            cc_edit("e2", "src/lib.rs", same, same),
+            tool_err("e2", true),
+        ];
+        let r = detect_stuck_loop(&msgs);
+        assert!(
+            r.as_deref().is_none_or(|m| !m.contains("re-doing and undoing")),
+            "a refused edit changed nothing and must not be the third edit: {r:?}"
+        );
+    }
+
+    #[test]
     fn reading_a_file_then_editing_it_twice_is_not_churn() {
         // THE EXACT SEQUENCE THAT ABORTED THREE BENCHMARK RUNS, transcribed from the transcripts
         // (2026-08-16, `duration` on Qwen3.5-4B). The model read src/lib.rs, fixed the function,

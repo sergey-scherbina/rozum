@@ -1,5 +1,44 @@
 # Bugs
 
+## BUG-056 — signature 3 counts an edit that FAILED, so a refused no-op edit becomes the third strike
+
+- **Status:** FIXED 2026-08-16 (`loopbreak.rs`: the signature-3 loop iterates `calls` and skips
+  `is_error`, the rule signature 5 already used).
+- **Severity:** P2. Same family as BUG-054 — a second way to count a non-edit as an edit — but it
+  survived that fix because BUG-054 was about which INPUTS look like edits, and this is about
+  whether the edit happened.
+
+Found by looking at why the 9B loses, which the operator asked for after the three-rep run. Its
+only `duration` loss, from the transcript:
+
+```
+[5] Edit  src/lib.rs   ← the implementation. CORRECT: days + the all-zero case      ok
+[6] Edit  src/lib.rs   ← extends the test module                                     ok
+[7] Bash  cargo test   ← red, because the test IT wrote expects "0d 1h 1m 1s"
+[8] Edit  src/lib.rs   ← old_string == new_string
+    → <tool_use_error>No changes to make: old_string and new_string are exactly the same.
+    >> "…has been edited 3 times, re-doing and undoing the same change…"
+```
+
+Call 8 changed nothing — the tool refused it. Counting it made two forward edits into three, and
+the run ended on a workdir whose implementation was already correct on all eight verifier values.
+
+**Measured across every signature-3 stop of the day:** 6 stops, of which **2** were triggered by a
+failed call, both with this exact shape (an identical-strings Edit). Excluding failed calls leaves
+2 real edits in each — below the threshold, no stop. The other 4 are genuine content churn and
+still fire.
+
+`cargo test` being red there is the model's own doing: the test it added asserts a zero day
+component that the stated rule forbids. That failure is real and stays. What was ours is ending
+the run before it could act on it.
+
+Signature 1 is the signature for repeated FAILING calls and wants three in a row; signature 3 is
+about the file's content going in circles, and a call that changed nothing cannot be evidence of
+that.
+
+**Regression test:** `an_edit_that_errored_is_not_one_of_the_three`, transcribed from that
+transcript, verified red against the old behaviour.
+
 ## BUG-055 — nothing bounds the wait for a backend to produce a stream, so a wedged prefill hangs the request until something else gives up
 
 - **Status:** FIXED 2026-08-16 (`gateway.rs`: `start_chat_bounded`).
