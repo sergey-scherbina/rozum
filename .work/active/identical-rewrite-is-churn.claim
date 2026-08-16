@@ -1,0 +1,6 @@
+feature/identical-rewrite-is-churn 2026-08-16T10:25:54Z
+agent: claude-code
+heartbeat: 2026-08-16T10:25:54Z
+status: in-progress
+done-so-far: BUG-054 removed a true positive it caught by accident (greet: same Cargo.toml written twice); adding the precise signature
+next: signature 5, replay over all 335 kept transcripts to count false positives BEFORE shipping
