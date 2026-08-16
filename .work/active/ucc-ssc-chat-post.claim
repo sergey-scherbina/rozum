@@ -1,0 +1,6 @@
+feature/ucc-ssc-chat-post 2026-08-16T13:08:04Z
+agent: claude-code
+heartbeat: 2026-08-16T13:08:04Z
+status: not-started
+done-so-far: slice 5 scoped — chat/post is the last portable route; its upstream is hardcoded in both implementations
+next: make the meeting REST base configurable, port the route, accept against a recording upstream
