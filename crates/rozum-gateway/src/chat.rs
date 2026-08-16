@@ -30,6 +30,20 @@ pub(crate) async fn chat_incidents_route(
     axum::Json(read_room_incidents(&q.room)).into_response()
 }
 
+/// Where the meeting daemon's REST half listens. `:8405` unless told otherwise.
+///
+/// A constant until 2026-08-16, in two implementations of this route — which made the ScalaScript
+/// port's acceptance impossible to run without posting real messages into the operator's rooms.
+/// One name, read the same way on both sides, is what lets the two be compared against a recording
+/// upstream instead.
+pub(crate) fn meeting_rest_base() -> String {
+    std::env::var("ROZUM_MEETING_REST")
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8405".to_string())
+}
+
 pub(crate) async fn chat_post_route(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
@@ -41,10 +55,9 @@ pub(crate) async fn chat_post_route(
         .unwrap_or("")
         .to_string();
     if !valid_room_name(&room) { return StatusCode::BAD_REQUEST.into_response(); }
-    // Proxy to the meeting daemon at :8405/p.
     let client = reqwest::Client::new();
     match client
-        .post("http://127.0.0.1:8405/p")
+        .post(format!("{}/p", meeting_rest_base()))
         .header("X-Room", &room)
         .header("Content-Type", "text/plain")
         .body(body.to_vec())

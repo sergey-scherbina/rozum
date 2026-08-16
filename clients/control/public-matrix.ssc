@@ -24,7 +24,7 @@ be REFUSED rather than sanitised. It was ported and tested on its own before a s
 written.
 
 ```scalascript
-[route, serve, Request, Response](std/http.ssc)
+[route, serve, Request, Response, httpPost](std/http.ssc)
 [readFile, writeFile, exists, isDir, listDir, mkdirs](std/fs.ssc)
 [jsonParse, jsonStringify](std/json.ssc)
 [envOrElse](std/os.ssc)
@@ -95,6 +95,9 @@ def tokenMatches(e: Any, t: String): Boolean =
 // the Rust route, which answers `application/json` on all three. `charset` is omitted for the same
 // reason: this is a drop-in replacement, so its headers match rather than improve on the original.
 val JSON_CT: Map[String, String] = Map("Content-Type" -> "application/json")
+
+// `/chat/post` answers text, not JSON — matched to the handler it replaces.
+val TEXT_CT: Map[String, String] = Map("Content-Type" -> "text/plain")
 
 def forbidden(): Response =
   Response(403, JSON_CT, jsonStringify(Map("error" -> "invalid or revoked token")))
@@ -771,6 +774,36 @@ def messengerBotServiceRoute(req: Request): Response =
     Response(if okB then 200 else 400, JSON_CT,
       "{\"ok\":" + (if okB then "true" else "false") + ",\"output\":" + jsonStringify(out) + "}")
 
+// ── /chat/post ─────────────────────────────────────────────────────────────────────────────────
+//
+// Slice 5, and the last route of this port that can move: it forwards the body to the meeting
+// daemon's REST half, which is an HTTP call and nothing else. The room comes from `X-Room`, which
+// is why the console's proxy forwards routing headers — it drops credentials and keeps these.
+//
+// `ROZUM_MEETING_REST` is read the same way on both sides, default `:8405`. It became a name
+// rather than a constant so this port could be ACCEPTED at all: comparing two implementations of a
+// route that posts a message means posting it, and the alternative to a recording upstream is
+// writing into the operator's real rooms to prove a refactor.
+
+def meetingRestBase(): String =
+  val v = envOrElse("ROZUM_MEETING_REST", "")
+  if v.length == 0 then "http://127.0.0.1:8405" else stripTrailingSlash(v)
+
+def stripTrailingSlash(v: String): String =
+  if v.length > 0 && v.substring(v.length - 1, v.length) == "/" then v.substring(0, v.length - 1) else v
+
+def chatPostRoute(req: Request): Response =
+  val room = req.headers.getOrElse("x-room", "")
+  if validRoomName(room) == false then Response(400, TEXT_CT, "")
+  else
+    val r = httpPost(meetingRestBase() + "/p", req.body,
+      Map("X-Room" -> room, "Content-Type" -> "text/plain"))
+    // The Rust handler answers a BARE 200 with an empty body on success, and 502 carrying either
+    // the upstream's status code or the transport error's text. Matched, including the emptiness:
+    // the console reads the code, and inventing a body here would be a difference for nothing.
+    if r.status >= 200 && r.status < 300 then Response(200, TEXT_CT, "")
+    else Response(502, TEXT_CT, r.status.toString)
+
 // ── /view/{token} ──────────────────────────────────────────────────────────────────────────────
 // The read-only console page. The token is the LAST path segment, and it is checked before the file
 // is read — an invalid token must not even reveal whether the page exists.
@@ -873,6 +906,7 @@ def main(): Unit =
   route("POST", "/control/messenger/group/remove", req => if doorOpen(req) then messengerGroupRemoveRoute(req) else noDoor())
   route("POST", "/control/messenger/bot/remove", req => if doorOpen(req) then messengerBotRemoveRoute(req) else noDoor())
   route("POST", "/control/messenger/bot/service", req => if doorOpen(req) then messengerBotServiceRoute(req) else noDoor())
+  route("POST", "/chat/post", req => if doorOpen(req) then chatPostRoute(req) else noDoor())
   serve(8412)
 main()
 ```

@@ -170,8 +170,17 @@ use axum::{response::IntoResponse, routing::{delete, get, post, put}, Router};
         }
     };
     let reads = reads.route_layer(axum::middleware::from_fn(require_perm_read));
+    // `/chat/post` moves to the `.ssc` server when it is configured; `/control/chat/stream` cannot
+    // — it talks to the resident model through this process's own state.
+    let chat_post_handler = match std::env::var("ROZUM_UCC_SSC_ORIGIN").ok().filter(|v| !v.is_empty()) {
+        None => post(chat_post_route),
+        Some(origin) => {
+            eprintln!("control server: /chat/post → {origin} (.ssc)");
+            post(ucc_ssc_proxy)
+        }
+    };
     let chat = Router::new()
-        .route("/chat/post", post(chat_post_route))
+        .route("/chat/post", chat_post_handler)
         // Conversational chat: talk to the resident model DIRECTLY (streamed), no agent, no repo
         // exploration — the phone chat's default "Собеседник" mode. The agentic path stays
         // `/control/coder/launch` (the "Агент" toggle). See docs/specs/unified-control-center.md.
