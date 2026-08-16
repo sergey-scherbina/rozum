@@ -3857,7 +3857,18 @@ async fn run_meetings_start(foreground: bool) {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 continue;
             }
-            Err(e) => eprintln!("meeting daemon error: {e}"),
+            // A daemon that could not serve must SAY SO in its exit status, not only in a
+            // sentence. Measured on the host 2026-08-16 while accepting the ownership lock: with
+            // the owner wedged (lock held, socket file gone) the refusal printed the right
+            // paragraph and exited 0, so anything reading `$?` — a supervisor, a spawn wrapper,
+            // a shell `&&` — was told the daemon started. The two cases are different and only
+            // this one is a failure: "already running" returns 0 above on purpose, because then
+            // the service DOES exist and this process was simply not needed.
+            Err(e) => {
+                eprintln!("meeting daemon error: {e}");
+                let _ = std::fs::remove_file(&pid_path);
+                std::process::exit(1);
+            }
         }
         let _ = std::fs::remove_file(&pid_path);
         return;
