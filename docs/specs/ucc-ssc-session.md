@@ -129,7 +129,27 @@ route that actually needs it in hand.
   it keeps testing the service rather than the doorman — a one-line change to `services.rs`, listed
   here so it lands with the door instead of being noticed a month later.
 
-## What is NOT live yet
+## Closed 2026-08-16 — what was done and what it cost to be sure
+
+1. **A reference that could not move:** 1975 cells captured from the live console before anything
+   changed, hashed.
+2. **The new `.ssc` binary built with the staged toolchain and put behind the console** — the
+   vintage question ("that toolchain is older than the tree") answered empirically instead of by
+   argument: **1975 of 1975 answers byte-identical.** A first pass said 1971/1975; re-querying the
+   four showed them identical, so the sweep was repeated with a retry on an empty body and came
+   back clean. Four dropped connections would have read as a regression, which is why the second
+   pass exists.
+3. **The door closed:** secret at `~/.rozum/secrets/ucc-ssc-door` (600, beside the messenger
+   tokens), read env-then-file by both halves.
+4. **The bypass that wasn't.** With the secret in place, a request through the console PASSED the
+   closed door — which reads as the door being broken. Instrumenting the door itself showed
+   `want=64 got=64`: the header was arriving, because a sibling's deploy at 05:00 had already
+   published a console built from this branch's parent commit. `strings ~/.local/bin/rozum-gateway`
+   reported no such header, and that was me reading the wrong file — the console runs
+   `~/.cargo/bin/rozum-gateway`. The lesson is the one this project keeps paying for: probe the
+   running process, not a path you believe it uses.
+
+## What was NOT live before that
 
 The `.ssc` half of the door is source, not a running binary. `rozum-ucc-ssc` on the host is the
 binary built on 2026-08-15 and it does not know about the header; the Rust proxy now sends one, and
