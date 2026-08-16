@@ -1,5 +1,25 @@
 # Changelog
 
+## ucc-ssc — the door is closed, and the check that watches it means something again
+Completed: 2026-08-16
+
+Slice 2 left the door built and open. Closed now: one secret in `rozum_core::door`, read
+env-then-file by all three processes that must agree on it, and the `.ssc` server refuses anything
+that did not come through the console.
+
+Accepted against a reference that could not move — 1975 cells captured from the live console
+first, then **1975 of 1975 byte-identical** through the closed door. That also settled the
+toolchain-vintage question empirically rather than by rebuilding the operator's shared tree. A
+first pass read 1971/1975; re-querying showed four dropped connections, so the sweep was repeated
+with a retry and came back clean.
+
+Two things the doing found that the writing had not. A request through the console passed the
+closed door, which read as a bypass until instrumenting the door showed the header arriving — a
+sibling's deploy had already published the Rust half, and `strings` said otherwise because the
+console runs `~/.cargo/bin/rozum-gateway`, not the path I checked. And carrying the secret in
+`doctor` was not enough: a door refusal and a token refusal are both 403, so the probe now reads
+the body and reports secret drift by name instead of a green that proves less than it looks like.
+
 ## ucc-ssc-backend slice 2 — the session question, answered by measurement
 Completed: 2026-08-16
 
