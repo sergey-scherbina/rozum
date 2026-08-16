@@ -2086,6 +2086,67 @@ mod tests {
         assert!(detect_stuck_loop(&ok).is_none(), "two forward CC edits to distinct files are not churn");
     }
 
+    #[test]
+    fn reading_a_file_then_editing_it_twice_is_not_churn() {
+        // THE EXACT SEQUENCE THAT ABORTED THREE BENCHMARK RUNS, transcribed from the transcripts
+        // (2026-08-16, `duration` on Qwen3.5-4B). The model read src/lib.rs, fixed the function,
+        // then extended the test module — two forward edits to different regions and nothing
+        // undone. Signature 3 fired anyway and told it to stop and report in one line, so it never
+        // ran `cargo test`, never saw that it had broken an assertion, and reported success. All
+        // three cells were scored as model failures. They were ours.
+        //
+        // Two independent defects, either of which alone is enough to misfire:
+        //   * a `Read` counted as an edit, because it carries `file_path` — Read + 2 edits = 3,
+        //     which IS the threshold;
+        //   * the ping-pong proof was the line `}`, removed with the old function body and added
+        //     back with the new test module's closing braces.
+        let read = asst(tool_use("r0", "Read", json!({ "file_path": "src/lib.rs" })));
+        let fix_fn = cc_edit(
+            "e0",
+            "src/lib.rs",
+            "pub fn format(secs: u64) -> String {\n    let h = secs / 3600;\n    \
+             let m = (secs % 3600) / 60;\n    let s = secs % 60;\n    if h > 0 {\n        \
+             parts.push(format!(\"{h}h\"));\n    }\n    parts.join(\" \")\n}",
+            "pub fn format(secs: u64) -> String {\n    let d = secs / 86400;\n    \
+             let h = (secs % 86400) / 3600;\n    let m = (secs % 3600) / 60;\n    \
+             let s = secs % 60;\n    if d > 0 {\n        parts.push(format!(\"{d}d\"));\n    }\n    \
+             if parts.is_empty() {\n        \"0s\".to_string()\n    } else {\n        \
+             parts.join(\" \")\n    }\n}",
+        );
+        let extend_tests = cc_edit(
+            "e1",
+            "src/lib.rs",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    \
+             fn hours_minutes_seconds() {\n        assert_eq!(format(3661), \"1h 1m 1s\");\n    }\n}",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    \
+             fn hours_minutes_seconds() {\n        assert_eq!(format(3661), \"1h 1m 1s\");\n    }\n\n    \
+             #[test]\n    fn days_are_handled() {\n        assert_eq!(format(86400), \"1d\");\n        \
+             assert_eq!(format(172800), \"2d\");\n    }\n\n    #[test]\n    \
+             fn zero_seconds() {\n        assert_eq!(format(0), \"0s\");\n    }\n}",
+        );
+        let real = vec![Message::user("extend it to days"), read, fix_fn, extend_tests];
+        assert!(
+            detect_stuck_loop(&real).is_none(),
+            "read-then-two-forward-edits is how work gets done, not a churn loop"
+        );
+
+        // Each defect pinned on its own, so a future edit cannot quietly restore one of them.
+        assert!(
+            crate::loopbreak::edit_target_and_lines(&json!({ "file_path": "src/lib.rs" })).is_none(),
+            "a bare file_path (Read) carries no edit payload and is not an edit"
+        );
+        let brace_only = vec![
+            Message::user("go"),
+            cc_edit("b0", "src/lib.rs", "fn a() {\n    let x = compute_the_thing();\n}", "fn a() {\n    let y = 1;\n}"),
+            cc_edit("b1", "src/lib.rs", "fn b() {\n    let z = 2;\n}", "fn b() {\n    let w = other_new_work();\n    let v = still_more_new_work();\n}"),
+            cc_edit("b2", "src/lib.rs", "fn c() {\n    let q = 3;\n}", "fn c() {\n    let r = yet_more_new_work();\n}"),
+        ];
+        assert!(
+            detect_stuck_loop(&brace_only).is_none(),
+            "three forward edits sharing only `}}` are not a ping-pong"
+        );
+    }
+
     /// Signature 4 — the no-stop-after-success loop: the model re-runs the SAME verification
     /// command / re-reads the same file turn after turn, with varying prose and no errors, so
     /// signatures 1–3 (errored-consecutive / identical-text / edit-churn) all miss it. Modeled on

@@ -1,5 +1,59 @@
 # Bugs
 
+## BUG-054 — the loop-breaker counts a `Read` as an edit and a `}` as a ping-pong, and aborts working runs before they can verify
+
+- **Status:** FIXED 2026-08-16 (`loopbreak.rs`: `edit_target_and_lines` requires an edit payload;
+  `is_pingpong` / `is_substantive` replace the single-shared-line test).
+- **Severity:** P1. It fires on the most ordinary sequence there is — read a file, then edit it
+  twice — and what it does when it fires is stop the agent and tell it to report in one line. Every
+  such run is then scored as a model failure. Ours, not the model's.
+
+Found by asking why the 4B failed the new `duration` bench task. It had not. All three cells:
+
+```
+[1] Bash  find . -name "*.rs"
+[2] Read  src/lib.rs
+[3] Edit  src/lib.rs   ← the implementation fix. CORRECT: days + the all-zero case
+[4] Edit  src/lib.rs   ← extends the test module
+    >> "The file src/lib.rs has been edited 3 times, re-doing and undoing the same change
+        without net progress ... Stopping to avoid corrupting the file in a churn loop;
+        verify it builds and report in one line."
+```
+
+The model never ran `cargo test`. It never saw that its edit to the test module had broken an
+assertion. It "reported in one line" because we told it to. The false success and the red suite in
+those cells are both downstream of this message.
+
+**Two independent defects, either alone enough to misfire.**
+
+*A `Read` counted as an edit.* `edit_target_and_lines` returned `Some` for any input carrying a
+`file_path`, and `Read` carries one and nothing else. Read + two edits = 3 against a threshold of
+3. The message even said "edited 3 times" when the transcript shows two.
+
+*The ping-pong proof was a closing brace.* The guard was `added.iter().any(|a| seen.contains(a))`
+over whitespace-trimmed lines. Edit 3 removed the old function body, which ends in `}`; edit 4
+added a test module, which also contains `}`. Replayed against the real transcript:
+
+```
+3. Edit removed= 17 added= 25  ping-pong=no
+4. Edit removed= 13 added= 23  ping-pong=YES -> ['}', '}', '}']
+```
+
+**The fix keeps real churn firing.** An edit is now a call that carries an edit payload
+(`old_string`/`new_string`/`content`/`edits`). A ping-pong now needs its re-introduced lines to be
+**substantive** (containing at least one alphanumeric character — `}`, `{`, `});` are punctuation
+that closes whatever came before and appear in every edit to a braced language) and to be at least
+**half of what the edit adds**. The share is what separates the two cases: real churn re-applies a
+version of the same thing, so nearly all of what it adds is what it just removed, while an edit
+adding twenty new lines that repeats one is doing new work. A share rather than a line count,
+because the genuine one-line toggle already in the suite (`collect::<String>()` ⟷ `collect()`) is
+1 of 1 and must still fire — and does.
+
+**Regression test:** `gateway::tests::reading_a_file_then_editing_it_twice_is_not_churn`, the
+sequence transcribed from the transcripts, plus one assertion per defect so neither can be quietly
+restored. Verified to fail against each old behaviour separately. Both pre-existing churn tests
+still pass.
+
 ## BUG-053 — an idle-unload frees the model's RAM but keeps its residency reservation, so no other gateway may use the memory it just released
 
 - **Status:** FIXED 2026-08-16 (`switchboard.rs`: `residency_to_publish` / `republish_residency`;

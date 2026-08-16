@@ -16,6 +16,41 @@ pub(crate) const STUCK_LOOP_THRESHOLD: usize = 3;
 pub(crate) const EDIT_CHURN_MIN: usize = 3;
 /// Backstop: a single file edited this many times is churning even without a strict ping-pong.
 pub(crate) const EDIT_CHURN_BACKSTOP: usize = 6;
+/// A ping-pong needs this share of the edit's substantive added lines to be lines a previous edit
+/// removed. One shared line is not evidence of anything: see [`is_pingpong`].
+const PINGPONG_MIN_SHARE: f64 = 0.5;
+
+/// Is this line worth anything as evidence that the model is going in circles?
+///
+/// A line with no alphanumeric character in it — `}`, `{`, `});`, `);` — is punctuation that
+/// closes whatever came before, and it recurs in every edit anyone has ever made to a braced
+/// language. Matching on it made two ordinary, forward edits look like a circle.
+fn is_substantive(line: &str) -> bool {
+    line.chars().any(|c| c.is_alphanumeric())
+}
+
+/// Ping-pong: is this edit putting back what an earlier edit took out?
+///
+/// Two guards, because the single-shared-line test this replaces fired on a closing brace and
+/// aborted three benchmark runs before the model reached `cargo test` (2026-08-16, the `duration`
+/// cells — the model's implementation was correct and the harness stopped it anyway):
+///
+/// 1. Only substantive lines are evidence at all ([`is_substantive`]).
+/// 2. The re-introduced lines must be at least [`PINGPONG_MIN_SHARE`] of what this edit ADDS. Real
+///    churn re-applies a version of the same thing, so nearly everything it adds is something it
+///    removed a moment ago; an edit that adds twenty new lines and happens to repeat one is doing
+///    new work. The share, not a line count, is what tells those apart — a genuine one-line
+///    toggle (`collect::<String>()` ⟷ `collect()`) is 1 of 1, and must still fire.
+fn is_pingpong(added: &[String], seen: &std::collections::HashSet<String>) -> bool {
+    let mut distinct: Vec<&String> = added.iter().filter(|l| is_substantive(l)).collect();
+    distinct.sort();
+    distinct.dedup();
+    if distinct.is_empty() {
+        return false;
+    }
+    let back = distinct.iter().filter(|l| seen.contains(**l)).count();
+    back as f64 / distinct.len() as f64 >= PINGPONG_MIN_SHARE
+}
 
 /// From one tool-call input, extract `(file, removed_lines, added_lines)` if it carries a
 /// patch/edit. Shape-agnostic: stringifies the input and scans for a V4A/unified envelope, so
@@ -33,18 +68,28 @@ pub(crate) fn edit_target_and_lines(input: &Value) -> Option<(String, Vec<String
         }
         let mut removed = Vec::new();
         let mut added = Vec::new();
+        // `file_path` alone is NOT an edit. `Read` carries one and nothing else, and counting it
+        // put a third "edit" on every file the model had looked at before touching — which is the
+        // normal way to work. Measured on the `duration` bench cells (2026-08-16): Read + two
+        // ordinary Edits scored 3 against a threshold of 3, and all three runs were aborted before
+        // the model ever reached `cargo test`. An edit is a call that carries an edit PAYLOAD.
+        let mut is_edit = false;
         if let Some(s) = input.get("old_string").and_then(|v| v.as_str()) {
+            is_edit = true;
             removed.extend(lines(s));
         }
         if let Some(s) = input.get("new_string").and_then(|v| v.as_str()) {
+            is_edit = true;
             added.extend(lines(s));
         }
         // `Write` overwrites the whole file — count it as an edit (its content is the "added" side).
         if let Some(s) = input.get("content").and_then(|v| v.as_str()) {
+            is_edit = true;
             added.extend(lines(s));
         }
         // `MultiEdit`: each entry is an old/new pair.
         if let Some(edits) = input.get("edits").and_then(|v| v.as_array()) {
+            is_edit = true;
             for e in edits {
                 if let Some(s) = e.get("old_string").and_then(|v| v.as_str()) {
                     removed.extend(lines(s));
@@ -54,7 +99,7 @@ pub(crate) fn edit_target_and_lines(input: &Value) -> Option<(String, Vec<String
                 }
             }
         }
-        return Some((file.to_string(), removed, added));
+        return is_edit.then(|| (file.to_string(), removed, added));
     }
     // Pull every string leaf out of the input so we see the patch body whatever key holds it.
     fn collect_strings(v: &Value, out: &mut String) {
@@ -212,10 +257,10 @@ pub(crate) fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
                 if let Some((file, removed, added)) = edit_target_and_lines(input) {
                     *edits_per_file.entry(file.clone()).or_default() += 1;
                     let seen = removed_seen.entry(file.clone()).or_default();
-                    if added.iter().any(|a| seen.contains(a)) {
+                    if is_pingpong(&added, seen) {
                         pingpong_files.insert(file.clone());
                     }
-                    seen.extend(removed);
+                    seen.extend(removed.into_iter().filter(|l| is_substantive(l)));
                 }
             }
         }
