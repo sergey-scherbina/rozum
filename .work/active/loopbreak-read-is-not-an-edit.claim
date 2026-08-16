@@ -1,0 +1,6 @@
+feature/loopbreak-read-is-not-an-edit 2026-08-16T02:51:25Z
+agent: claude-code
+heartbeat: 2026-08-16T02:51:25Z
+status: in-progress
+done-so-far: reproduced from the real transcript - a Read counts as an edit (file_path alone) and a single shared "}" counts as a ping-pong, so Read+2 edits fires sig3 and aborts the run before cargo test
+next: require an edit payload, make ping-pong a fraction not a single line, tests, re-run the 4B
