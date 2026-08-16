@@ -1,6 +1,0 @@
-feature/ucc-ssc-close-the-door 2026-08-16T02:53:46Z
-agent: claude-code
-heartbeat: 2026-08-16T02:53:46Z
-status: not-started
-done-so-far: slice 2 landed with the door built but not closed (deployed rozum-ucc-ssc predates it)
-next: capture the before-reference, build the toolchain in a DETACHED worktree, close the door, accept per spec
