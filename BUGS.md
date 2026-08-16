@@ -1097,6 +1097,12 @@ compile errors — that variety should have been the clue, and instead it read a
   touches the socket file, and a daemon that cannot take it REFUSES rather than unlinking a live
   listener's socket. Verified on the host — a challenger against a live owner printed the refusal
   and the owner was untouched, where before it would have bound over it.
+  **Accepted again on the host 2026-08-16**, on an isolated `XDG_RUNTIME_DIR` so the operator's live
+  daemon was never involved. The ordinary case never reaches the lock — `daemon_alive` refuses first
+  ("already running", exit 0, socket inode unchanged, one process). Forcing the case the lock exists
+  for (owner alive, socket file removed, so the pre-check sees nothing): the challenger was refused
+  by the lock, named the wedged owner, and left the owner running. One defect found by doing it:
+  that refusal exited **0**, so `$?` said the daemon had started — fixed in the commit before this.
   **Three things the host found that the unit tests could not, all now fixed:**
   1. `supervised_by_launchd` accepted any non-empty `XPC_SERVICE_NAME`. macOS sets that variable to
      the string `0` on ordinary processes, so an interactive start against a live daemon waited
@@ -1129,10 +1135,12 @@ compile errors — that variety should have been the clue, and instead it read a
   **One measured limit, worth more than the fix:** the takeover is a RACE. At a 2 s poll the
   supervised process lost it every time — a client spawns the instant a connect fails, a poller
   wakes on its own schedule. 200 ms wins in practice (measured: takeover on the second check) but
-  the race is real, and only the ownership lock below removes it. The socket-ownership half below is still OPEN: a
-  second binder unlinks a live listener's socket file rather than refusing, which is what lets two
-  daemons share one path. Kept open deliberately — a change that also rewrites socket ownership is
-  not reviewable as one unit.
+  the race is real, and only the ownership lock removes it. **That half then LANDED — this sentence
+  is what the record said before it did, and it stayed here reading as current until 2026-08-16,
+  when it sent someone to re-implement a lock that was already in the tree with five unit tests
+  (`acquire_socket_ownership`, taken by `serve_daemon_until` before `remove_file`).** The status
+  line at the top of this entry was right the whole time; a narrative paragraph that keeps the old
+  tense is a second copy of the status, and the copy is the one that goes stale.
 - **Also filed independently, ninety minutes earlier, from the other end:** `doctor --services`
   reported the split ownership as `warn` (BACKLOG `meeting-daemon-ownership`, now a pointer here).
   Two agents, two symptoms, one problem — and that check is the way to see the fix land.

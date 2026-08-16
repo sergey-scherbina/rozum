@@ -1,5 +1,19 @@
 # Changelog
 
+## meeting-socket-ownership — accepted on the host, and one thing the acceptance found
+Completed: 2026-08-16
+
+Taken as an open item because `BUGS.md` said the ownership half was still open. It was not: the
+lock, the refusal and five unit tests were already in the tree, and the stale sentence lived in a
+`Previously:` paragraph whose tense nobody updated. Re-read the code first, per the standing
+lesson, so what actually happened here is an ACCEPTANCE — the spec's host verification, which had
+never been run against the wedged case.
+
+It found a real defect. A challenger refused by the lock printed the right paragraph and exited 0,
+telling every `$?` reader that the daemon had started; it exits 1 now, while "already running"
+keeps 0 because then the service does exist. Both measured on an isolated `XDG_RUNTIME_DIR`, so the
+operator's daemon was never in the experiment.
+
 ## residency-release-on-unload — the freed RAM stayed reserved, so nobody could use it (BUG-053)
 Completed: 2026-08-16
 
