@@ -1,0 +1,6 @@
+feature/stalled-request-retry-storm 2026-08-16T18:48:35Z
+agent: claude-code
+heartbeat: 2026-08-16T18:48:35Z
+status: in-progress
+done-so-far: the 900s duration cell traced in ~/.rozum/gateway.jsonl - requests 13-16 are IDENTICAL (27 msgs, 8526 est tokens, seed 1235), each 14 output tokens then 120s of silence then generation_timeout. 500 of the 900 seconds went to re-sending one stalling request
+next: short-circuit the Nth identical request that has already stalled, instead of stalling again
