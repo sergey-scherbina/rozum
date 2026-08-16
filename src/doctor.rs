@@ -680,6 +680,15 @@ async fn check_service(
         let served = match probe {
             Probe::None => None,
             Probe::Get(u) => client.get(u).send().await.ok().map(|r| r.status().as_u16()),
+            // Carries the door here too: this branch asks "is ANYTHING answering while launchd's
+            // copy is down", and a door refusal would answer that with the wrong process's word.
+            Probe::GetWithDoor(u) => {
+                let mut req = client.get(u);
+                if let Some(secret) = crate::door::secret() {
+                    req = req.header(crate::door::HEADER, secret);
+                }
+                req.send().await.ok().map(|r| r.status().as_u16())
+            }
             Probe::McpInitialize(u) => mcp_initialize(client, u).await.ok().map(|_| 200),
         };
         return match served {
@@ -715,7 +724,7 @@ async fn check_service(
         Probe::None => {
             return Check::skip(name, format!("running (pid {pid}), no endpoint to probe — {what}"))
         }
-        Probe::Get(u) | Probe::McpInitialize(u) => u,
+        Probe::Get(u) | Probe::GetWithDoor(u) | Probe::McpInitialize(u) => u,
     };
     let answered = match probe {
         Probe::Get(u) => match client.get(u).send().await {
@@ -730,6 +739,19 @@ async fn check_service(
             Ok(r) => Err(format!("answered {}", r.status().as_u16())),
             Err(e) => Err(format!("did not answer ({e})")),
         },
+        Probe::GetWithDoor(u) => {
+            let mut req = client.get(u);
+            if let Some(secret) = crate::door::secret() {
+                req = req.header(crate::door::HEADER, secret);
+            }
+            match req.send().await {
+                Ok(r) if r.status().is_success() || matches!(r.status().as_u16(), 401 | 403) => {
+                    Ok(format!("answers {}", r.status().as_u16()))
+                }
+                Ok(r) => Err(format!("answered {}", r.status().as_u16())),
+                Err(e) => Err(format!("did not answer ({e})")),
+            }
+        }
         Probe::McpInitialize(u) => mcp_initialize(client, u).await,
         Probe::None => unreachable!("handled above"),
     };

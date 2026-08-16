@@ -18,6 +18,14 @@
 pub enum Probe {
     /// A plain GET whose status is the answer.
     Get(&'static str),
+    /// A GET carrying the `.ssc` door secret, when one is configured.
+    ///
+    /// The door (`docs/specs/ucc-ssc-session.md`) makes `:8412` refuse anything that did not come
+    /// through the console, which would leave a probe testing the DOORMAN rather than the service:
+    /// a process holding a socket and nothing else answers a door refusal exactly as a healthy one
+    /// does. With the secret the 403 means what it meant before — the service parsed the request
+    /// and applied its own view-token rule.
+    GetWithDoor(&'static str),
     /// An MCP `initialize` over HTTP. The proxy answers 404 to every path but `/mcp` and 406 to a
     /// GET without the streaming `Accept`, so a "does the port respond" probe reports a healthy
     /// server as broken — measured on the first live run of this check. Speaking its protocol is
@@ -119,8 +127,9 @@ pub const ALL: &[Service] = &[
         // NOT `/`, which answers 404 — the same trap the mcp-http probe fell into, where "does the
         // port respond" reported a healthy server as broken. This route answers 403 with its OWN
         // body (`{"error":"invalid or revoked token"}`), which proves the process parsed the
-        // request and applied its own rules rather than merely holding a socket.
-        probe: Probe::Get("http://127.0.0.1:8412/control/public/matrix/cell"),
+        // request and applied its own rules rather than merely holding a socket — and the door
+        // secret is what KEEPS that true now that the port refuses outsiders.
+        probe: Probe::GetWithDoor("http://127.0.0.1:8412/control/public/matrix/cell"),
         owner: Owner::JobItself,
         shape: Shape::Resident,
         what: "the .ssc public matrix routes",

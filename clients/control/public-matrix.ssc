@@ -125,8 +125,25 @@ def ok(body: String): Response =
 // does not carry it is refused, whatever it asks for. With no secret configured the door is open —
 // otherwise deploying this file would take the live console down until a file exists on the host,
 // which is the kind of upgrade that teaches people to skip upgrades.
+// The first line of a file, for the secret below. There is no `trim` in this tier, and a secret
+// written with `echo` or `printf` ends in a newline; splitting takes the value and leaves the
+// newline behind. A file with leading spaces would not match — say so here rather than let someone
+// discover it from a 403.
+def firstLine(s: String): String =
+  val parts = s.split("\n").toList
+  if parts.length == 0 then "" else parts(0)
+
+// Environment first, file second — the same order the Rust half resolves it in, and the same order
+// `ROZUM_WEB_SECRET` uses, so it does not matter who started the process. Without the file branch
+// the secret would have to be threaded through a plist to be usable at all, and the two halves
+// would disagree about where the secret lives.
+def doorSecretPath(): String = home() + "/.rozum/secrets/ucc-ssc-door"
+
 def doorSecret(): String =
-  envOrElse("ROZUM_UCC_SSC_SECRET", "")
+  val fromEnv = envOrElse("ROZUM_UCC_SSC_SECRET", "")
+  if fromEnv != "" then fromEnv
+  else if exists(doorSecretPath()) then firstLine(readFile(doorSecretPath()))
+  else ""
 
 def doorOpen(req: Request): Boolean =
   val want = doorSecret()

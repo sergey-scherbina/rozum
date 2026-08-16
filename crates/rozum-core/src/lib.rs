@@ -15,6 +15,7 @@ pub mod constrain;
 pub mod engine;
 pub mod footprint;
 pub mod harmony;
+pub mod door;
 pub mod obs;
 pub mod prefetch;
 pub mod sampler;
