@@ -513,6 +513,50 @@ trait WireDialect: Sized {
 }
 
 /// Everything that happens to a chat request between "parsed" and "serialized", once.
+/// `chat_or_loopbreak`, bounded — the backend must produce a STREAM within `ceiling`, not merely
+/// produce events within it once it has.
+///
+/// [`crate::serving::with_gen_timeout`] guards the gap between two events and cannot guard this
+/// one, because it only exists after this call returns. So a backend that wedges BEFORE its first
+/// event — prefill stalled inside one FFI call, a worker handshake that never completes — had
+/// nothing bounding it at all.
+///
+/// Measured on both Qwen3.5-9B bench runs (2026-08-16), which is how it was found: turns of 13-22 s
+/// throughout, then a SINGLE gap — 1116 s in one run, 1674 s in the other — ended by the harness's
+/// own RUN_TIMEOUT and never by the 120 s generation timeout, which was set and working the whole
+/// time. Reading those runs as "the model is too slow to finish" was wrong twice over: it divided a
+/// total by a call count instead of looking at the distribution, and the one number that mattered
+/// was not the model's.
+///
+/// Cancelling on the way out is what lets the worker abandon the job the moment it unblocks. A zero
+/// ceiling disables the bound, exactly as it does in `with_gen_timeout`.
+async fn start_chat_bounded(
+    backend: &Arc<dyn ChatBackend>,
+    req: ChatRequest,
+    cancel: &CancellationToken,
+    ceiling: Duration,
+    endpoint: &str,
+) -> Result<ChatStream, crate::backend::ModelError> {
+    if ceiling.is_zero() {
+        return chat_or_loopbreak(backend, req).await;
+    }
+    match tokio::time::timeout(ceiling, chat_or_loopbreak(backend, req)).await {
+        Ok(r) => r,
+        Err(_) => {
+            cancel.cancel();
+            crate::obs::log_event(json!({
+                "event": "generation_start_timeout",
+                "endpoint": endpoint,
+                "inactivity_secs": ceiling.as_secs(),
+            }));
+            Err(crate::backend::ModelError::Timeout(format!(
+                "backend produced no stream within {}s; request aborted",
+                ceiling.as_secs()
+            )))
+        }
+    }
+}
+
 async fn serve_wire<D: WireDialect>(
     state: GatewayState,
     mut dialect: D,
@@ -564,7 +608,16 @@ async fn serve_wire<D: WireDialect>(
     let decode = if chat_req.sampling.temperature == Some(0.0) { "greedy" } else { "sampled" };
     let decode_seed = chat_req.sampling.seed;
 
-    match chat_or_loopbreak(&lease.backend, chat_req).await {
+    let started = start_chat_bounded(
+        &lease.backend,
+        chat_req,
+        &cancel,
+        crate::serving::gen_inactivity_timeout(),
+        D::ENDPOINT,
+    )
+    .await;
+
+    match started {
         Err(e) => {
             crate::obs::log_event(json!({
                 "event": "request_error", "endpoint": D::ENDPOINT, "error": e.to_string(),
@@ -1822,6 +1875,64 @@ mod tests {
         assert_eq!(out.top_p, None);
         assert_eq!(out.top_k, None);
         assert_eq!(out.seed, Some(7), "seed still pinned alongside greedy (harmless for argmax)");
+    }
+
+    /// A backend whose `chat()` never returns — the shape both Qwen3.5-9B bench runs hit, where a
+    /// single turn sat for 1116 s and 1674 s and was ended by the harness, not by us.
+    struct WedgedBackend;
+
+    #[async_trait::async_trait]
+    impl crate::backend::ChatBackend for WedgedBackend {
+        async fn chat(&self, _req: crate::backend::ChatRequest) -> Result<ChatStream, ModelError> {
+            std::future::pending::<()>().await; // never produces a stream
+            unreachable!()
+        }
+        fn context_window(&self) -> u32 {
+            u32::MAX
+        }
+    }
+
+    #[tokio::test]
+    async fn a_backend_that_never_returns_a_stream_is_bounded_too() {
+        let backend = Arc::new(WedgedBackend) as Arc<dyn crate::backend::ChatBackend>;
+        let cancel = CancellationToken::new();
+        let req = crate::backend::ChatRequest {
+            cancel: cancel.clone(),
+            ..crate::backend::ChatRequest::simple("hi")
+        };
+
+        let started = tokio::time::timeout(
+            Duration::from_secs(5),
+            start_chat_bounded(&backend, req, &cancel, Duration::from_millis(80), "/v1/x"),
+        )
+        .await
+        .expect("the bound itself must not hang");
+
+        assert!(
+            matches!(started, Err(ModelError::Timeout(_))),
+            "a wedged chat() must surface as a Timeout, not hang: {:?}",
+            started.err().map(|e| e.to_string())
+        );
+        assert!(
+            cancel.is_cancelled(),
+            "the request must be cancelled so the worker can abandon it once it unblocks"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_ceiling_leaves_stream_creation_unbounded() {
+        // Zero disables, exactly as it does for `with_gen_timeout` — so an operator who switched
+        // the bound off does not get a surprise 504 from this path either.
+        let backend = Arc::new(HelloBackend::new()) as Arc<dyn crate::backend::ChatBackend>;
+        let cancel = CancellationToken::new();
+        let req = crate::backend::ChatRequest {
+            cancel: cancel.clone(),
+            ..crate::backend::ChatRequest::simple("hi")
+        };
+        let started =
+            start_chat_bounded(&backend, req, &cancel, Duration::from_secs(0), "/v1/x").await;
+        assert!(started.is_ok(), "a healthy backend still works with the bound disabled");
+        assert!(!cancel.is_cancelled());
     }
 
     #[tokio::test]

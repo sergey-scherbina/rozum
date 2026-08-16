@@ -1,5 +1,43 @@
 # Bugs
 
+## BUG-055 — nothing bounds the wait for a backend to produce a stream, so a wedged prefill hangs the request until something else gives up
+
+- **Status:** FIXED 2026-08-16 (`gateway.rs`: `start_chat_bounded`).
+- **Severity:** P1 for any long-running agent. The request does not fail, it waits — so the
+  symptom shows up as "the model is slow" and gets recorded against the model.
+
+`with_gen_timeout` bounds the gap between two backend EVENTS. It cannot bound the wait for the
+stream itself, because it only exists once `chat_or_loopbreak(...).await` has returned. A backend
+that wedges before its first event — prefill stalled inside one FFI call, a worker handshake that
+never completes — therefore had nothing bounding it at all.
+
+**Found by re-reading two runs I had already drawn a conclusion from.** Both Qwen3.5-9B `duration`
+cells, per-turn gaps from the transcript timestamps:
+
+```
+run 1 (RUN_TIMEOUT 1200s):  1.7 12.9 12.4 12.6 13.3 15.0 … then 1115.9
+run 2 (RUN_TIMEOUT 1800s):  1.6 13.3 13.1 12.9 14.1 15.4 15.4 21.8 2.0 … then 1673.9
+```
+
+The model answers in 13–22 s, consistently. Then one turn never comes back, and the run ends on the
+harness's RUN_TIMEOUT — never on `ROZUM_GEN_TIMEOUT_SECS=120`, which was set and working. That the
+gap is unbounded rather than ~120 s is the proof it lies outside the stream guard.
+
+**The conclusion this overturns is mine, and it was wrong twice over.** I recorded "eight tool calls
+in thirty minutes is ~3.7 min a round trip" and "on a task needing eight to ten tool round trips the
+9B does not finish on this host". Dividing a total by a call count instead of looking at the
+distribution hid a bimodal shape completely — and the one number that mattered was not the model's
+at all. See `BACKLOG.md`, corrected in the same commit.
+
+**Fix.** `start_chat_bounded` wraps the creation await in the same ceiling the stream gets, cancels
+the request on the way out so the worker can abandon the job the moment it unblocks, and returns
+`ModelError::Timeout` (HTTP 504) instead of waiting. A zero ceiling disables it, exactly as it does
+for `with_gen_timeout`, so an operator who switched the bound off does not get a surprise 504 here.
+
+**Regression tests:** `a_backend_that_never_returns_a_stream_is_bounded_too` (a `chat()` that awaits
+`pending::<()>()` forever — verified to hang the test harness itself without the fix) and
+`a_zero_ceiling_leaves_stream_creation_unbounded`.
+
 ## BUG-054 — the loop-breaker counts a `Read` as an edit and a `}` as a ping-pong, and aborts working runs before they can verify
 
 - **Status:** FIXED 2026-08-16 (`loopbreak.rs`: `edit_target_and_lines` requires an edit payload;
