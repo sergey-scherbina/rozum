@@ -509,8 +509,9 @@ Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
   an invariant it was told to keep while changing something else"** — and that is visible per-run
   rather than as a bare 0/3.
 
-  **The 9B was then run on it, twice, and could not reach the task at all** — a clock result, not
-  a capability one, and the distinction is the one `summarize_matrix.py` already enforces:
+  **The 9B was then run on it, twice, and both runs HUNG — a gateway defect, not the model.**
+  ⚠️ My first reading of these two runs was wrong; the table is the raw record, the correction is
+  underneath it:
 
   | run | limit | turns | tool calls | files changed |
   |---|---|---|---|---|
@@ -519,16 +520,28 @@ Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
 
   Both ended `rc=124 RUN_TIMEOUT` with `src/lib.rs` byte-identical to the seed, so the four
   "failures" printed in each row are the untouched skeleton's own and say nothing about the model.
-  The first run's conditions were wrong and mine to fix: it had a 79872-token context against the
-  4B's 32768, which is slower prefill rather than an advantage. Matched and given half again as
-  long, it still did not get past reading — its last act was `cargo run -- 86400`, exactly what
-  the task asks for, with no clock left to edit anything. Eight tool calls in thirty minutes is
-  ~3.7 minutes per round trip.
+  The first run's conditions were also wrong and mine to fix: a 79872-token context against the
+  4B's 32768, which is slower prefill rather than an advantage.
 
-  So "equal at 24/24, 1.84x slower" was too kind to it. That was measured on eight tasks averaging
-  ~75 s a cell; on one needing eight to ten tool round trips the 9B does not finish on this host,
-  while the 4B finished every cell in 385-615 s. **Staying on the 4B is a firmer call than the tie
-  suggested, not a closer one.**
+  **What I then wrote from it, and why it was wrong.** I recorded "eight tool calls in thirty
+  minutes is ~3.7 minutes per round trip" and "on a task needing eight to ten round trips the 9B
+  does not finish on this host". Dividing the total by the call count is what produced that. The
+  per-turn gaps say something else entirely:
+
+  ```
+  run 1:  1.7 12.9 12.4 12.6 13.3 15.0 … then 1115.9
+  run 2:  1.6 13.3 13.1 12.9 14.1 15.4 15.4 21.8 2.0 … then 1673.9
+  ```
+
+  The 9B answers in **13–22 s per turn, consistently**. Then one turn never returns. That is
+  BUG-055: nothing bounded the wait for the backend to produce a stream, so a wedged prefill sat
+  there until the harness's own RUN_TIMEOUT — never the 120 s generation timeout, which was set and
+  working the whole time. A gateway defect, recorded against the model. A mean over a bimodal
+  distribution described neither mode.
+
+  So the 9B's agentic capability on this task is **still unmeasured**. "Equal at 24/24, 1.84×
+  slower" remains the only real comparison until it is re-run against the fix, and the decision to
+  stay on the 4B rests on that measurement — not on these two runs.
 
   `duration` stays as the bench's discriminating task: the only one of the five that produced a
   readable failure instead of a bare zero, and it grades a single model without needing a second
