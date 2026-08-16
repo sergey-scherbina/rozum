@@ -8,27 +8,26 @@
 		<string>/Users/sergiy</string>
 		<key>PATH</key>
 		<string>/Users/sergiy/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-		<key>ROZUM_UCC_SSC_ORIGIN</key>
-		<string>http://127.0.0.1:8412</string>
+		<key>ROZUM_WEB_SECRET</key>
+		<string>c056989c64a19288443debeb21df7acfd621098420a1b41b</string>
 	</dict>
 	<key>KeepAlive</key>
 	<true/>
 	<key>Label</key>
-	<string>com.rozum.ucc-control</string>
+	<string>com.rozum.meeting-daemon</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/Users/sergiy/.cargo/bin/rozum-gateway</string>
-		<string>gateway</string>
-		<string>control-serve</string>
-		<string>--port</string>
-		<string>8411</string>
+		<string>meetings</string>
+		<string>start</string>
+		<string>--foreground</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/Users/sergiy/.rozum-ucc-control.log</string>
+	<string>/Users/sergiy/.rozum-meeting-daemon.log</string>
 	<key>StandardOutPath</key>
-	<string>/Users/sergiy/.rozum-ucc-control.log</string>
+	<string>/Users/sergiy/.rozum-meeting-daemon.log</string>
 	<key>WorkingDirectory</key>
 	<string>/Users/sergiy/work/my/rozum</string>
 </dict>

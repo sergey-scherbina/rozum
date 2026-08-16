@@ -553,6 +553,8 @@ async fn check_services() -> Vec<Check> {
     // will not probe it, install-bins will not publish its binary, and no spec mentions it. That is
     // how `com.rozum.*` jobs have appeared and rotted before. Reported once, not per service.
     out.extend(undeclared_jobs(&jobs));
+    // …and a job whose DEFINITION exists only on this disk is the same failure one level up.
+    out.extend(plist_drift_check());
     for svc in crate::services::ALL {
         let (label, name) = (svc.label, svc.row);
         let mut c =
@@ -606,6 +608,96 @@ fn undeclared_jobs(jobs: &std::collections::HashMap<String, (Option<i64>, i64)>)
         "svc:undeclared",
         format!("installed here but declared nowhere: {}", extra.join(", ")),
         "add it to src/services.rs (with a probe, or a stated reason there is none) or remove the job",
+    )]
+}
+
+/// The repo's copy of a job definition, next to the one launchd actually obeys.
+///
+/// Found the hard way on 2026-08-16: `ROZUM_UCC_SSC_ORIGIN` — the one variable that routes nine
+/// console endpoints to the ScalaScript server — existed ONLY in `~/Library/LaunchAgents`. A
+/// machine rebuilt from this checkout would have served every one of them from Rust again, and
+/// nothing would have said so; the switch is silent by design, because falling back IS the safe
+/// behaviour. `com.rozum.ucc-ssc` had no copy in the repo at all.
+///
+/// Compared through `plutil -convert xml1`, so key ORDER and XML formatting are not drift. When
+/// `plutil` is absent — every non-macOS CI runner — the comparison is skipped rather than guessed.
+fn plist_drift(label: &str, template_dir: &std::path::Path) -> Option<String> {
+    let template = template_dir.join(format!("{label}.plist"));
+    if !template.is_file() {
+        return Some(format!("{label}: no copy in {}", template_dir.display()));
+    }
+    let installed = rozum_paths::home_dir()?
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{label}.plist"));
+    if !installed.is_file() {
+        return None; // Not installed here — `check_service` reports that; this check is about drift.
+    }
+    let norm = |p: &std::path::Path| -> Option<String> {
+        let out = Command::new("plutil")
+            .args(["-convert", "xml1", "-o", "-"])
+            .arg(p)
+            .output()
+            .ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let (a, b) = (norm(&template)?, norm(&installed)?);
+    if a == b {
+        return None;
+    }
+    // Name the KEYS that differ rather than printing two files: the useful sentence is which
+    // setting is only on one side.
+    let keys = |t: &str| -> Vec<String> {
+        t.lines()
+            .filter_map(|l| l.trim().strip_prefix("<key>").and_then(|r| r.strip_suffix("</key>")))
+            .map(str::to_string)
+            .collect()
+    };
+    let (ka, kb) = (keys(&a), keys(&b));
+    let only_installed: Vec<&String> = kb.iter().filter(|k| !ka.contains(k)).collect();
+    let only_template: Vec<&String> = ka.iter().filter(|k| !kb.contains(k)).collect();
+    let mut why = Vec::new();
+    if !only_installed.is_empty() {
+        why.push(format!("only on the machine: {}",
+            only_installed.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
+    }
+    if !only_template.is_empty() {
+        why.push(format!("only in the repo: {}",
+            only_template.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
+    }
+    if why.is_empty() {
+        why.push("same keys, different values".to_string());
+    }
+    Some(format!("{label}: {}", why.join("; ")))
+}
+
+/// One row for all of them, because a per-service row would double the report to say "fine" eight
+/// times. Skipped outright when this is not a checkout — `doctor` runs from anywhere.
+fn plist_drift_check() -> Vec<Check> {
+    let dir = std::path::Path::new("clients/control/launchd");
+    if !dir.is_dir() {
+        return vec![Check::skip(
+            "svc:plists",
+            "not run from a checkout — cannot compare job definitions with the repo's copies"
+                .to_string(),
+        )];
+    }
+    let drifted: Vec<String> = crate::services::ALL
+        .iter()
+        .filter_map(|svc| plist_drift(svc.label, dir))
+        .collect();
+    if drifted.is_empty() {
+        return vec![Check::ok(
+            "svc:plists",
+            format!("all {} job definitions match {}", crate::services::ALL.len(), dir.display()),
+        )];
+    }
+    vec![Check::warn(
+        "svc:plists",
+        format!("{} job definition(s) differ from the repo — {}", drifted.len(), drifted.join(" | ")),
+        "copy the machine's plist into clients/control/launchd/ (or fix the machine from it): a \
+         setting that lives on one disk is one reinstall from being gone, and the switch it \
+         controls fails SILENTLY back to the old behaviour",
     )]
 }
 
