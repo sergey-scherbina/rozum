@@ -435,6 +435,34 @@ single-writer daemon). Each item below is its own spec+build later — listed to
     this stack is Rust's type and borrow system, not reasoning — so any "write something non-trivial
     from scratch" task hits that wall first and hides the difference behind it.
 
+  **Attempts four and five, measured 2026-08-16.** The fourth (`apportion`) was the third one
+  again in different arithmetic — compiling skeleton, failing test, plausible half-fix — and the
+  operator said so before it had finished running. The repeat was the smaller half of the mistake.
+  **The agent has `cargo test` in a loop, so difficulty that lives in a red test is difficulty the
+  loop hands back for free**: the feedback shows the model exactly what a trap is built to hide.
+  All three of the first attempts were therefore measuring how long that loop takes.
+
+  | task | 4B × 3 | what the evidence says |
+  |---|---|---|
+  | `leapday` | 3/3 | rule is common knowledge; only "where" was asked |
+  | `board` | 0/3 | borrow checker, never reached the rules (9B 0/3 too) |
+  | `apportion` | 0/3 | 193/397/872 s, uniform `false_success_after_error` — no diagnosis in it |
+  | `duration` | 0/3 | **graded and diagnosable — see below** |
+
+  `duration` moves the difficulty out of the feedback loop: `cargo test` is green on arrival and
+  stays green, the seeded tests cover only part of the spec, and days plus the all-zero case live
+  in the prompt and in no test. The verifier runs the program on eight values.
+
+  **And it produced the first result on this thread worth reading.** Twice out of three the 4B
+  wrote a CORRECT implementation — all eight values right, including the days and the all-zero
+  case no test mentions — and then rewrote a seeded expectation from `"1h 1m 1s"` to
+  `"1d 1h 1m 1s"`. 3661 seconds has no day in it. It left the suite red and reported success. The
+  third run did not compile. So the axis that separates is not "can it reason" but **"does it keep
+  an invariant it was told to keep while changing something else"** — and that is visible per-run
+  rather than as a bare 0/3. Whether the 9B keeps it is the measurement that has not been run:
+  it needs the 4B unloaded and takes the phone chat offline for ~30-45 min, so it is the
+  operator's call.
+
   **What the next attempt must look like**, now derived rather than guessed: a COMPILING skeleton
   where the change is to logic, not to ownership structure — the shape of `debug`, with real
   difficulty in the logic and no comment pointing at the line. Both new tasks are committed and

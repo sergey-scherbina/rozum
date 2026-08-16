@@ -933,7 +933,17 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
         # nothing at all, and everything from a day upward is rendered in hours.
         [ -f Cargo.toml ] || { echo "    FAIL  Cargo.toml missing"; fail=1; }
         ls src/*.rs >/dev/null 2>&1 || { echo "    FAIL  no src/*.rs"; fail=1; }
-        cargo test -q >/dev/null 2>"$w/cargo.err" || { echo "    FAIL  the seeded tests were broken"; fail=1; }
+        # Say WHICH assertion, not just "tests red". Measured on the first live run: the 4B wrote a
+        # CORRECT implementation, then rewrote a seeded expectation from "1h 1m 1s" to
+        # "1d 1h 1m 1s" — 3661 seconds has no day in it — and stopped with the suite red. A row
+        # that only said "the seeded tests were broken" would have buried the most useful thing
+        # this task has produced: the logic was right and the invariant was not kept.
+        if ! cargo test -q >"$w/cargo.out" 2>"$w/cargo.err"; then
+          echo "    FAIL  the seeded tests were broken"
+          grep -hE "^(thread .* panicked|  left:| right:)" "$w/cargo.out" "$w/cargo.err" 2>/dev/null \
+            | head -6 | sed 's/^/          /'
+          fail=1
+        fi
         bad=0
         for pair in "3661:1h 1m 1s" "3600:1h" "61:1m 1s" "59:59s" "0:0s" \
                     "86400:1d" "90000:1d 1h" "90061:1d 1h 1m 1s"; do
