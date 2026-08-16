@@ -2330,10 +2330,17 @@ survives exactly one context rotation. Order is mine to change; scope and the re
     `messenger/bot/add` must NOT move — it passes the bot token on stdin, which `std/process.ssc`
     has no way to do, so a port would put a live token in an argv. Accepted in two sandboxed
     `HOME`s (responses AND files), so the operator's registries were never touched.
-  - [ ] **slice 5 — what is left, and why.** `chat/post` (portable; needs a scratch-room fixture
-    so its acceptance does not post into real rooms). The launch routes stay blocked on a DETACHED
-    spawn primitive that no backend offers — `exec` waits for the child. Everything else reads or
-    mutates state inside the gateway process and cannot move at all.
+  - [x] **slice 5 — DONE 2026-08-16. `chat/post` moved; the port is finished for now.** Its
+    acceptance is why `ROZUM_MEETING_REST` exists: the upstream was a constant in both
+    implementations, so comparing them meant posting into real rooms. **Ten routes are on
+    ScalaScript** (2 public + 3 read + 9 action − 1 counted twice… precisely: `/view/{token}`,
+    `/control/public/matrix/cell`, `/chat/messages`, `/chat/incidents`, `/control/matrix/cell`,
+    `/control/project/add`, eight `messenger/*`, `/chat/post` = 15).
+  - [ ] **what remains, and it is not a slice.** Every route left either reads or mutates state
+    INSIDE the gateway process (`matrix_queue()`, `matrix_live()`, the resident model, the launch
+    registry) or needs a primitive no backend offers: a DETACHED spawn (`exec` waits for the child)
+    and a stdin pipe (`messenger/bot/add` passes the bot token that way and must not stop).
+    Reopening this needs the toolkit to gain one of those, not another porting pass.
 
 ## Sprint
 

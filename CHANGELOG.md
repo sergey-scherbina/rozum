@@ -1,5 +1,17 @@
 # Changelog
 
+## ucc-ssc-backend slice 5 — /chat/post, and the port reaches its floor
+Completed: 2026-08-16
+
+The last movable route. Fifteen console endpoints now run on ScalaScript behind their existing
+gates and the door; everything still in Rust is there for a stated reason — process-global state,
+or a primitive no backend offers (detached spawn, a stdin pipe).
+
+`ROZUM_MEETING_REST` was added so the route could be ACCEPTED: its upstream was hardcoded in both
+implementations, so comparing them meant posting real messages into the operator's rooms. Compared
+against two recording upstreams instead — 5 identical responses, 3 identical forwards, and the
+upstream-failure path matching too.
+
 ## ucc-ssc-plist-in-repo — the setting that turns the switch on lived on one disk
 Completed: 2026-08-16
 
