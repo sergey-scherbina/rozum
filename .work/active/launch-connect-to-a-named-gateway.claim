@@ -1,6 +1,0 @@
-feature/launch-connect-to-a-named-gateway 2026-08-16T14:55:48Z
-agent: claude-code
-heartbeat: 2026-08-16T14:55:48Z
-status: not-started
-done-so-far: filed 2026-08-16 after a recording proxy proved BENCH_GATEWAY_URL never reaches the agent
-next: decide what failover/lease/takeover do for a gateway this launch does not manage, then implement
