@@ -28,6 +28,7 @@ written.
 [readFile, writeFile, exists, isDir, listDir, mkdirs](std/fs.ssc)
 [jsonParse, jsonStringify](std/json.ssc)
 [envOrElse](std/os.ssc)
+[exec, ProcessOptions](std/process.ssc)
 
 // `std/os.ssc` provides the env primitive. There is no `std/env.ssc` in this runtime tier — the
 // live meeting server shells out to `sh -c` for the same job, which is one reason to write this
@@ -624,6 +625,152 @@ def entryStrings(v: Any): List[String] =
     case l: List[Any] => l.map(e => jsonStringify(e))
     case _            => []
 
+// ── /control/messenger/* ───────────────────────────────────────────────────────────────────────
+//
+// Slice 4. Every one of these is the same shape in Rust: validate, build an argv, run the `rozum`
+// binary's own `messenger` subcommand, hand back its JSON. `run_rozum` execs `current_exe()` — the
+// console IS the CLI — so the port needs the binary by name instead: `ROZUM_BIN`, else
+// `rozum-gateway` resolved through PATH, which the job's plist sets. Measured before porting:
+// `exec` works on this lane, resolves a bare name through PATH, and `rozum-gateway messenger
+// status --json` answers real JSON from it.
+//
+// `bot/add` is NOT here and that is deliberate. It hands the bot token to the child on STDIN
+// (`run_rozum_stdin`) so it never appears in an argv, and `std/process.ssc` has no stdin. Porting
+// it would put a live bot token on a command line every local process can read — a security
+// regression to buy a language change, so it stays Rust until the toolkit can pipe stdin.
+
+def rozumBin(): String = envOrElse("ROZUM_BIN", "rozum-gateway")
+
+// The CLI's JSON, with the Rust wrapper's status rule: 200 when the child succeeded AND its JSON
+// says `ok`, 400 otherwise, and 500 when it produced no JSON at all.
+def messengerJson(args: List[String]): Response =
+  val r = exec(rozumBin(), args, ProcessOptions(None, Map(), None, true))
+  // Joined via `join2`: `a + b` on two Strings emits `&str + String` here (E0308).
+  val out = trimEnds(join2(r.stdout, r.stderr))
+  if out.length == 0 || (out.substring(0, 1) != "{" && out.substring(0, 1) != "[") then
+    Response(500, JSON_CT, jsonStringify(Map("error" -> ("messenger command produced no JSON: " + out))))
+  else
+    val v = jsonParse(out)
+    val okField = boolOf(v, "ok")
+    val code = if r.exitCode == 0 && okField then 200 else 400
+    // COMPACTED, not passed through. The CLI prints `--json` pretty; the Rust wrapper parses it and
+    // re-serializes, so what reaches the console has no whitespace. Re-serializing here instead
+    // would SORT the keys (`jsonStringify` of a parsed value does), and the Rust side preserves the
+    // source order — so the only spelling that matches on both counts is to strip the whitespace
+    // that sits outside strings and leave the bytes otherwise untouched.
+    Response(code, JSON_CT, compactJson(out))
+
+// Whitespace outside string literals, removed. Quote- and escape-aware, because a message body or a
+// bot title may contain braces and spaces that must survive.
+def compactJson(text: String): String =
+  compactFrom(text, 0, false, false, "")
+
+def compactFrom(t: String, i: Int, inStr: Boolean, esc: Boolean, acc: String): String =
+  if i >= t.length then acc
+  else
+    val c = t.substring(i, i + 1)
+    if esc then compactFrom(t, i + 1, inStr, false, acc + c)
+    else if c == "\\" && inStr then compactFrom(t, i + 1, inStr, true, acc + c)
+    else if c == "\"" then compactFrom(t, i + 1, inStr == false, false, acc + c)
+    else if inStr == false && (c == " " || c == "\n" || c == "\t" || c == "\r") then
+      compactFrom(t, i + 1, inStr, false, acc)
+    else compactFrom(t, i + 1, inStr, false, acc + c)
+
+def boolOf(v: Any, k: String): Boolean =
+  v match
+    case m: Map[String, Any] => m.get(k).map(x => x.toString == "true").getOrElse(false)
+    case _ => false
+
+// `k=v&k=v`, the shape the console posts. Mirrors `parse_flat_body`.
+def flatField(body: String, key: String): String =
+  formField(body, key)
+
+// The sign is stripped into its own val first: reading `s` again after it has been passed to a def
+// is a borrow-after-move in the generated Rust (E0382).
+def isNumber(s: String): Boolean =
+  val negative = s.length > 0 && s.substring(0, 1) == "-"
+  val digits = if negative then s.substring(1, s.length) else s
+  digits.length > 0 && allDigitsFrom(digits, 0)
+
+def join2(a: String, b: String): String =
+  val head = a
+  head + b
+
+def messengerStatusRoute(req: Request): Response =
+  messengerJson(["messenger", "status", "--json"])
+
+def messengerAclShowRoute(req: Request): Response =
+  val room = req.query.get("room").getOrElse("")
+  if trimEnds(room).length == 0 then badRequest("room required")
+  else if safePathSeg(room) == false then badRequest("bad room")
+  else messengerJson(["messenger", "acl", "show", room, "--json"])
+
+def messengerAclGrantRoute(req: Request): Response =
+  val room = flatField(req.body, "room")
+  val user = trimEnds(flatField(req.body, "user_id"))
+  if room.length == 0 || user.length == 0 then badRequest("room and user_id required")
+  else if safePathSeg(room) == false then badRequest("bad room")
+  else if isNumber(user) == false then badRequest("user_id must be a number")
+  else
+    val caps = flatField(req.body, "caps")
+    if trimEnds(caps).length == 0 then
+      badRequest("caps required (chat read write shell | all | none)")
+    else
+      val name = flatField(req.body, "name")
+      val head: List[String] = ["messenger", "acl", "grant", room, user]
+      messengerJson(head ++ caps.split(" ").toList.filter(c => c.length > 0) ++ ["--name", name, "--json"])
+
+def messengerAclRevokeRoute(req: Request): Response =
+  val room = flatField(req.body, "room")
+  val user = trimEnds(flatField(req.body, "user_id"))
+  if room.length == 0 || user.length == 0 then badRequest("room and user_id required")
+  else if safePathSeg(room) == false then badRequest("bad room")
+  else if isNumber(user) == false then badRequest("user_id must be a number")
+  else messengerJson(["messenger", "acl", "revoke", room, user, "--json"])
+
+def messengerGroupAddRoute(req: Request): Response =
+  val chat = trimEnds(flatField(req.body, "chat_id"))
+  if chat.length == 0 then badRequest("chat_id required")
+  else if isNumber(chat) == false then badRequest("chat_id must be a number")
+  else
+    val registry = if flatField(req.body, "registry").length > 0 then flatField(req.body, "registry") else "telegram"
+    val title = flatField(req.body, "title")
+    val room = flatField(req.body, "room")
+    val base: List[String] = ["messenger", "groups", "add", chat, "--registry", registry, "--title", title, "--json"]
+    if trimEnds(room).length == 0 then messengerJson(base)
+    else messengerJson(base ++ ["--room", room])
+
+def messengerGroupRemoveRoute(req: Request): Response =
+  val chat = trimEnds(flatField(req.body, "chat_id"))
+  if chat.length == 0 then badRequest("chat_id required")
+  else if isNumber(chat) == false then badRequest("chat_id must be a number")
+  else
+    val registry = if flatField(req.body, "registry").length > 0 then flatField(req.body, "registry") else "telegram"
+    messengerJson(["messenger", "groups", "remove", chat, "--registry", registry, "--json"])
+
+def messengerBotRemoveRoute(req: Request): Response =
+  val bot = flatField(req.body, "bot")
+  if bot.length == 0 then badRequest("bot required")
+  else if safePathSeg(bot) == false then badRequest("bad bot name")
+  else messengerJson(["messenger", "bot-remove", bot, "--json"])
+
+// `service` answers a DIFFERENT shape from the others — `{ok, output}` built from the child's exit
+// status and raw text, not the child's JSON — because the CLI's `service` subcommand prints prose.
+def messengerBotServiceRoute(req: Request): Response =
+  val bot = flatField(req.body, "bot")
+  val action = flatField(req.body, "action")
+  if bot.length == 0 || action.length == 0 then badRequest("bot and action required")
+  else if safePathSeg(bot) == false then badRequest("bad bot")
+  else if action != "start" && action != "stop" && action != "restart" then
+    badRequest("action must be start|stop|restart")
+  else
+    val r = exec(rozumBin(), ["messenger", "service", bot, action], ProcessOptions(None, Map(), None, true))
+    // Joined via `join2`: `a + b` on two Strings emits `&str + String` here (E0308).
+    val out = trimEnds(join2(r.stdout, r.stderr))
+    val okB = r.exitCode == 0
+    Response(if okB then 200 else 400, JSON_CT,
+      "{\"ok\":" + (if okB then "true" else "false") + ",\"output\":" + jsonStringify(out) + "}")
+
 // ── /view/{token} ──────────────────────────────────────────────────────────────────────────────
 // The read-only console page. The token is the LAST path segment, and it is checked before the file
 // is read — an invalid token must not even reveal whether the page exists.
@@ -718,6 +865,14 @@ def main(): Unit =
   // Slice 4 — the first route here that WRITES. POST, which is why the console's proxy had to
   // learn the method and the body before this could exist at all.
   route("POST", "/control/project/add", req => if doorOpen(req) then projectAddRoute(req) else noDoor())
+  route("GET",  "/control/messenger/status", req => if doorOpen(req) then messengerStatusRoute(req) else noDoor())
+  route("GET",  "/control/messenger/acl", req => if doorOpen(req) then messengerAclShowRoute(req) else noDoor())
+  route("POST", "/control/messenger/acl/grant", req => if doorOpen(req) then messengerAclGrantRoute(req) else noDoor())
+  route("POST", "/control/messenger/acl/revoke", req => if doorOpen(req) then messengerAclRevokeRoute(req) else noDoor())
+  route("POST", "/control/messenger/group/add", req => if doorOpen(req) then messengerGroupAddRoute(req) else noDoor())
+  route("POST", "/control/messenger/group/remove", req => if doorOpen(req) then messengerGroupRemoveRoute(req) else noDoor())
+  route("POST", "/control/messenger/bot/remove", req => if doorOpen(req) then messengerBotRemoveRoute(req) else noDoor())
+  route("POST", "/control/messenger/bot/service", req => if doorOpen(req) then messengerBotServiceRoute(req) else noDoor())
   serve(8412)
 main()
 ```

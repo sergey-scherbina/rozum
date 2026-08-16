@@ -110,16 +110,36 @@ use axum::{response::IntoResponse, routing::{delete, get, post, put}, Router};
         // Messenger console. Admin-gated on purpose: these routes install bot tokens, control
         // launchd services and edit the permission rosters that decide who may run shell commands
         // through the assistant — the same blast radius as user/role management, not "read".
-        .route("/control/messenger/status", get(messenger_status_route))
-        .route("/control/messenger/group/add", post(messenger_group_add_route))
-        .route("/control/messenger/group/remove", post(messenger_group_remove_route))
-        .route("/control/messenger/acl", get(messenger_acl_route))
-        .route("/control/messenger/acl/grant", post(messenger_acl_grant_route))
-        .route("/control/messenger/acl/revoke", post(messenger_acl_revoke_route))
-        .route("/control/messenger/bot/service", post(messenger_bot_service_route))
-        .route("/control/messenger/bot/add", post(messenger_bot_add_route))
-        .route("/control/messenger/bot/remove", post(messenger_bot_remove_route))
-        .route_layer(axum::middleware::from_fn(require_admin));
+        // `bot/add` is NOT in the switch below and must not be: it hands the bot token to the
+        // child on STDIN so it never appears in an argv, and `std/process.ssc` has no stdin. A
+        // ported version would put a live token on a command line every local process can read.
+        .route("/control/messenger/bot/add", post(messenger_bot_add_route));
+    // The six that CAN move, switched together — they are one surface to the console and splitting
+    // them across two servers would make "which implementation answered" a per-route question.
+    let admin = match std::env::var("ROZUM_UCC_SSC_ORIGIN").ok().filter(|v| !v.is_empty()) {
+        None => admin
+            .route("/control/messenger/status", get(messenger_status_route))
+            .route("/control/messenger/group/add", post(messenger_group_add_route))
+            .route("/control/messenger/group/remove", post(messenger_group_remove_route))
+            .route("/control/messenger/acl", get(messenger_acl_route))
+            .route("/control/messenger/acl/grant", post(messenger_acl_grant_route))
+            .route("/control/messenger/acl/revoke", post(messenger_acl_revoke_route))
+            .route("/control/messenger/bot/service", post(messenger_bot_service_route))
+            .route("/control/messenger/bot/remove", post(messenger_bot_remove_route)),
+        Some(origin) => {
+            eprintln!("control server: /control/messenger/* (8 of 9) → {origin} (.ssc)");
+            admin
+                .route("/control/messenger/status", get(ucc_ssc_proxy))
+                .route("/control/messenger/group/add", post(ucc_ssc_proxy))
+                .route("/control/messenger/group/remove", post(ucc_ssc_proxy))
+                .route("/control/messenger/acl", get(ucc_ssc_proxy))
+                .route("/control/messenger/acl/grant", post(ucc_ssc_proxy))
+                .route("/control/messenger/acl/revoke", post(ucc_ssc_proxy))
+                .route("/control/messenger/bot/service", post(ucc_ssc_proxy))
+                .route("/control/messenger/bot/remove", post(ucc_ssc_proxy))
+        }
+    };
+    let admin = admin.route_layer(axum::middleware::from_fn(require_admin));
     // Read-only dashboard data — needs the `read` permission (every role has it by default).
     //
     // Three of these are served by the `.ssc` program when it is configured (slice 3 of
