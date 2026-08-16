@@ -1,5 +1,25 @@
 # Changelog
 
+## ucc-ssc-backend slice 3 — three read routes on ScalaScript, and what the acceptance caught
+Completed: 2026-08-16
+
+Nineteen read routes was the census; eight are in the `read` permission group and three of those
+can move at all — the rest read state that lives inside the gateway process. `/chat/messages`,
+`/chat/incidents` and `/control/matrix/cell` are now served by the `.ssc` program behind the same
+`require_perm_read` gate and the door, with the authenticated cell sharing one body with its public
+twin.
+
+Compared against the Rust handlers **side by side on live data** rather than against the previous
+deploy: chat 22/22 and cell 1983/1983 byte-identical. That comparison is what caught slice 1
+shipping a difference — `task_info` fifth instead of second, and its own keys sorted instead of in
+file order — which yesterday's self-comparison could not see. Fixed for both routes.
+
+Cost: three SILENT ScalaScript rust-lane divergences, each found by building a probe that ran the
+same source on both lanes. A JSON array also matches a `Map` type pattern, so arm order decides the
+answer; `take(n)` after `map` returns empty; and `jsonParse` panics on bad input, after which the
+http runtime's poisoned mutex leaves the server answering nothing at all. Filed in BACKLOG, the
+last one first.
+
 ## ucc-ssc — the door is closed, and the check that watches it means something again
 Completed: 2026-08-16
 

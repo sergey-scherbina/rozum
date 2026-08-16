@@ -2318,9 +2318,16 @@ survives exactly one context rotation. Order is mine to change; scope and the re
     1975 cells byte-identical against a reference captured before anything moved. The scalascript
     toolchain was NOT restaged — the staged one is newer than the binary it replaced, and the
     1975-cell comparison answered the vintage question empirically instead.
-  - [ ] **slice 3 — the 19 read routes.** UNBLOCKED 2026-08-16: the door is closed, so a ported
-    gated route is reachable only through the console that gates it. Port them as one slice, not
-    one at a time — the session question they all share is now answered.
+  - [x] **slice 3 — DONE 2026-08-16, and it is THREE routes, not nineteen.** Classified by data
+    source: `/chat/messages`, `/chat/incidents` and `/control/matrix/cell` moved; `/control/status`
+    and the three `matrix/{status,log,live}` read state that lives inside the gateway process and
+    cannot; `/control/model/info` could but would copy the model-catalog matching rule into a
+    second language. Verified against the Rust handlers side by side on live data: chat 22/22,
+    cell 1983/1983 byte-identical. Found and fixed a divergence slice 1 had shipped (`task_info`
+    key order, in both places), and three SILENT rust-lane compiler divergences (BACKLOG).
+  - [ ] **slice 4 — the 23 action routes.** Needs the spawn/registry primitives the entry names.
+    Now genuinely next: the session question is answered, the door is closed, and the read slice
+    proved the shape works on real traffic.
 
 ## Sprint
 
