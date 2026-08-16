@@ -552,21 +552,37 @@ Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
   working the whole time. A gateway defect, recorded against the model. A mean over a bimodal
   distribution described neither mode.
 
-  **Re-run against the BUG-055 fix, 2026-08-16 — and the 9B PASSED it.** First cell, first real
-  agentic measurement of this model on this task:
+  **Re-run against the BUG-055 fix, 2026-08-16, three reps each — and this is the first
+  measurement on this whole thread that separates the two models.**
 
-  | model | task | pass | seconds | turns | tool calls |
-  |---|---|---|---|---|---|
-  | Qwen3.5-9B | `duration` | **1/1** | 288.6 | 19 | 16 |
-  | Qwen3.5-4B | `duration` | 1/3 | 733 / 384 / 440 | 15 / 18 / 13 | 9 / 11 / 7 |
+  | task | 4B × 3 | 9B × 3 | 9B seconds |
+  |---|---|---|---|
+  | `apportion` | 1/3 | **3/3** | 137 / 146 / 212 |
+  | `duration` | 1/3 | **2/3** | 289 / 246 / 197 |
+  | `board` | 0/3 | 0/1 | 262 |
 
-  One cell is one cell, and it is not a pass rate — but it is the first time this model has been
-  allowed to finish anything here, and it finished by doing MORE work than the 4B did (16 tool
-  calls to the 4B's 7-11), not less. The run was stopped after that cell by the harness, and the
-  host has since gone to 7.65 GiB available against the 10.19 the 9B needs, so `apportion` and
-  `board` on the 9B are still unrun. **Nothing here overturns staying on the 4B** — that rests on
-  the eight-task 24/24 at 1.84× — but "the 9B cannot finish agentic work on this host" is now
-  positively disproven, by the model finishing.
+  Five months of "the matrix cannot tell two models apart" ends here: on `apportion` the 9B is
+  perfect where the 4B managed one in three, and it is also FASTER per cell (137-212 s against
+  120-197 s at a comparable spread, having done the work rather than churned). `duration` is 2/3
+  against 1/3.
+
+  **Both models fail the same way when they fail, which is the finding worth keeping.** Every
+  loss on both sides is either a self-authored wrong test or genuine edit churn, checked
+  individually rather than assumed: the 9B's one `duration` loss wrote a CORRECT implementation
+  (all eight verifier values green) and then added its own `assert_eq!(format(3661), "0d 1h 1m
+  1s")` — a zero day component printed, which the stated rule forbids — exactly the 4B's failure
+  shape at a lower rate. Its `board` loss and the 4B's are both real churn (60% of the added lines
+  restoring lines an earlier edit removed). So the axis that separates is not reasoning; it is
+  **how often the model keeps the invariants it was given while changing something else.**
+
+  **What this does NOT overturn:** staying on the 4B. That rests on the eight-task 24/24 at 1.84×,
+  which these three hard tasks do not touch, and the 9B needs ~10-12 GiB against the 4B's ~7.4 on
+  a 36 GiB host that is routinely down to 8 GiB free. What it does overturn is "the 9B buys
+  nothing" — on the hard end of the range it plainly buys something. Conditions, stated so the
+  numbers are not read as better than they are: the 9B ran with the MLX cache adaptively reduced
+  to 1 GiB against the 4B's 2 GiB, both at n_ctx 32768. The 9B's are the tighter conditions.
+
+  ⚠️ Three reps is three reps. This is a signal, not a pass rate to quote as settled.
 
   Worth keeping for whoever runs the rest: `gateway --dry-run` gives the admission verdict with the
   real load-path math and loads nothing, so headroom can be checked before committing an hour.
