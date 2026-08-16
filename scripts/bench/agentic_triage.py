@@ -207,7 +207,13 @@ def classify_workdir(path: Path, explicit_log: Path | None = None) -> dict[str, 
         return result(path, "pass", "verification passed", ["verify_pass"], task=task, agent=agent, model=model, passed="1", timeout=timeout, rc=rc)
 
     # THE GATEWAY STOPPED THIS RUN, so nothing after that point is the model's doing — and this
-    # check has to come FIRST for exactly that reason. The loop-breaker replaces the model's turn
+    # check has to come FIRST for exactly that reason.
+    #
+    # It does NOT say whose fault the run was, and the wording was corrected once for claiming it
+    # did: a stop can be perfectly earned. Measured 2026-08-16 on the `apportion` re-runs — edit 3
+    # put back 17 of the 31 substantive lines edits 1-2 had removed, which is the circle signature 3
+    # exists to end. The class means "we ended this, go read which signature" — not "the model is
+    # innocent". The loop-breaker replaces the model's turn
     # with "stop and report in one line"; the model then reports in one line, and every later check
     # here reads that as the model's own choice. All three `duration` cells were filed as
     # `false_success_after_error` (2026-08-16) when the success claim was the injected instruction
@@ -217,7 +223,7 @@ def classify_workdir(path: Path, explicit_log: Path | None = None) -> dict[str, 
         return result(
             path,
             "stopped_by_loopbreaker",
-            "the gateway's loop-breaker ended this run — the outcome is not the model's",
+            "the gateway's loop-breaker ended this run — read which signature fired before scoring it",
             ["loopbreaker_stop"],
             task=task,
             agent=agent,

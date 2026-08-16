@@ -468,8 +468,8 @@ Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
   | task | 4B × 3 | what the evidence says |
   |---|---|---|
   | `leapday` | 3/3 | rule is common knowledge; only "where" was asked. Passing cells, so unaffected |
-  | `board` | ~~0/3~~ VOID | all six cells (4B and 9B) ended by the loop-breaker, not by the models |
-  | `apportion` | ~~0/3~~ VOID | all three cells ended by the loop-breaker; never reached `cargo test` |
+  | `board` | ~~0/3~~ → **0/3** | re-measured after the fix. Still zero, now for the model's own reasons: 3 of 3 churn (edits putting back what earlier edits removed) or a false success. 9B not re-run |
+  | `apportion` | ~~0/3~~ → **1/3** | re-measured after the fix. One clean pass; the two failures are genuine churn — edit 3 restored 17 of 31 substantive lines edits 1-2 had deleted |
   | `duration` | 0/3 → **1/3** | the 0/3 was also aborted; re-run after the fix, and the failures are now the models' own |
 
   **How much of the record this touched, measured rather than assumed.** The fixed detector was
@@ -480,7 +480,17 @@ Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
   conclusion drawn from a RED cell in those runs deserves the same check before it is quoted.
   `scripts/bench/agentic_triage.py` now files such a run as `stopped_by_loopbreaker` ahead of every
   other class, because the "false success" it used to report was the model obeying our own
-  injected instruction to stop and report in one line.
+  injected instruction to stop and report in one line. The class names the FACT, not the fault:
+  the re-runs show a legitimate stop looks identical from outside, so the row says which signature
+  to go and read.
+
+  **Re-measured 2026-08-16 with the fix in (4B × 3 each): `apportion` 1/3, `board` 0/3.** Both
+  numbers are now the model's. The loop-breaker still ended four of the six cells, and inspection
+  says it was right to: on `apportion` the model rewrote the function back toward a version it had
+  already replaced, 17 of 31 substantive lines restored. So the 4B does churn on these two tasks —
+  which is a real property, and a different statement from the one the void cells supported. What
+  is still NOT established is `board` being unpassable: it has never passed, and it has also never
+  had a run that was allowed to finish on the 9B.
 
   `duration` moves the difficulty out of the feedback loop: `cargo test` is green on arrival and
   stays green, the seeded tests cover only part of the spec, and days plus the all-zero case live
