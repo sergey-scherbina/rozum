@@ -1,5 +1,55 @@
 # Bugs
 
+## BUG-057 — a request that stalls in decode is re-sent unchanged, and each retry costs a full inactivity timeout
+
+- **Status:** FIXED 2026-08-16 (`serving.rs`: `request_signature` + `STALLED` tracker; the third
+  identical stall is answered rather than run).
+- **Severity:** P2 for agent runs. Nothing breaks; the clock is eaten and the cause looks like a
+  slow model. It is also OPEN in its other half — see "what this does not fix" below.
+
+The 9B `duration` cell that finished at the full 900 s harness limit, from `~/.rozum/gateway.jsonl`:
+
+```
+17:08:44  request_start  id 13  messages 27  est_prompt_tokens 8526  seed 1235
+17:11:12  generation_timeout {inactivity_secs: 120}
+17:11:12  request_done   id 13  ttft 26465ms  output_tokens 14  duration 147963ms  incomplete
+17:11:12  request_start  id 14  messages 27  est_prompt_tokens 8526  seed 1235   ← identical
+17:13:42  request_done   id 14  ttft 28362ms  output_tokens 14  duration 149827ms  incomplete
+17:13:43  request_start  id 15  … identical …
+17:16:13  request_done   id 15  ttft 28949ms  output_tokens 14  duration 150147ms  incomplete
+17:16:14  request_start  id 16  … identical …
+17:17:09  request_done   id 16  ttft 29566ms  output_tokens 14  duration  54356ms  incomplete
+```
+
+Requests 13-16 are the same body. Each one prefills fine (ttft ~27 s), emits **exactly 14 tokens**,
+then produces nothing for 120 s; `with_gen_timeout` aborts it correctly, the client sees a stream
+that ended early and re-sends the identical request. **500 of the 900 seconds went to re-running one
+wedged decode**, on a cell whose work had been finished at request 12 — which is why it still
+scored a PASS.
+
+**This was mis-read first, and the mis-reading is the point.** From the outside it looked like "the
+model did the work and then would not stop", i.e. the no-stop-after-success loop signature 4 exists
+for. It is not that: there is no loop over tool calls, there is one prompt that wedges and a client
+doing the only thing it can.
+
+**Fix.** `chat_or_loopbreak` fingerprints the conversation and counts consecutive stalls for that
+fingerprint (`with_gen_timeout` feeds the counter: a timeout increments it, a stream that ran to its
+end clears it). Two stalls are tolerated — a wedge can be transient, and refusing the first retry
+would turn a blip into a failure. The third is not run: the gateway answers with a synthetic stop
+that says the request stalled twice, not to resend it unchanged, and that the work may already be
+on disk. One slot rather than a map, because a stalled prompt is re-sent immediately and a different
+conversation arriving is itself the reset.
+
+**What this does not fix, and is now the open half:** why the decode wedges after 14 tokens on that
+prompt, reproducibly, four times. The 9B was running with its MLX cache adaptively reduced to 1 GiB
+on a host under memory pressure, which is the shape `with_gen_timeout`'s own doc comment describes
+("a Metal eval wedged under memory pressure blocks inside one FFI call"). Not investigated further
+here; the retry storm was the part costing whole runs.
+
+**Regression test:** `an_identical_request_that_keeps_stalling_is_answered_not_re_run` — a backend
+that emits a few tokens then never another, run three times; the first two time out, the third is
+answered, and a different prompt still runs. Verified red without the guard.
+
 ## BUG-056 — signature 3 counts an edit that FAILED, so a refused no-op edit becomes the third strike
 
 - **Status:** FIXED 2026-08-16 (`loopbreak.rs`: the signature-3 loop iterates `calls` and skips

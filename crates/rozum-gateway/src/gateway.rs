@@ -608,6 +608,9 @@ async fn serve_wire<D: WireDialect>(
     let decode = if chat_req.sampling.temperature == Some(0.0) { "greedy" } else { "sampled" };
     let decode_seed = chat_req.sampling.seed;
 
+    // One fingerprint for both guards: the stall counter in `chat_or_loopbreak` and the stream
+    // watchdog that feeds it. Taken before the request moves into the backend.
+    let sig = crate::serving::request_signature_of(&chat_req);
     let started = start_chat_bounded(
         &lease.backend,
         chat_req,
@@ -635,7 +638,8 @@ async fn serve_wire<D: WireDialect>(
                 seed: decode_seed,
             };
             let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
-            let chat_stream = with_gen_timeout(chat_stream, cancel.clone(), gen_inactivity_timeout());
+            let chat_stream =
+                with_gen_timeout(chat_stream, cancel.clone(), gen_inactivity_timeout(), sig);
             dialect.respond(chat_stream, cancel, model, lease).await
         }
     }
@@ -1892,6 +1896,94 @@ mod tests {
         }
     }
 
+    /// A backend that emits a few tokens and then goes silent — the shape of the 9B stall
+    /// (ttft fine, exactly 14 tokens, then nothing).
+    struct StallsAfterAFewTokens;
+
+    #[async_trait::async_trait]
+    impl crate::backend::ChatBackend for StallsAfterAFewTokens {
+        async fn chat(&self, _req: crate::backend::ChatRequest) -> Result<ChatStream, ModelError> {
+            Ok(Box::pin(async_stream::stream! {
+                yield Ok(ChatEvent::TextDelta { text: "I'll check the".into() });
+                std::future::pending::<()>().await; // and then nothing, ever
+            }))
+        }
+        fn context_window(&self) -> u32 {
+            u32::MAX
+        }
+    }
+
+    #[tokio::test]
+    async fn an_identical_request_that_keeps_stalling_is_answered_not_re_run() {
+        // The 900 s `duration` cell (2026-08-16): requests 13-16 were byte-identical — 27 messages,
+        // 8526 prompt tokens, one seed — and each gave ttft ~27 s, exactly 14 output tokens, then
+        // 120 s of silence and a `generation_timeout`. 500 of the 900 seconds went to re-running
+        // one wedged decode, on a cell that had already finished its work at request 12.
+        let backend = Arc::new(StallsAfterAFewTokens) as Arc<dyn crate::backend::ChatBackend>;
+        let dur = Duration::from_millis(60);
+
+        let attempt = |n: usize| {
+            let backend = backend.clone();
+            async move {
+                let cancel = CancellationToken::new();
+                let req = crate::backend::ChatRequest {
+                    cancel: cancel.clone(),
+                    ..crate::backend::ChatRequest::simple("the same prompt every time")
+                };
+                let sig = crate::serving::request_signature_of(&req);
+                let stream = crate::serving::chat_or_loopbreak(&backend, req)
+                    .await
+                    .unwrap_or_else(|e| panic!("attempt {n}: {e}"));
+                let mut s = with_gen_timeout(stream, cancel, dur, sig);
+                let mut text = String::new();
+                let mut timed_out = false;
+                while let Some(ev) = s.next().await {
+                    match ev {
+                        Ok(ChatEvent::TextDelta { text: t }) => text.push_str(&t),
+                        Err(ModelError::Timeout(_)) => timed_out = true,
+                        _ => {}
+                    }
+                }
+                (text, timed_out)
+            }
+        };
+
+        // Two stalls are tolerated — a wedge can be transient, and refusing the first retry would
+        // turn a blip into a failure.
+        for n in 1..=2 {
+            let (text, timed_out) = attempt(n).await;
+            assert!(timed_out, "attempt {n} should have hit the inactivity timeout");
+            assert!(text.starts_with("I'll check the"), "attempt {n} got: {text:?}");
+        }
+
+        // The third is answered instead of run: no timeout, and the model is told what to do.
+        let (text, timed_out) = attempt(3).await;
+        assert!(!timed_out, "the third identical stall must not be run again: {text:?}");
+        assert!(
+            text.contains("stalled in generation twice") && text.contains("Do not resend it"),
+            "the answer must say why and what to do instead: {text:?}"
+        );
+
+        // And a DIFFERENT conversation is unaffected — the guard is about one wedged prompt.
+        let cancel = CancellationToken::new();
+        let other = crate::backend::ChatRequest {
+            cancel: cancel.clone(),
+            ..crate::backend::ChatRequest::simple("a completely different prompt")
+        };
+        let sig = crate::serving::request_signature_of(&other);
+        let mut s = with_gen_timeout(
+            crate::serving::chat_or_loopbreak(&backend, other).await.expect("ok"),
+            cancel,
+            dur,
+            sig,
+        );
+        let mut got = String::new();
+        while let Some(Ok(ChatEvent::TextDelta { text: t })) = s.next().await {
+            got.push_str(&t);
+        }
+        assert!(got.starts_with("I'll check the"), "a different prompt must still run: {got:?}");
+    }
+
     #[tokio::test]
     async fn a_backend_that_never_returns_a_stream_is_bounded_too() {
         let backend = Arc::new(WedgedBackend) as Arc<dyn crate::backend::ChatBackend>;
@@ -1943,7 +2035,7 @@ mod tests {
             yield Ok(ChatEvent::TextDelta { text: "late".into() });
         });
         let cancel = CancellationToken::new();
-        let mut s = with_gen_timeout(inner, cancel.clone(), Duration::from_millis(50));
+        let mut s = with_gen_timeout(inner, cancel.clone(), Duration::from_millis(50), 0xA11CE_u64);
         match s.next().await {
             Some(Err(ModelError::Timeout(_))) => {}
             other => panic!("expected Timeout, got {other:?}"),
@@ -2471,7 +2563,7 @@ mod tests {
             });
         });
         let cancel = CancellationToken::new();
-        let mut s = with_gen_timeout(inner, cancel.clone(), Duration::from_secs(5));
+        let mut s = with_gen_timeout(inner, cancel.clone(), Duration::from_secs(5), 0xB0B_u64);
         let mut n = 0;
         while let Some(ev) = s.next().await {
             assert!(ev.is_ok());
@@ -2487,7 +2579,7 @@ mod tests {
             yield Ok(ChatEvent::TextDelta { text: "x".into() });
         });
         let cancel = CancellationToken::new();
-        let mut s = with_gen_timeout(inner, cancel.clone(), Duration::from_secs(0));
+        let mut s = with_gen_timeout(inner, cancel.clone(), Duration::from_secs(0), 0xC0FFEE_u64);
         assert!(matches!(s.next().await, Some(Ok(ChatEvent::TextDelta { .. }))));
         assert!(!cancel.is_cancelled());
     }

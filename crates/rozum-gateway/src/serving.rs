@@ -84,7 +84,12 @@ pub(crate) fn gen_inactivity_timeout() -> Duration {
 /// pressure blocks inside one FFI call, so the decode loop's `is_cancelled()`
 /// check never runs until it returns. Cancelling here lets the worker abandon the
 /// job the moment it unblocks; the client gets an error instead of hanging.
-pub(crate) fn with_gen_timeout(mut stream: ChatStream, cancel: CancellationToken, dur: Duration) -> ChatStream {
+pub(crate) fn with_gen_timeout(
+    mut stream: ChatStream,
+    cancel: CancellationToken,
+    dur: Duration,
+    sig: u64,
+) -> ChatStream {
     if dur.is_zero() {
         return stream;
     }
@@ -92,8 +97,15 @@ pub(crate) fn with_gen_timeout(mut stream: ChatStream, cancel: CancellationToken
         loop {
             match tokio::time::timeout(dur, stream.next()).await {
                 Ok(Some(item)) => yield item,
-                Ok(None) => break,
+                // A stream that ran to its end is progress, whatever it contained: the prompt is
+                // not the one that wedges. Clearing here rather than on "did it look useful" keeps
+                // the counter about the stall and nothing else.
+                Ok(None) => {
+                    note_progress(sig);
+                    break;
+                }
                 Err(_) => {
+                    note_stall(sig);
                     cancel.cancel();
                     crate::obs::log_event(json!({
                         "event": "generation_timeout", "inactivity_secs": dur.as_secs(),
@@ -109,6 +121,70 @@ pub(crate) fn with_gen_timeout(mut stream: ChatStream, cancel: CancellationToken
     })
 }
 
+/// [`request_signature`] for a whole request — the form the handler needs, taken before the
+/// request moves into the backend.
+pub(crate) fn request_signature_of(req: &crate::backend::ChatRequest) -> u64 {
+    request_signature(&req.messages)
+}
+
+/// How many times one identical request may stall in decode before the gateway stops re-running it
+/// and answers instead. Two stalls are tolerated; the third is short-circuited.
+const STALL_REPEAT_LIMIT: usize = 3;
+
+/// A cheap, stable fingerprint of a request's conversation, so a retry of the SAME prompt can be
+/// recognised. Hashes structure and text, not the wall-clock or ids that vary per attempt.
+fn request_signature(messages: &[crate::backend::Message]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    messages.len().hash(&mut h);
+    for m in messages {
+        std::mem::discriminant(&m.role).hash(&mut h);
+        m.content.len().hash(&mut h);
+        for b in &m.content {
+            match b {
+                crate::backend::ContentBlock::Text { text } => (0u8, text).hash(&mut h),
+                crate::backend::ContentBlock::ToolUse { name, input, .. } => {
+                    (1u8, name, input.to_string()).hash(&mut h)
+                }
+                crate::backend::ContentBlock::ToolResult { content, is_error, .. } => {
+                    (2u8, content, is_error).hash(&mut h)
+                }
+                crate::backend::ContentBlock::Image { data } => (3u8, data.len()).hash(&mut h),
+            }
+        }
+    }
+    h.finish()
+}
+
+/// Consecutive decode stalls for the most recent request signature. One slot, not a map: a stalled
+/// prompt is re-sent immediately and identically, so the run that matters is always the latest, and
+/// a different conversation arriving is itself the reset.
+static STALLED: std::sync::Mutex<Option<(u64, usize)>> = std::sync::Mutex::new(None);
+
+pub(crate) fn note_stall(sig: u64) {
+    let mut g = STALLED.lock().unwrap_or_else(|e| e.into_inner());
+    match *g {
+        Some((s, n)) if s == sig => *g = Some((s, n + 1)),
+        _ => *g = Some((sig, 1)),
+    }
+}
+
+/// A request that produced a complete stream clears the count — the prompt is not stuck.
+pub(crate) fn note_progress(sig: u64) {
+    let mut g = STALLED.lock().unwrap_or_else(|e| e.into_inner());
+    if matches!(*g, Some((s, _)) if s == sig) {
+        *g = None;
+    }
+}
+
+fn stalls_for(sig: u64) -> usize {
+    let g = STALLED.lock().unwrap_or_else(|e| e.into_inner());
+    match *g {
+        Some((s, n)) if s == sig => n,
+        _ => 0,
+    }
+}
+
 /// `backend.chat`, but first break a detected agentic stuck-loop with a synthetic stop.
 pub(crate) async fn chat_or_loopbreak(
     backend: &Arc<dyn ChatBackend>,
@@ -117,6 +193,32 @@ pub(crate) async fn chat_or_loopbreak(
     if let Some(reason) = detect_stuck_loop(&req.messages) {
         crate::obs::log_event(json!({ "event": "stuck_loop_broken", "detail": reason }));
         return Ok(synthetic_stop_stream(reason));
+    }
+    // A prompt that has already stalled in decode twice will stall again — running it a third time
+    // buys another `gen_inactivity_timeout` of dead clock and nothing else. The client cannot know
+    // this: from its side the request simply ended early, so it re-sends the identical body.
+    //
+    // Measured on the 9B `duration` cell that took the full 900 s harness limit (2026-08-16):
+    // requests 13-16 were byte-identical — 27 messages, 8526 prompt tokens, one seed — and each
+    // produced ttft ~27 s, exactly 14 output tokens, then 120 s of silence and a
+    // `generation_timeout`. 500 of the 900 seconds went to re-running one wedged decode. The cell
+    // still PASSED, because the work had been finished by request 12; the clock was pure loss.
+    //
+    // This does not fix the stall. It stops the stall from eating the run, and it says so out loud
+    // instead of looking like a slow model — which is exactly how it was first mis-read.
+    let sig = request_signature(&req.messages);
+    if stalls_for(sig) >= STALL_REPEAT_LIMIT - 1 {
+        crate::obs::log_event(json!({
+            "event": "stalled_request_short_circuited", "signature": sig, "stalls": stalls_for(sig),
+        }));
+        note_progress(sig); // let the next attempt through rather than wedging the conversation
+        return Ok(synthetic_stop_stream(
+            "This exact request has stalled in generation twice already and was not run a third \
+             time. Do not resend it unchanged. Whatever you were doing may already be finished on \
+             disk — check the files, then either continue with a DIFFERENT next step or report the \
+             current state in one short line."
+                .to_string(),
+        ));
     }
     backend.chat(req).await
 }
