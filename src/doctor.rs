@@ -2,6 +2,11 @@
 
 use std::ffi::OsStr;
 use crate::services::{Owner, Probe, Service, Shape};
+
+/// What the `.ssc` server says when it refuses at the door. Matched as a substring rather than
+/// compared: the body is JSON and its exact framing is the server's business, while this phrase is
+/// the contract between the two (`clients/control/public-matrix.ssc`).
+const DOOR_REFUSAL_MARKER: &str = "reachable only through the console";
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -746,7 +751,24 @@ async fn check_service(
             }
             match req.send().await {
                 Ok(r) if r.status().is_success() || matches!(r.status().as_u16(), 401 | 403) => {
-                    Ok(format!("answers {}", r.status().as_u16()))
+                    let code = r.status().as_u16();
+                    let body = r.text().await.unwrap_or_default();
+                    // THE STATUS IS NOT ENOUGH, and carrying the secret alone did not fix that:
+                    // a door refusal and the service's own token refusal are BOTH 403, so a probe
+                    // reading the code cannot tell "the service applied its rules" from "the
+                    // doorman turned me away" — which is what a process holding a socket and
+                    // nothing else also does. The body is where they differ, so the body is what
+                    // this reads. It also makes secret DRIFT visible: two processes disagreeing
+                    // about the shared secret is otherwise invisible until the console breaks.
+                    if body.contains(DOOR_REFUSAL_MARKER) {
+                        Err(format!(
+                            "answered {code} at the DOOR — the secret this check read is not the \
+                             one the service wants (`{}` / ROZUM_UCC_SSC_SECRET)",
+                            crate::door::secret_path().display()
+                        ))
+                    } else {
+                        Ok(format!("answers {code} from its own rules (through the door)"))
+                    }
                 }
                 Ok(r) => Err(format!("answered {}", r.status().as_u16())),
                 Err(e) => Err(format!("did not answer ({e})")),
