@@ -25,7 +25,7 @@ written.
 
 ```scalascript
 [route, serve, Request, Response](std/http.ssc)
-[readFile, exists, isDir, listDir](std/fs.ssc)
+[readFile, writeFile, exists, isDir, listDir, mkdirs](std/fs.ssc)
 [jsonParse, jsonStringify](std/json.ssc)
 [envOrElse](std/os.ssc)
 
@@ -540,6 +540,90 @@ def chatIncidentsRoute(req: Request): Response =
       if raw.length == 0 || (raw.substring(0, 1) != "[" && raw.substring(0, 1) != "{") then ok("[]")
       else ok("[" + incidentsIn(jsonParse(raw)).mkString(",") + "]")
 
+// ── /control/project/add ───────────────────────────────────────────────────────────────────────
+//
+// Slice 4, and the first route here that WRITES. It creates a directory under the projects root and
+// appends `{name, path}` to `~/.rozum/ucc/projects.json` — files only, no process state, which is
+// what made it the one action route that could move first.
+//
+// The body arrives in three shapes and the Rust handler accepts all three: JSON `{"name": "x"}`,
+// form-encoded `name=x`, or the bare name. Matched rather than narrowed — the console posts one of
+// them and something else may post another.
+
+def uccDir(): String = home() + "/.rozum/ucc"
+def uccConfigPath(): String = uccDir() + "/config.json"
+def projectsExtraPath(): String = uccDir() + "/projects.json"
+
+// `projects_dir` from the UCC config, else `$HOME/work` — the Rust default, kept exactly.
+def projectsRoot(): String =
+  if exists(uccConfigPath()) then
+    val raw = readFile(uccConfigPath())
+    if raw.length == 0 || raw.substring(0, 1) != "{" then home() + "/work"
+    else
+      val cfg = jsonParse(raw)
+      // Through a def taking `Any`, because a type pattern on a LOCAL val matches anything on this
+      // lane (reported upstream; see docs/specs/ucc-ssc-backend.md).
+      val d = strOf(cfg, "projects_dir")
+      if d.length > 0 then d else home() + "/work"
+  else home() + "/work"
+
+def strOf(v: Any, k: String): String =
+  v match
+    case m: Map[String, Any] => m.get(k).map(x => x.toString).getOrElse("")
+    case _ => ""
+
+// The name out of a body that may be JSON, form-encoded, or bare. Mirrors `parse_project_add_body`.
+def projectNameFromBody(body: String): String =
+  val b = trimEnds(body)
+  if b.length == 0 then ""
+  else if b.substring(0, 1) == "{" || b.substring(0, 1) == "[" then strOf(jsonParse(b), "name")
+  else if b.contains("name=") then formField(b, "name")
+  else b
+
+// `k=v&k=v`, the one field we need, percent-decoding left alone: a project NAME with a separator
+// is refused below anyway, and decoding it here would be a second implementation of a rule the
+// guard already enforces.
+def formField(body: String, key: String): String =
+  val hit = body.split("&").toList.filter(kv => kv.length > key.length + 1 &&
+    kv.substring(0, key.length + 1) == key + "=")
+  if hit.length == 0 then "" else hit.mkString("").substring(key.length + 1)
+
+def trimEnds(s: String): String =
+  if s.length == 0 then s
+  else if s.substring(0, 1) == " " || s.substring(0, 1) == "\n" then trimEnds(s.substring(1, s.length))
+  else if s.substring(s.length - 1, s.length) == " " || s.substring(s.length - 1, s.length) == "\n"
+  then trimEnds(s.substring(0, s.length - 1))
+  else s
+
+def projectAddRoute(req: Request): Response =
+  val name = trimEnds(projectNameFromBody(req.body))
+  if name.length == 0 then badRequest("name required")
+  else if name.contains("/") || name.contains("..") then
+    badRequest("name must not contain path separators")
+  else
+    val path = projectsRoot() + "/" + name
+    if exists(path) == false then mkdirs(path)
+    if isDir(path) == false then badRequest("path exists but is not a directory")
+    else
+      // Append only when the PATH is new, exactly as the Rust handler does — posting the same
+      // project twice must not grow the file.
+      val raw = if exists(projectsExtraPath()) then readFile(projectsExtraPath()) else ""
+      val existing = if raw.length > 0 && raw.substring(0, 1) == "[" then jsonParse(raw) else jsonParse("[]")
+      val entries = entryStrings(existing)
+      val already = entries.filter(e => e.contains("\"path\":" + jsonStringify(path))).length > 0
+      if already == false then
+        val added = entries.mkString(",")
+        val sep = if entries.length == 0 then "" else ","
+        mkdirs(uccDir())
+        writeFile(projectsExtraPath(),
+          "[" + added + sep + "{\"name\":" + jsonStringify(name) + ",\"path\":" + jsonStringify(path) + "}]")
+      ok("{\"ok\":true}")
+
+def entryStrings(v: Any): List[String] =
+  v match
+    case l: List[Any] => l.map(e => jsonStringify(e))
+    case _            => []
+
 // ── /view/{token} ──────────────────────────────────────────────────────────────────────────────
 // The read-only console page. The token is the LAST path segment, and it is checked before the file
 // is read — an invalid token must not even reveal whether the page exists.
@@ -631,6 +715,9 @@ def main(): Unit =
   route("GET", "/control/matrix/cell", req => if doorOpen(req) then cellAuthedRoute(req) else noDoor())
   route("GET", "/chat/messages", req => if doorOpen(req) then chatMessagesRoute(req) else noDoor())
   route("GET", "/chat/incidents", req => if doorOpen(req) then chatIncidentsRoute(req) else noDoor())
+  // Slice 4 — the first route here that WRITES. POST, which is why the console's proxy had to
+  // learn the method and the body before this could exist at all.
+  route("POST", "/control/project/add", req => if doorOpen(req) then projectAddRoute(req) else noDoor())
   serve(8412)
 main()
 ```

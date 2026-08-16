@@ -182,9 +182,18 @@ use axum::{response::IntoResponse, routing::{delete, get, post, put}, Router};
         .route("/control/matrix/resume", post(matrix_resume_route))
         .route("/control/matrix/stop", post(matrix_stop_route))
         .route_layer(axum::middleware::from_fn(require_perm_matrix));
-    let projects = Router::new()
-        .route("/control/project/add", post(project_add_route))
-        .route_layer(axum::middleware::from_fn(require_perm_projects));
+    // Slice 4's one ported ACTION route. The gate is unchanged — `require_perm_projects` still
+    // decides who may add a project — and the proxy now carries the method and the body, which it
+    // did not before this slice: it issued a GET whatever it was given, so a POST route routed
+    // through it would have silently become a read of the same path.
+    let projects = match std::env::var("ROZUM_UCC_SSC_ORIGIN").ok().filter(|v| !v.is_empty()) {
+        None => Router::new().route("/control/project/add", post(project_add_route)),
+        Some(origin) => {
+            eprintln!("control server: /control/project/add → {origin} (.ssc)");
+            Router::new().route("/control/project/add", post(ucc_ssc_proxy))
+        }
+    }
+    .route_layer(axum::middleware::from_fn(require_perm_projects));
     // Protected by `require_auth` (own Face ID session OR busi SSO), each sub-router additionally
     // gated on its own permission above.
     let protected = reads.merge(chat).merge(agents).merge(matrix).merge(projects).merge(admin)
@@ -259,6 +268,30 @@ async fn spa_static_route(
 /// An unreachable .ssc server answers 502 rather than falling back to the Rust handler: a silent
 /// fallback would make the switch untestable — it would look like it worked while serving the
 /// implementation it was supposed to replace.
+/// Headers to hand the `.ssc` server with a proxied request.
+///
+/// Everything the client sent EXCEPT its credentials and the framing headers reqwest recomputes.
+/// Handlers need their routing headers — `/chat/post` reads `X-Room` — so an allowlist per route
+/// would be a list to forget to extend. Cookies and `Authorization` are dropped on purpose and it
+/// is the door's whole premise: the `.ssc` server is told THAT a request came through the gate and
+/// nothing about who sent it, so handing it the session cookie would widen exactly what
+/// `docs/specs/ucc-ssc-session.md` argued it never needs.
+fn ucc_ssc_forward_headers(incoming: &axum::http::HeaderMap) -> axum::http::HeaderMap {
+    use axum::http::header;
+    let mut out = axum::http::HeaderMap::new();
+    for (name, value) in incoming.iter() {
+        let drop = matches!(
+            *name,
+            header::COOKIE | header::AUTHORIZATION | header::HOST | header::CONTENT_LENGTH
+                | header::CONNECTION | header::TRANSFER_ENCODING | header::UPGRADE
+        ) || name.as_str() == "proxy-authorization";
+        if !drop {
+            out.append(name.clone(), value.clone());
+        }
+    }
+    out
+}
+
 async fn ucc_ssc_proxy(req: axum::extract::Request) -> axum::response::Response {
     use axum::response::IntoResponse;
     let Some(origin) = std::env::var("ROZUM_UCC_SSC_ORIGIN").ok().filter(|v| !v.is_empty()) else {
@@ -266,8 +299,23 @@ async fn ucc_ssc_proxy(req: axum::extract::Request) -> axum::response::Response 
     };
     let path_and_query = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let url = format!("{}{}", origin.trim_end_matches('/'), path_and_query);
+    // METHOD AND BODY, not just the path. Until slice 4 this proxy issued a GET whatever it was
+    // given, which was invisible while only two GET routes used it and would have turned every
+    // ported action route into a silent read of the same path.
+    let method = reqwest::Method::from_bytes(req.method().as_str().as_bytes())
+        .unwrap_or(reqwest::Method::GET);
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, 8 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            return (axum::http::StatusCode::BAD_REQUEST, format!("body: {e}")).into_response()
+        }
+    };
     // The door, in one place for all three processes that must agree on it (rozum_core::door).
-    let mut out = reqwest::Client::new().get(&url);
+    let mut out = reqwest::Client::new()
+        .request(method, &url)
+        .headers(ucc_ssc_forward_headers(&parts.headers))
+        .body(bytes);
     if let Some(secret) = rozum_core::door::secret() {
         out = out.header(rozum_core::door::HEADER, secret);
     }
@@ -784,4 +832,36 @@ mod tests {
 
 
 
+}
+
+
+#[cfg(test)]
+mod proxy_forward_tests {
+    use super::*;
+
+    #[test]
+    fn the_proxy_forwards_routing_headers_and_drops_credentials() {
+        use axum::http::{HeaderMap, HeaderValue, header};
+        let mut h = HeaderMap::new();
+        h.insert("x-room", HeaderValue::from_static("rozum"));
+        h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+        h.insert(header::COOKIE, HeaderValue::from_static("rozum_sess=secret"));
+        h.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer x"));
+        h.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8411"));
+        h.insert(header::CONTENT_LENGTH, HeaderValue::from_static("12"));
+
+        let out = ucc_ssc_forward_headers(&h);
+
+        // A handler needs its routing headers — `/chat/post` reads `X-Room` — and its content type.
+        assert_eq!(out.get("x-room").unwrap(), "rozum");
+        assert_eq!(out.get(header::CONTENT_TYPE).unwrap(), "text/plain");
+        // The credentials are the door's whole premise: the `.ssc` server learns THAT a request
+        // came through the gate and nothing about who sent it.
+        assert!(out.get(header::COOKIE).is_none(), "the session cookie must not be forwarded");
+        assert!(out.get(header::AUTHORIZATION).is_none(), "nor any other credential");
+        // Framing headers are recomputed from the body reqwest is given; forwarding them makes a
+        // request that contradicts itself.
+        assert!(out.get(header::HOST).is_none());
+        assert!(out.get(header::CONTENT_LENGTH).is_none());
+    }
 }
