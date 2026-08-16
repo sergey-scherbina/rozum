@@ -1,6 +1,0 @@
-feature/bound-stream-creation 2026-08-16T11:29:07Z
-agent: claude-code
-heartbeat: 2026-08-16T11:29:07Z
-status: in-progress
-done-so-far: both 9B bench hangs traced - turns 13-22s then ONE gap (1116s, 1674s) ended by RUN_TIMEOUT not by the 120s gen timeout; chat_or_loopbreak().await is unbounded, with_gen_timeout only wraps the stream it returns
-next: bound stream creation with the same ceiling, test, then re-run the 9B
