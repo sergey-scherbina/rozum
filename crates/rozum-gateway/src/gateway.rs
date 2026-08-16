@@ -2028,6 +2028,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tool_body_being_written_is_not_mistaken_for_a_wedge() {
+        // The 14-token stall, at the level the watchdog sees it. A backend generating a long
+        // tool-call body emits nothing user-visible for as long as the body takes — measured
+        // 2026-08-16 on Qwen3.5-9B: 14 tokens of preamble, then 120 s of silence and an abort,
+        // four times over on the identical prompt, on a decode running at 2.2-3.1 tok/s where any
+        // tool body over ~360 tokens could not finish. `ChatEvent::Progress` is the liveness tick
+        // that closes that gap; it carries nothing and the wire encoders ignore it.
+        let ticking: ChatStream = Box::pin(async_stream::stream! {
+            yield Ok(ChatEvent::TextDelta { text: "I'll write the file".into() });
+            for _ in 0..12 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                yield Ok(ChatEvent::Progress);          // the body, being written
+            }
+            yield Ok(ChatEvent::ToolUseStart { id: "t1".into(), name: "Write".into() });
+            yield Ok(ChatEvent::ToolUseEnd { id: "t1".into() });
+            yield Ok(ChatEvent::Done { input_tokens: 0, output_tokens: 20, stop_reason: StopReason::ToolUse });
+        });
+        let cancel = CancellationToken::new();
+        let mut s = with_gen_timeout(ticking, cancel.clone(), Duration::from_millis(60), 0xD1D1_u64);
+        let (mut ticks, mut finished, mut aborted) = (0, false, false);
+        while let Some(ev) = s.next().await {
+            match ev {
+                Ok(ChatEvent::Progress) => ticks += 1,
+                Ok(ChatEvent::Done { .. }) => finished = true,
+                Err(ModelError::Timeout(_)) => aborted = true,
+                _ => {}
+            }
+        }
+        assert!(!aborted, "a backend ticking every 20ms is alive, not wedged");
+        assert!(finished, "the generation must reach Done");
+        assert_eq!(ticks, 12, "the ticks pass through for the watchdog to see");
+        assert!(!cancel.is_cancelled(), "nothing to cancel — it never timed out");
+
+        // And the guard still bites when the silence is real: same gap, no ticks.
+        let silent: ChatStream = Box::pin(async_stream::stream! {
+            yield Ok(ChatEvent::TextDelta { text: "I'll write the file".into() });
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            yield Ok(ChatEvent::Done { input_tokens: 0, output_tokens: 5, stop_reason: StopReason::EndTurn });
+        });
+        let cancel2 = CancellationToken::new();
+        let mut s2 = with_gen_timeout(silent, cancel2.clone(), Duration::from_millis(60), 0xD2D2_u64);
+        let mut saw_timeout = false;
+        while let Some(ev) = s2.next().await {
+            if matches!(ev, Err(ModelError::Timeout(_))) {
+                saw_timeout = true;
+            }
+        }
+        assert!(saw_timeout, "real silence must still abort");
+        assert!(cancel2.is_cancelled());
+    }
+
+    #[tokio::test]
     async fn gen_timeout_aborts_stalled_stream() {
         // A backend that produces nothing for far longer than the inactivity window.
         let inner: ChatStream = Box::pin(async_stream::stream! {

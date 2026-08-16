@@ -712,6 +712,9 @@ async fn run_attempt(backend: &Arc<dyn ChatBackend>, req: ChatRequest) -> TurnOu
     let mut cur: Option<(String, String, String)> = None;
     while let Some(ev) = stream.next().await {
         match ev {
+            // Progress is a liveness tick, not output: it exists so the inactivity watchdog can tell a backend that is
+            // generating a long tool-call body from one that has wedged. Nothing to render.
+            Ok(ChatEvent::Progress) => {}
             Ok(ChatEvent::TextDelta { text }) => o.text.push_str(&text),
             Ok(ChatEvent::ToolUseStart { id, name }) => cur = Some((id, name, String::new())),
             Ok(ChatEvent::ToolUseDelta { input_json_delta, .. }) => {

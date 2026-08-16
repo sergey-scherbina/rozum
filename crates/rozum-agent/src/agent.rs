@@ -460,6 +460,9 @@ async fn collect_turn(
 
     while let Some(ev) = stream.next().await {
         match ev.map_err(|e| e.to_string())? {
+            // Progress is a liveness tick, not output: it exists so the inactivity watchdog can tell a backend that is
+            // generating a long tool-call body from one that has wedged. Nothing to render.
+            ChatEvent::Progress => {}
             ChatEvent::TextDelta { text: t } => {
                 observer.on_text(&t);
                 text.push_str(&t);

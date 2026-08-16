@@ -3019,6 +3019,25 @@ mod inner {
                             }
                         }
                     }
+                } else {
+                    // A TOOL-CALL BODY GENERATES IN SILENCE, AND SILENCE IS WHAT THE WATCHDOG KILLS.
+                    //
+                    // Once `tool_seen` is set nothing above emits again until `finalize`, because
+                    // the markup and its JSON are not user-visible text. That is right for the
+                    // WIRE and wrong for liveness: `serving::with_gen_timeout` bounds the gap
+                    // between EVENTS, so a model writing a long tool call looks exactly like a
+                    // model that has wedged, and gets aborted mid-answer.
+                    //
+                    // Measured (2026-08-16, Qwen3.5-9B `duration`): ttft 26.5 s, exactly 14 tokens
+                    // of preamble, then the `<tool_call>` marker, then 120 s of nothing and a
+                    // `generation_timeout` — four times over on the identical prompt, 500 s of a
+                    // 900 s run. At the 2.2-3.1 tok/s those very requests logged, ANY tool body
+                    // over ~360 tokens was unreachable, and writing a whole file through `Write`
+                    // is routinely more than that.
+                    //
+                    // So tick. `Progress` carries nothing and every wire encoder ignores it; its
+                    // only job is to say the backend is alive to the one component that is asking.
+                    let _ = self.job.events.send(Ok(ChatEvent::Progress));
                 }
             }
             true

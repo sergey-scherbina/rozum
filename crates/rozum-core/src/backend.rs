@@ -243,6 +243,8 @@ pub enum ChatEvent {
         output_tokens: u32,
         stop_reason: StopReason,
     },
+    /// The backend is alive and generating, with nothing user-visible to show yet.
+    Progress,
 }
 
 pub type ChatStream = Pin<Box<dyn futures::Stream<Item = ModelResult<ChatEvent>> + Send>>;

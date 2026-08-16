@@ -332,6 +332,9 @@ pub(crate) fn oai_sse_stream(
 
         while let Some(ev) = events.next().await {
             match ev {
+                // Progress is a liveness tick, not output: it exists so the inactivity watchdog can tell a backend that is
+                // generating a long tool-call body from one that has wedged. Nothing to render.
+                Ok(ChatEvent::Progress) => {}
                 Ok(ChatEvent::TextDelta { text }) => {
                     // Send role on first delta
                     if !role_sent {
@@ -435,6 +438,9 @@ pub(crate) async fn oai_collect(
 
     while let Some(ev) = events.next().await {
         match ev {
+            // Progress is a liveness tick, not output: it exists so the inactivity watchdog can tell a backend that is
+            // generating a long tool-call body from one that has wedged. Nothing to render.
+            Ok(ChatEvent::Progress) => {}
             Ok(ChatEvent::TextDelta { text: t }) => text.push_str(&t),
             Ok(ChatEvent::ToolUseStart { id, name }) => {
                 current_tool = Some((id, name, String::new()));

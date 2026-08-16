@@ -443,6 +443,9 @@ pub(crate) fn responses_sse_stream(
 
         while let Some(ev) = events.next().await {
             match ev {
+                // Progress is a liveness tick, not output: it exists so the inactivity watchdog can tell a backend that is
+                // generating a long tool-call body from one that has wedged. Nothing to render.
+                Ok(ChatEvent::Progress) => {}
                 Ok(ChatEvent::TextDelta { text: t }) => {
                     if msg_id.is_none() {
                         let mid = new_id("msg");
@@ -600,6 +603,9 @@ pub(crate) async fn responses_collect(
 
     while let Some(ev) = events.next().await {
         match ev {
+            // Progress is a liveness tick, not output: it exists so the inactivity watchdog can tell a backend that is
+            // generating a long tool-call body from one that has wedged. Nothing to render.
+            Ok(ChatEvent::Progress) => {}
             Ok(ChatEvent::TextDelta { text: t }) => text.push_str(&t),
             Ok(ChatEvent::ToolUseStart { id, name }) => {
                 let raw_name = name;

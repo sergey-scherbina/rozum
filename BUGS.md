@@ -1,5 +1,43 @@
 # Bugs
 
+## BUG-058 — a tool-call body generates in silence, and the inactivity watchdog kills it as a wedge
+
+- **Status:** FIXED 2026-08-16 (`ChatEvent::Progress` + the tick in `BatchSeq::push`).
+- **Severity:** P1 on slow models. It aborts CORRECT, in-progress answers, and the symptom reads as
+  "the model is slow" or "the model wedged" — it was mis-read as both, twice, before being found.
+
+This is the open half BUG-057 left. `BatchSeq::push` streams the growing text until the
+`<tool_call>` marker appears, sets `tool_seen`, and from then on the whole `if !self.tool_seen`
+block is skipped — nothing is emitted again until `finalize()`. That is correct for the WIRE (the
+markup and its JSON are not user-visible text) and wrong for LIVENESS: `serving::with_gen_timeout`
+bounds the gap between EVENTS, so a model writing a long tool call is indistinguishable from a model
+that has stopped, and gets aborted mid-answer.
+
+**The arithmetic is what makes it a P1.** Those same requests logged 2.2-3.1 tok/s. At 3 tok/s the
+120 s inactivity window is **~360 tokens** — and a `Write` carrying a whole source file is routinely
+more than that. So on a slow model, a class of correct answers could not be delivered at all.
+
+**Observed (Qwen3.5-9B, `duration`, from `~/.rozum/gateway.jsonl`):** ttft 26.5 s, exactly 14 output
+tokens of preamble, then silence to the 120 s timeout, `stop_reason: incomplete` — four times over
+on a byte-identical prompt, 500 s of a 900 s run.
+
+**Fix.** A `ChatEvent::Progress` variant: a liveness tick carrying nothing, emitted per token while
+the tool body accumulates. The watchdog counts it, the meter ignores it (no ttft, no token count),
+and every wire encoder drops it. The blast radius was measured rather than guessed before choosing
+this over an empty `TextDelta`: eight non-exhaustive matches across four files, each given an
+explicit arm saying why it renders nothing.
+
+**Regression test:** `a_tool_body_being_written_is_not_mistaken_for_a_wedge` — a stream ticking
+every 20 ms across a window of 60 ms reaches `Done` un-aborted and un-cancelled, and the same gap
+with no ticks still aborts. The second half matters as much as the first: the watchdog exists for
+real wedges (BUG-055's hangs) and must keep biting.
+
+**Why it took three passes to find.** First reading: "the 9B is too slow to finish agentic work"
+(a mean over a bimodal distribution — BUG-055). Second: "the model did the work and would not stop"
+(the no-stop-after-success loop — it was one prompt re-sent, BUG-057). Only reading the per-request
+events showed 14 tokens and then nothing, and only then did the token-emission loop explain why 14.
+Each reading was of the same runs; the difference was how closely the evidence was looked at.
+
 ## BUG-057 — a request that stalls in decode is re-sent unchanged, and each retry costs a full inactivity timeout
 
 - **Status:** FIXED 2026-08-16 (`serving.rs`: `request_signature` + `STALLED` tracker; the third
