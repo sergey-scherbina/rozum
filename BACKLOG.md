@@ -318,19 +318,24 @@ single-writer daemon). Each item below is its own spec+build later — listed to
 
 ## ScalaScript rust-lane divergences found by the UCC port (2026-08-16)
 
-Three, all SILENT — wrong answers or a dead server, never a compile error. Measured with probes
+TWO, not the three first written down — the third did not survive being reduced to a minimal case,
+which is the argument for reducing before filing. Both SILENT — wrong answers or a dead server, never a compile error. Measured with probes
 that ran the same source on `ssc run` and `ssc build-rust`; the interpreter is right in all three.
 Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
 
-- [ ] **ssc-jsonparse-panics-poisons-server** — `jsonParse` panics on unparseable input and the http
-  runtime's `unwrap()` then poisons its mutex, so every LATER request on that server fails with
-  `PoisonError` while the process stays up. One blank line at the end of one `.jsonl` file did it.
-  Carry upstream first: a server that dies permanently on one malformed byte is a different class
-  from a wrong answer.
-- [ ] **ssc-map-pattern-matches-array** — `case m: Map[String, Any]` also matches a JSON array, so
-  arm ORDER silently decides the result.
-- [ ] **ssc-take-after-map-empty** — `take(n)` on the result of `map` over a `List[Any]` returns
-  empty; `drop`/`filter`/`sorted` on the same list are correct.
+- [ ] **ssc-serve-dies-permanently-after-one-handler-panic** — one `jsonParse` on a blank line
+  panics a worker, the http runtime's `unwrap()` on its own mutex then fails for every LATER
+  request, and the process stays up answering nothing. Filed upstream 2026-08-16 with a repro that
+  shows `/ok` alive → `/boom` panic → `/ok` silent forever. Note the interpreter REFUSES cleanly
+  (`ssc: invalid JSON`), so the report is about the server's survival, not about the two lanes
+  disagreeing.
+- [ ] **ssc-type-pattern-on-a-local-val-matches-anything** — `case m: Map[String, Any]` takes a
+  JSON ARRAY when the scrutinee is a local `val`; the same match on a PARAMETER is correct. Filed
+  upstream 2026-08-16 (`scalascript` INBOX, repro
+  `examples/reported/rust-type-pattern-on-a-local-val-matches-anything.ssc`).
+- [x] ~~**ssc-take-after-map-empty**~~ — **WITHDRAWN, not a defect.** Reducing it for the upstream
+  report showed `take` correct on both lanes; the list began with an empty string, so `take(1)`
+  returned what it should have. The empty answer came from the entry above.
 
 ## Agentic-bench fix candidates (from matrix-failure-analysis)
 

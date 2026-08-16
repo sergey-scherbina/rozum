@@ -318,12 +318,19 @@ implementation behind two doors, not a third copy.
 Slice 1 filed five; these are the next three, and what makes them expensive is that none is a
 compile error. Each was found by building a probe that ran the same code on both lanes.
 
-1. **`case m: Map[String, Any]` matches a JSON ARRAY.** With the object arm written first, every
-   bare-array `rooms.json` — the shape this machine has — took the object branch, found no `rooms`
-   key, and answered "no such room" for every room. Ordering the List arm first is the workaround;
-   `tokenListHas` has always done that, which is why the deployed routes never hit it.
-2. **`take(n)` after `map` over a `List[Any]` returns EMPTY.** `drop`, `filter` and `sorted` on the
-   same list are correct, and `take` on a list literal is correct.
+1. **A type pattern on a local `val` matches ANYTHING** — sharpened 2026-08-16 while reducing it
+   for the upstream report, and the sharpening changes the rule. It is not about arm order: the
+   same match is correct when the scrutinee is a PARAMETER and wrong when it is a local `val`, on
+   which `case m: Map[String, Any]` takes a JSON array. Every bare-array `rooms.json` therefore
+   took the object branch, found no `rooms` key, and answered "no such room" for every room.
+   Reordering the arms happened to fix it because it removed the local-val match; passing the
+   parsed value into a function is the rule that actually holds.
+2. ~~**`take(n)` after `map` over a `List[Any]` returns EMPTY.**~~ **WITHDRAWN 2026-08-16 — not a
+   defect, and the withdrawal is the more useful record.** Reducing it to a minimal case for the
+   upstream report showed `take` behaving correctly on both lanes. The list I was taking from began
+   with an empty string — the first room in `rooms.json` is not the one being looked up — so
+   `take(1)` returned exactly what it should have, and the empty answer came from (1). Filing it
+   would have cost someone else the hour it cost me.
 3. **`jsonParse` PANICS on unparseable input, and the http runtime then poisons its mutex.** One
    blank line at the end of one `.jsonl` file killed every subsequent request on that server with
    `PoisonError` — the process stays up and answers nothing. Guarded by only handing `jsonParse`

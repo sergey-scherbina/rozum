@@ -389,13 +389,13 @@ def roomRootIn(entries: Any, name: String): String =
     case l: List[Any] =>
       // Indexed rather than `headOption`: this lane lowers a parenless collection member as a Rust
       // FIELD access and refuses it, which the compiler says in so many words.
-      // NOT `take(1)`, and this one cost a build to find: after a `map` over a `List[Any]`,
-      // `take(n)` returns EMPTY in the rust lane while `drop`, `filter` and `sorted` on the same
-      // list are correct — measured with a probe built both ways (the interpreter is right). A
-      // silent wrong answer rather than a compile error, which is why it reached a running server
-      // before it was noticed. `filter` + `mkString` is exact here for a second reason worth
-      // stating: `rooms.json` is a name→root MAPPING, so at most one entry matches and joining
-      // them cannot differ from taking the first.
+      // `filter` + `mkString`, and the reason is NOT what an earlier version of this comment said.
+      // It blamed `take(n)` after `map` for returning empty; that was wrong — the mapped list
+      // begins with an empty string (the first room is not the one being looked up), so `take(1)`
+      // returned exactly what it should have, and the empty answer came from the type-pattern
+      // defect above. `filter` + `mkString` is exact here because `rooms.json` is a name→root
+      // MAPPING: at most one entry matches, so joining the matches cannot differ from taking the
+      // first.
       l.map(e => roomRootOf(e, name)).filter(r => r.length > 0).mkString("")
     case _ => ""
 
