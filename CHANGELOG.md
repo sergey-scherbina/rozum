@@ -1,5 +1,19 @@
 # Changelog
 
+## launch-connect-to-a-named-gateway — a run can now be pointed at the build it means to measure
+Completed: 2026-08-16
+
+`rozum launch --gateway-url http://127.0.0.1:PORT` connects to a gateway instead of resolving one
+from the registry, which is what "did my change move the matrix?" needs and what `BENCH_GATEWAY_URL`
+could never deliver. The named gateway is not managed — no failover respawn, no client lease, no
+idle takeover — while the launch-local proxy is kept, because that is where the decode policy is
+stamped. Loopback only; the model comes from the target's own `/v1/models`.
+
+`agentic.sh` steers instead of refusing, and the guard it used to need is gone with the
+impossibility. Proven the same way the defect was found: a recording proxy in front of the gateway
+captured the agent's request, where this morning it captured zero. That capture also settled a
+question several entries had been reasoning about — Claude Code sends NO sampling knobs at all.
+
 ## ucc-ssc-backend slice 5 — /chat/post, and the port reaches its floor
 Completed: 2026-08-16
 

@@ -360,7 +360,11 @@ Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
 
 ## Agentic-bench fix candidates (from matrix-failure-analysis)
 
-- [ ] **launch-connect-to-a-named-gateway** — `rozum launch` cannot be TOLD which gateway to use.
+- [x] ~~**launch-connect-to-a-named-gateway**~~ — DONE 2026-08-16. `--gateway-url` connects instead
+  of resolving; the named gateway is deliberately NOT managed (no failover, no lease, no takeover)
+  and the launch-local proxy is kept because that is where the decode policy is stamped. Loopback
+  only. `agentic.sh` steers instead of refusing. Original entry:
+- [x] ~~superseded:~~ **launch-connect-to-a-named-gateway** — `rozum launch` cannot be TOLD which gateway to use.
   `ensure_shared_gateway` (`src/main.rs:3653`) reads the active-gateway registry and reuses whatever
   it names; `--port` only says where to spawn one if none is running. So `BENCH_GATEWAY_URL`, and
   any other "measure THIS gateway" intent, cannot reach the agent — measured 2026-08-15 with a
