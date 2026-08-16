@@ -1,0 +1,6 @@
+feature/meeting-socket-ownership 2026-08-16T00:48:03Z
+agent: claude-code
+heartbeat: 2026-08-16T00:48:03Z
+status: not-started
+done-so-far: spec already written (docs/specs/meeting-socket-ownership.md); doctor half already shipped — verified live, the row says "owns the socket"
+next: hold a lock beside the socket before touching it; the loser refuses instead of unlinking
