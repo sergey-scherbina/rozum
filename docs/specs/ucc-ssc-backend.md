@@ -401,3 +401,19 @@ and escape-aware strip of whitespace outside strings — is the only spelling th
 under `clients/control/launchd/`. It carries `SSC_HTTP_BIND`, the working directory the cell route
 depends on, and now `ROZUM_BIN`. A service whose definition lives only on one disk is one
 reinstall from being gone; filed in BACKLOG as `ucc-ssc-plist-not-in-repo`.
+
+
+## The two primitives, filed upstream (2026-08-16)
+
+Both gaps that stop the port are now reports in scalascript's INBOX, each with a runnable example
+under `examples/reported/` built and measured with `build-rust`:
+
+- `process-needs-a-detached-spawn` — `exec` waits for the child (a `/bin/sleep 2` costs the handler
+  2.14 s, measured), so no launch route can move. `spawn(...) -> Child(pid)` would be enough;
+  killing already works through `exec("kill", …)`.
+- `process-needs-a-stdin-pipe` — `ProcessOptions` has no stdin, so a secret can only travel in argv
+  where `ps` shows it. `messenger/bot/add` stays Rust for that reason and no other.
+
+Filed as FEATURES and registered rather than routed (their P-3.3: `lane`/`area` are the triager's
+judgement). If either lands, the corresponding routes become a port rather than a design question —
+which is the whole reason to write them down as primitives instead of as "the rest of slice 4".
