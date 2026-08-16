@@ -1,5 +1,20 @@
 # Changelog
 
+## ucc-ssc-backend slice 4 — nine action routes on ScalaScript, and one that must never move
+Completed: 2026-08-16
+
+`/control/project/add` and eight of nine `messenger/*` are served by the `.ssc` program behind their
+existing gates. The console's proxy had to learn the method and the body first: it issued a GET
+whatever it was given, so a ported POST would have become a silent read of the same path.
+
+`messenger/bot/add` stays Rust as a rule, not a backlog item — it passes the bot token to the child
+on stdin so it never reaches an argv, and the toolkit's `exec` has no stdin.
+
+Accepted the way a mutating route has to be: both implementations in isolated `HOME`s, the Rust half
+as a second console with its own admin fixture, comparing responses AND the files each wrote — 14
+requests byte-identical, registries byte-identical with Cyrillic values intact. The operator's
+registries, bots and launchd jobs were never in the experiment.
+
 ## ucc-ssc-backend slice 3 — three read routes on ScalaScript, and what the acceptance caught
 Completed: 2026-08-16
 

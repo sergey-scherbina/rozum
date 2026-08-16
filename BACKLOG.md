@@ -316,6 +316,15 @@ single-writer daemon). Each item below is its own spec+build later — listed to
     ever built, this is a two-line addition to `call_result_value`, not a rediscovery.
   - Spec so far: `docs/specs/mcp-toolsource.md`.
 
+## `com.rozum.ucc-ssc` has no plist in the repo (found 2026-08-16 during slice 4)
+
+- [ ] **ucc-ssc-plist-not-in-repo** — seven jobs keep their launchd definition under
+  `clients/control/launchd/`; this one exists only in `~/Library/LaunchAgents`. It carries
+  `SSC_HTTP_BIND=127.0.0.1` (without it the ScalaScript runtime binds 0.0.0.0 — measured), the
+  working directory the cell route resolves `scripts/bench/results` against, and now `ROZUM_BIN`
+  for the messenger routes' `exec`. A service whose definition lives on one disk is one reinstall
+  from being gone, and BUG-030 is the same story about a binary.
+
 ## ScalaScript rust-lane divergences found by the UCC port (2026-08-16)
 
 TWO, not the three first written down — the third did not survive being reduced to a minimal case,

@@ -2325,9 +2325,15 @@ survives exactly one context rotation. Order is mine to change; scope and the re
     second language. Verified against the Rust handlers side by side on live data: chat 22/22,
     cell 1983/1983 byte-identical. Found and fixed a divergence slice 1 had shipped (`task_info`
     key order, in both places), and three SILENT rust-lane compiler divergences (BACKLOG).
-  - [ ] **slice 4 — the 23 action routes.** Needs the spawn/registry primitives the entry names.
-    Now genuinely next: the session question is answered, the door is closed, and the read slice
-    proved the shape works on real traffic.
+  - [x] **slice 4 — DONE 2026-08-16: nine routes moved, and one is ruled out for good.**
+    `/control/project/add` + eight of nine `messenger/*`; the proxy learned METHOD and BODY first.
+    `messenger/bot/add` must NOT move — it passes the bot token on stdin, which `std/process.ssc`
+    has no way to do, so a port would put a live token in an argv. Accepted in two sandboxed
+    `HOME`s (responses AND files), so the operator's registries were never touched.
+  - [ ] **slice 5 — what is left, and why.** `chat/post` (portable; needs a scratch-room fixture
+    so its acceptance does not post into real rooms). The launch routes stay blocked on a DETACHED
+    spawn primitive that no backend offers — `exec` waits for the child. Everything else reads or
+    mutates state inside the gateway process and cannot move at all.
 
 ## Sprint
 

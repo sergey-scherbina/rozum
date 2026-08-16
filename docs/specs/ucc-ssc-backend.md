@@ -340,7 +340,7 @@ compile error. Each was found by building a probe that ran the same code on both
 is a different class of problem from a wrong answer.
 
 
-## Slice 4 — measured, not started (2026-08-16)
+## Slice 4 — nine routes moved (2026-08-16)
 
 Classified before any porting, the same way slices 1 and 3 were, because the answer again decides
 the size of the slice rather than the order of the work:
@@ -363,3 +363,41 @@ header names JVM, Node and Browser backends and not Rust.
 So slice 4 is two routes' worth of porting behind one toolkit question, and the honest order is:
 measure `exec` on the rust lane first; if it works, the messenger seven come with it; the launch
 routes need a `spawn` that does not exist yet in any backend.
+
+
+### Slice 4, done: what moved and what did not
+
+**Moved (9):** `/control/project/add` and eight of the nine `messenger/*`. The proxy had to learn
+the METHOD and the BODY first — it issued a GET whatever it was given, which was invisible while
+only GET routes used it and would have turned every ported action route into a silent read.
+
+**`messenger/bot/add` must not move**, and this is a rule rather than a scheduling note: it hands
+the bot token to the child on STDIN so it never reaches an argv, and `std/process.ssc` has no
+stdin. Porting it would put a live token on a command line every local process can read.
+
+**Still Rust, unchanged from the table above:** the four matrix-queue routes, `gateway/{load,stop}`,
+`task`, `chat/stream` — all process-global — and every launch route, blocked on a DETACHED spawn
+that no backend offers.
+
+**`chat/post` was left for last on purpose.** It is portable (an HTTP POST to the meeting daemon,
+and the toolkit has `httpPost`), but its acceptance would post real messages into the operator's
+rooms; doing it properly needs a scratch room, which is a fixture this slice did not have.
+
+### Two things the acceptance had to invent, both worth keeping
+
+**A mutating route cannot be accepted by comparing a server against its own previous deploy.** Both
+implementations ran in isolated `HOME`s — the Rust half as a second console on :8421 with its own
+admin session fixture — and the comparison was over what each ANSWERED and what each WROTE. The
+operator's registries, bots and launchd jobs were never in the experiment.
+
+**Formatting is part of the bytes.** The CLI prints `--json` pretty and the Rust wrapper
+re-serializes it compact. Passing the child's text through was wrong by whitespace; re-serializing
+in `.ssc` was wrong by key order (`jsonStringify` of a parsed value sorts). Compacting — a quote-
+and escape-aware strip of whitespace outside strings — is the only spelling that matches on both.
+
+### One gap this slice did not create but did surface
+
+`com.rozum.ucc-ssc`'s plist exists on the machine and NOWHERE in the repo — unlike the seven jobs
+under `clients/control/launchd/`. It carries `SSC_HTTP_BIND`, the working directory the cell route
+depends on, and now `ROZUM_BIN`. A service whose definition lives only on one disk is one
+reinstall from being gone; filed in BACKLOG as `ucc-ssc-plist-not-in-repo`.
