@@ -428,12 +428,19 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   time: difficulty was set by the SHAPE of the task instead of by what the models lack.**
   - `leapday` — defect two calls below the failing test, no signpost. 4B: **3/3**. Too easy: the
     Gregorian rule is known to every model, the task only asked where to apply it.
-  - `board` — four interacting rules, nothing to recall. 4B **0/3**, 9B **0/3** with two repair
-    rounds each, 314–637 s per cell. Too hard, and not on the intended axis.
-  - The evidence says why: 4B dies on `expected &str, found String`, 9B on `cannot borrow as
+  - `board` — four interacting rules, nothing to recall. Recorded as 4B **0/3**, 9B **0/3**,
+    314–637 s per cell. ⚠️ **VOID: all six cells were ended by the loop-breaker, not by the
+    models** (BUG-054, replayed 2026-08-16 over the kept transcripts). The compile errors quoted
+    below were real, but whether either model would have worked past them is unknown, because
+    neither was allowed to keep going.
+  - ~~The evidence says why: 4B dies on `expected &str, found String`, 9B on `cannot borrow as
     mutable because it is also borrowed as immutable`. **Neither reaches the rules.** The ceiling on
     this stack is Rust's type and borrow system, not reasoning — so any "write something non-trivial
-    from scratch" task hits that wall first and hides the difference behind it.
+    from scratch" task hits that wall first and hides the difference behind it.~~ **Withdrawn.**
+    The two errors were observed, the conclusion drawn from them was not earned: those runs were
+    aborted at the point the error appeared, so "never reaches the rules" describes what we did to
+    them. `duration` was designed against this claim and turned out well anyway, which is luck and
+    should be read as such.
 
   **Attempts four and five, measured 2026-08-16.** The fourth (`apportion`) was the third one
   again in different arithmetic — compiling skeleton, failing test, plausible half-fix — and the
@@ -444,10 +451,20 @@ single-writer daemon). Each item below is its own spec+build later — listed to
 
   | task | 4B × 3 | what the evidence says |
   |---|---|---|
-  | `leapday` | 3/3 | rule is common knowledge; only "where" was asked |
-  | `board` | 0/3 | borrow checker, never reached the rules (9B 0/3 too) |
-  | `apportion` | 0/3 | 193/397/872 s, uniform `false_success_after_error` — no diagnosis in it |
-  | `duration` | 0/3 | **graded and diagnosable — see below** |
+  | `leapday` | 3/3 | rule is common knowledge; only "where" was asked. Passing cells, so unaffected |
+  | `board` | ~~0/3~~ VOID | all six cells (4B and 9B) ended by the loop-breaker, not by the models |
+  | `apportion` | ~~0/3~~ VOID | all three cells ended by the loop-breaker; never reached `cargo test` |
+  | `duration` | 0/3 → **1/3** | the 0/3 was also aborted; re-run after the fix, and the failures are now the models' own |
+
+  **How much of the record this touched, measured rather than assumed.** The fixed detector was
+  replayed over every kept transcript: 36 runs carry a loop-breaker message and **28 of them are
+  false stops** — including all six `board` cells and all three `apportion` cells. The other 8 are
+  genuine churn and would still fire today. The contaminated cells also span the historical matrix
+  (GLM-4-9B `fix`/`debug`, GLM-4-32B+gpt-oss `fix`, Qwen3-4B `greet`, several codex cells), so any
+  conclusion drawn from a RED cell in those runs deserves the same check before it is quoted.
+  `scripts/bench/agentic_triage.py` now files such a run as `stopped_by_loopbreaker` ahead of every
+  other class, because the "false success" it used to report was the model obeying our own
+  injected instruction to stop and report in one line.
 
   `duration` moves the difficulty out of the feedback loop: `cargo test` is green on arrival and
   stays green, the seeded tests cover only part of the spec, and days plus the all-zero case live

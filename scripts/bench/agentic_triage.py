@@ -52,6 +52,13 @@ COMPILE_ERROR_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 TIMEOUT_RE = re.compile(r"(RUN_TIMEOUT|timed out|timeout|max turns|error_max_turns)", re.IGNORECASE)
+# The gateway's loop-breaker replacing the model's turn (`crates/rozum-gateway/src/loopbreak.rs`).
+# All four of its signatures end with this phrase, and the Rust side has a test
+# (`every_loopbreak_message_carries_the_triage_sentinel`) asserting they still do — so rewording a
+# message for the model fails there, beside the string, instead of silently going unrecognised
+# here in another language.
+LOOPBREAKER_SENTINEL = "Stopping to avoid"
+LOOPBREAKER_RE = re.compile(re.escape(LOOPBREAKER_SENTINEL))
 
 SOURCE_ARTIFACTS = [
     re.compile(r"\b(?:collect|args|else|if|match|return|let|fn|use|mod|impl|struct|enum)\d+\b"),
@@ -198,6 +205,27 @@ def classify_workdir(path: Path, explicit_log: Path | None = None) -> dict[str, 
 
     if passed == "1" or (verify_text and "FAIL" not in verify_text and "PASS" in verify_text):
         return result(path, "pass", "verification passed", ["verify_pass"], task=task, agent=agent, model=model, passed="1", timeout=timeout, rc=rc)
+
+    # THE GATEWAY STOPPED THIS RUN, so nothing after that point is the model's doing — and this
+    # check has to come FIRST for exactly that reason. The loop-breaker replaces the model's turn
+    # with "stop and report in one line"; the model then reports in one line, and every later check
+    # here reads that as the model's own choice. All three `duration` cells were filed as
+    # `false_success_after_error` (2026-08-16) when the success claim was the injected instruction
+    # being obeyed. BUG-054 fixed the misfire; this makes the remaining, legitimate stops legible
+    # instead of blaming the model for them, and it costs one grep.
+    if LOOPBREAKER_RE.search(log_text):
+        return result(
+            path,
+            "stopped_by_loopbreaker",
+            "the gateway's loop-breaker ended this run — the outcome is not the model's",
+            ["loopbreaker_stop"],
+            task=task,
+            agent=agent,
+            model=model,
+            passed="0",
+            timeout=timeout,
+            rc=rc,
+        )
 
     needs_rust_project = task != "greet"
     cargo_toml = path / "Cargo.toml"

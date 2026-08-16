@@ -2087,6 +2087,50 @@ mod tests {
     }
 
     #[test]
+    fn every_loopbreak_message_carries_the_triage_sentinel() {
+        // `scripts/bench/agentic_triage.py` recognises a stopped run by the phrase "Stopping to
+        // avoid", and files it as `stopped_by_loopbreaker` rather than blaming the model for what
+        // it did after we ended its turn. That reader is in another language and cannot be
+        // compiled against these strings, so this test is the join: reword a message and it fails
+        // HERE, next to the string, instead of the triage quietly going blind and every aborted
+        // cell being filed as a model failure again. Change both, or neither.
+        //
+        // Drives `detect_stuck_loop` for each signature rather than asserting over the source
+        // text, so a message that is unreachable does not pass by existing.
+        const SENTINEL: &str = "Stopping to avoid";
+
+        let sig1 = {
+            // Identical failing call, three in a row.
+            let args = json!({ "old_string": "s.to_string()", "new_string": "s.chars().rev().collect()" });
+            let mut m = vec![Message::user("fix it")];
+            for i in 0..3 {
+                let id = format!("call_{i}");
+                m.push(asst(tool_use(&id, "Edit", args.clone())));
+                m.push(tool_err(&id, true));
+            }
+            detect_stuck_loop(&m).expect("signature 1 must fire")
+        };
+        let sig3 = {
+            // Ping-pong edit churn.
+            let m = vec![
+                Message::user("fix the reverse bug"),
+                cc_edit("c0", "src/main.rs", "s.to_string()", "s.chars().rev().collect::<String>()"),
+                cc_edit("c1", "src/main.rs", "s.chars().rev().collect::<String>()", "s.chars().rev().collect()"),
+                cc_edit("c2", "src/main.rs", "s.chars().rev().collect()", "s.chars().rev().collect::<String>()"),
+            ];
+            detect_stuck_loop(&m).expect("signature 3 must fire")
+        };
+        for (name, msg) in [("sig1", &sig1), ("sig3", &sig3)] {
+            assert!(
+                msg.contains(SENTINEL),
+                "{name} no longer contains the triage sentinel {SENTINEL:?}: {msg}\n\
+                 If this is a deliberate rewording, update LOOPBREAKER_SENTINEL in \
+                 scripts/bench/agentic_triage.py in the same commit."
+            );
+        }
+    }
+
+    #[test]
     fn reading_a_file_then_editing_it_twice_is_not_churn() {
         // THE EXACT SEQUENCE THAT ABORTED THREE BENCHMARK RUNS, transcribed from the transcripts
         // (2026-08-16, `duration` on Qwen3.5-4B). The model read src/lib.rs, fixed the function,
