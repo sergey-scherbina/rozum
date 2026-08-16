@@ -1,0 +1,6 @@
+feature/ucc-ssc-action-routes 2026-08-16T11:35:43Z
+agent: claude-code
+heartbeat: 2026-08-16T11:35:43Z
+status: not-started
+done-so-far: slice 4 classified in the spec — portable now: project/add + chat/post; messenger seven gated on whether exec works on the rust lane; launch routes blocked on DETACHED spawn
+next: measure exec on the rust lane, then port what is portable
