@@ -115,7 +115,7 @@ check "no seed manifest at all        → 10" 10 fix "$(mk nomanifest manifest l
 # `leapday`, `apportion` and `board` seed the same manifest+source shape and were added to this
 # loop with the task, not after someone noticed: the comment above says "every task the harness
 # seeds", and a loop that names three of six makes that sentence false the next time one lands.
-for t in fix debug multibug leapday apportion board; do
+for t in fix debug multibug leapday apportion duration board; do
   d="$tmp/real_$t"; mkdir -p "$d"; setup_task "$t" "$d"; post_run_debris "$d"
   check "setup_task $t, then nothing   → 13" 13 "$t" "$d" 0 0 0
 done

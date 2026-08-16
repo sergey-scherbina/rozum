@@ -71,9 +71,16 @@
       "expected": "cargo test green (all four cases)",
       "tool_hint": true
     },
+    "duration": {
+      "label": "Duration",
+      "difficulty": 11,
+      "prompt": "There is a small Rust program in the current directory that renders a number of seconds as a duration. \"cargo test\" ALREADY PASSES and will keep passing — the existing tests cover only part of the specification below, so a green test run does not mean you are done. Make `cargo run -- N` print exactly what these rules require, for every N: the units are days (86400 seconds), hours, minutes and seconds, written largest first as a number followed by `d`, `h`, `m` or `s`, joined by single spaces; a unit whose count is zero is left out entirely; and when every count is zero the output is `0s`. For example `cargo run -- 3661` prints `1h 1m 1s`, and `cargo run -- 86400` prints `1d`. Other values are checked too, so special-casing those two is not enough. Do not delete or weaken the existing tests. Check your work by RUNNING the program on several values — \"cargo test\" cannot tell you whether you are done. When it is right, reply with one short confirmation line and STOP.",
+      "expected": "cargo run correct for 8 values (days and the all-zero case are in no test)",
+      "tool_hint": true
+    },
     "board": {
       "label": "Leaderboard",
-      "difficulty": 11,
+      "difficulty": 12,
       "prompt": "There is a Rust library in the current directory with an unimplemented `render` function and two tests. Implement `render` so BOTH tests pass. Do NOT modify the tests. The rules the tests encode: sort by score descending; break ties by name compared case-insensitively, and any remaining tie by the raw name; a name longer than 10 characters is shown as its first 9 characters followed by the single character U+2026; if two shown names come out identical, the second and later get \" (2)\", \" (3)\" appended in output order; a score of 1000 or more is written with \"_\" between groups of three digits from the right, below 1000 plain; each line is \"<shown name>: <score>\" and lines are joined by newlines with no trailing newline. Sorting uses the FULL name, not the shortened one. Run \"cargo test\" to confirm; do not claim success until it really passes. The moment it passes you are DONE — reply with one short line and STOP.",
       "expected": "cargo test green (both fixtures)",
       "tool_hint": true

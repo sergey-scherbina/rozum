@@ -300,6 +300,82 @@ mod tests {
 }
 EOF
       ;;
+    duration)
+      # THE FIRST OF THESE WHOSE DIFFICULTY THE FEEDBACK LOOP CANNOT ERASE.
+      #
+      # `leapday`, `board` and `apportion` all put the difficulty in a FAILING TEST, and the
+      # operator was right that the third read as the first one again. The systematic error is
+      # bigger than the repeat: THE AGENT HAS `cargo test` IN A LOOP. Anything the tests can see
+      # reduces to "keep editing until it goes green" — the feedback hands the model exactly what a
+      # trap is built to hide. Difficulty that lives in a red test is difficulty the loop returns
+      # for free, so all three measured how long the loop takes, not what the model understands.
+      #
+      # Here `cargo test` is GREEN on arrival and stays green whatever the agent does. The seeded
+      # tests cover hours/minutes/seconds and the omission of a zero component. Days and the
+      # all-zero case are in the PROMPT and in NO test. A model that reads "cargo test passes" as
+      # "done" ships four of eight verifier cases wrong and never sees a red line anywhere.
+      #
+      # Not a gotcha bolted on: `build`, `fix` and `wordcount` have always verified by RUNNING the
+      # program rather than trusting its tests. What is new is that the gap between the two is
+      # where the task lives.
+      #
+      # Measured with this harness's own `verify_task` before it landed — untouched skeleton:
+      # `cargo test` 2/2 green, verify 4/8 red; days added but the all-zero case missed (the
+      # half-done state, still 2/2 green): 7/8; reference solution: 8/8. So the verifier grades,
+      # and a task nobody can pass is `board` again — the reference was written and run first.
+      #
+      # The prompt gives two examples and the verifier checks eight values, for the reason `rpn`
+      # already states: hard-coding the examples must not pass.
+      printf '[package]\nname = "duration"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
+      mkdir -p "$2/src"
+      cat >"$2/src/lib.rs" <<'EOF'
+/// Render `secs` as a human-readable duration.
+pub fn format(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    let mut parts: Vec<String> = Vec::new();
+    if h > 0 {
+        parts.push(format!("{h}h"));
+    }
+    if m > 0 {
+        parts.push(format!("{m}m"));
+    }
+    if s > 0 {
+        parts.push(format!("{s}s"));
+    }
+    parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hours_minutes_seconds() {
+        assert_eq!(format(3661), "1h 1m 1s");
+    }
+
+    #[test]
+    fn a_zero_component_is_left_out() {
+        assert_eq!(format(3600), "1h");
+        assert_eq!(format(61), "1m 1s");
+    }
+}
+EOF
+      cat >"$2/src/main.rs" <<'EOF'
+use std::env;
+
+fn main() {
+    let secs: u64 = env::args()
+        .nth(1)
+        .expect("usage: duration <seconds>")
+        .parse()
+        .expect("seconds must be a non-negative integer");
+    println!("{}", duration::format(secs));
+}
+EOF
+      ;;
     apportion)
       # ATTEMPT FOUR, AND THE FIRST ONE DESIGNED FROM EVIDENCE RATHER THAN FROM A GUESS AT
       # DIFFICULTY.
@@ -687,7 +763,7 @@ mkdir -p "$OUT/runs"
 CSV="$OUT/per-run.csv"
 TRIAGE_PY="$here/agentic_triage.py"
 echo "agent,model,task,difficulty,seconds,pass,rc,timeout,turns,tool_uses,agent_peak_mb,peak_cpu_pct,model_footprint_mb,repairs,verifier_kind,verdict,verdict_confidence,gateway_generation,context_window,mlx_active_mb,mlx_peak_mb,mlx_cache_mb" > "$CSV"
-declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 [wordcount]=7 [multibug]=8 [leapday]=9 [apportion]=10 [board]=11 )
+declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 [wordcount]=7 [multibug]=8 [leapday]=9 [apportion]=10 [duration]=11 [board]=12 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -849,6 +925,24 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
         [ "$got" = "$want" ] && echo "    PASS  wordcount top-3 correct" \
           || { echo "    FAIL  wordcount -> $(echo "$got" | tr '\n' '|')"; fail=1; }
         exit $fail ;;
+      duration)
+        # THE VERIFIER IS THE TASK. `cargo test` is green in the seeded tree and stays green
+        # whatever the agent does, so it cannot answer "is this right" — only running the program
+        # can. Eight values, not the two the prompt gives as examples, so hard-coding the examples
+        # fails here exactly as it does on `rpn`. Four of the eight are wrong on arrival: `0` prints
+        # nothing at all, and everything from a day upward is rendered in hours.
+        [ -f Cargo.toml ] || { echo "    FAIL  Cargo.toml missing"; fail=1; }
+        ls src/*.rs >/dev/null 2>&1 || { echo "    FAIL  no src/*.rs"; fail=1; }
+        cargo test -q >/dev/null 2>"$w/cargo.err" || { echo "    FAIL  the seeded tests were broken"; fail=1; }
+        bad=0
+        for pair in "3661:1h 1m 1s" "3600:1h" "61:1m 1s" "59:59s" "0:0s" \
+                    "86400:1d" "90000:1d 1h" "90061:1d 1h 1m 1s"; do
+          n="${pair%%:*}"; want="${pair#*:}"
+          got="$(cargo run -q -- "$n" 2>>"$w/run.err" | sed 's/^ *//;s/ *$//')"
+          [ "$got" = "$want" ] || { echo "    FAIL  $n -> '$got' (want '$want')"; bad=$((bad+1)); }
+        done
+        [ "$bad" = 0 ] && echo "    PASS  all 8 durations correct" || fail=1
+        exit $fail ;;
       *)
         [ -f Cargo.toml ] || { echo "    FAIL  Cargo.toml missing"; fail=1; }
         ls src/*.rs >/dev/null 2>&1 || { echo "    FAIL  no src/*.rs"; fail=1; }
@@ -893,6 +987,7 @@ bench_package_name() { # $1=task
     wordcount) echo "wordcount" ;;
     multibug) echo "twobugs" ;;
     apportion) echo "apportion" ;;
+    duration) echo "duration" ;;
     # These two fell through to `reverse-cli` when they were added, so a model that broke the
     # manifest was told to name the package after a different task. Harmless to the verifier —
     # `cargo test` does not care what the crate is called — and wrong advice all the same.
