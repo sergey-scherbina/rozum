@@ -16,6 +16,9 @@ pub(crate) const STUCK_LOOP_THRESHOLD: usize = 3;
 pub(crate) const EDIT_CHURN_MIN: usize = 3;
 /// Backstop: a single file edited this many times is churning even without a strict ping-pong.
 pub(crate) const EDIT_CHURN_BACKSTOP: usize = 6;
+/// Signature 5: the same edit payload applied successfully to one file this many times. See the
+/// signature for why three and not two — it is a measured number, not a chosen one.
+const IDENTICAL_EDIT_THRESHOLD: usize = 3;
 /// A ping-pong needs this share of the edit's substantive added lines to be lines a previous edit
 /// removed. One shared line is not evidence of anything: see [`is_pingpong`].
 const PINGPONG_MIN_SHARE: f64 = 0.5;
@@ -275,6 +278,45 @@ pub(crate) fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
              without net progress — the fix has most likely already been applied. Stopping to \
              avoid corrupting the file in a churn loop; verify it builds and report in one line."
         ));
+    }
+
+    // ── Signature 5: the same edit applied, successfully, three times ──
+    // Re-applying an edit payload that ALREADY SUCCEEDED cannot be progress by construction: a
+    // `Write` of identical content leaves the file exactly as it was, and an `Edit` cannot honestly
+    // succeed twice on one `old_string` because the first application consumed it.
+    //
+    // This is the true positive signature 3 used to catch by ACCIDENT, through counting a `Read` as
+    // an edit — a heuristic that cost 28 false stops before BUG-054 removed it. This one costs
+    // none: "byte-identical, and it already worked" has no innocent reading.
+    //
+    // THREE, not two, and the number is measured rather than chosen. Replayed over all 335 kept
+    // transcripts: 8 runs repeat an identical successful edit exactly twice, 2 do it three times,
+    // 1 four times. Firing on the second would have added those 8 — and every one of them was
+    // already a doomed run (a model inventing a `Cargo.toml` on `greet`, a task that needs no
+    // files), so it would have bought wall-clock and nothing else, against the risk this whole bug
+    // was about: ending a run that was going to succeed. Three identical successful applications is
+    // unambiguous, and stopping there still catches the deepest loops.
+    //
+    // Errored calls are excluded: retrying a write that FAILED is exactly right, and signature 1
+    // already covers a retry that never starts working.
+    let mut applied: HashMap<(String, String), usize> = HashMap::new();
+    for (_, input, is_error, _) in &calls {
+        if *is_error {
+            continue;
+        }
+        if let Some((file, removed, added)) = edit_target_and_lines(input) {
+            let key = (file.clone(), format!("{}\u{1}{}", removed.join("\n"), added.join("\n")));
+            let n = applied.entry(key).or_insert(0);
+            *n += 1;
+            if *n >= IDENTICAL_EDIT_THRESHOLD {
+                return Some(format!(
+                    "The identical edit to `{file}` has now been applied {n} times and succeeded \
+                     every time, so it is changing nothing — the file already holds this content. \
+                     Stopping to avoid a rewrite loop; verify the current state and report it in \
+                     one short line."
+                ));
+            }
+        }
     }
 
     // ── Signature 4: windowed identical tool-call recurrence ──

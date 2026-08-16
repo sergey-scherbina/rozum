@@ -2087,6 +2087,65 @@ mod tests {
     }
 
     #[test]
+    fn the_same_successful_edit_three_times_is_a_rewrite_loop() {
+        // Recovers, precisely, the true positive that BUG-054's fix gave up: signature 3 used to
+        // catch this by counting a `Read` as an edit, which cost 28 false stops. Byte-identical and
+        // it already worked has no innocent reading.
+        let w = |i: &str| {
+            asst(tool_use(i, "Write", json!({ "file_path": "Cargo.toml", "content": "[package]\nname = \"x\"" })))
+        };
+        let mut three = vec![Message::user("make it")];
+        for i in 0..3 {
+            let id = format!("w{i}");
+            three.push(w(&id));
+            three.push(tool_out(&id, "ok"));
+        }
+        let reason = detect_stuck_loop(&three).expect("three identical successful writes must trip");
+        assert!(reason.contains("Cargo.toml") && reason.contains("Stopping to avoid"), "{reason}");
+
+        // TWO is deliberately below the line — measured, not chosen. See the signature comment.
+        let mut two = vec![Message::user("make it")];
+        for i in 0..2 {
+            let id = format!("w{i}");
+            two.push(w(&id));
+            two.push(tool_out(&id, "ok"));
+        }
+        assert!(detect_stuck_loop(&two).is_none(), "two identical writes is below the threshold");
+
+        // A repeat after an ERROR is a legitimate retry, not a rewrite loop: the file never got
+        // the content, so writing it again is the correct move. Signature 1 covers a retry that
+        // never starts working; this one must not pre-empt it.
+        let mut retried = vec![Message::user("make it")];
+        for i in 0..3 {
+            let id = format!("e{i}");
+            retried.push(w(&id));
+            retried.push(tool_err(&id, true));
+        }
+        let r = detect_stuck_loop(&retried);
+        assert!(
+            r.as_deref().is_none_or(|m| !m.contains("rewrite loop")),
+            "errored writes must not be read as a rewrite loop: {r:?}"
+        );
+
+        // Distinct content to one file is ordinary work, however many times.
+        let mut distinct = vec![Message::user("build it up")];
+        for i in 0..5 {
+            let id = format!("d{i}");
+            distinct.push(asst(tool_use(
+                &id,
+                "Write",
+                json!({ "file_path": "src/main.rs", "content": format!("fn main() {{ println!(\"{i}\"); }}") }),
+            )));
+            distinct.push(tool_out(&id, "ok"));
+        }
+        let d = detect_stuck_loop(&distinct);
+        assert!(
+            d.as_deref().is_none_or(|m| !m.contains("rewrite loop")),
+            "five DIFFERENT writes are not a rewrite loop: {d:?}"
+        );
+    }
+
+    #[test]
     fn every_loopbreak_message_carries_the_triage_sentinel() {
         // `scripts/bench/agentic_triage.py` recognises a stopped run by the phrase "Stopping to
         // avoid", and files it as `stopped_by_loopbreaker` rather than blaming the model for what
@@ -2120,7 +2179,17 @@ mod tests {
             ];
             detect_stuck_loop(&m).expect("signature 3 must fire")
         };
-        for (name, msg) in [("sig1", &sig1), ("sig3", &sig3)] {
+        let sig5 = {
+            // The same successful edit, three times.
+            let mut m = vec![Message::user("make it")];
+            for i in 0..3 {
+                let id = format!("w{i}");
+                m.push(asst(tool_use(&id, "Write", json!({ "file_path": "Cargo.toml", "content": "[package]" }))));
+                m.push(tool_out(&id, "ok"));
+            }
+            detect_stuck_loop(&m).expect("signature 5 must fire")
+        };
+        for (name, msg) in [("sig1", &sig1), ("sig3", &sig3), ("sig5", &sig5)] {
             assert!(
                 msg.contains(SENTINEL),
                 "{name} no longer contains the triage sentinel {SENTINEL:?}: {msg}\n\
