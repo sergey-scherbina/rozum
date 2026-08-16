@@ -1,0 +1,6 @@
+feature/aborted-run-is-not-a-model-failure 2026-08-16T03:47:07Z
+agent: claude-code
+heartbeat: 2026-08-16T03:47:07Z
+status: in-progress
+done-so-far: replayed the fixed detector over every kept transcript - 28 of 36 loop-breaker aborts were FALSE, including all six board cells that the "ceiling is the borrow checker" conclusion rests on
+next: triage category + the Rust sentinel test + correct the BACKLOG claims
