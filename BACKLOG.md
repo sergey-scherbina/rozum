@@ -598,8 +598,30 @@ Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
   third edit. Two of the day's six stops had that shape. With it fixed, `duration` re-run on the
   9B passes again (334.5 s, 19 turns, 13 tool calls).
 
-  Running tally on the 9B, all post-BUG-055: `apportion` 3/3, `duration` 3 passes and 1 loss (the
-  loss predates BUG-056; 1/1 since), `board` 0/1 on genuine churn.
+  **Final, three reps each on both models, both fixes in:**
+
+  | task | 4B × 3 | 9B × 3 |
+  |---|---|---|
+  | `apportion` | 1/3 | **3/3** |
+  | `duration` | 1/3 | **3/3** |
+  | `board` | 0/3 | 0/3 |
+
+  The 9B is 6/6 on the two tasks the 4B takes one in three, and 0/3 on the third — where the 4B is
+  also 0/3. So the bench now separates the models cleanly at one difficulty level and finds them
+  equal above it.
+
+  **`board` is not "unpassable" — it measures a specific limit, and both models hit it the same
+  way.** All six cells (three per model) end on genuine edit churn, each verified individually
+  rather than assumed: the third edit restores 60%, 67% and 78% of the lines earlier edits removed.
+  The task states four rules that interact; a model satisfies one, breaks another, and rolls back.
+  That is a real ceiling on holding several constraints at once, and it is the same ceiling for
+  both sizes — which is itself the useful result, since it says the 9B's advantage is not general.
+
+  One caveat inside the 9B's `duration` 3/3: the third cell passed on correctness at
+  `900.1s (RUN_TIMEOUT)` — the work was right and the model did not stop, running to the harness
+  limit. The verifier checks the files, not the conduct, so it scores as a pass; 900 s against the
+  other two cells' 296 s and 334 s is a different behaviour, not noise. Signature 4 (the same call
+  ≥4× in a window of 12) is the one meant to catch it and did not.
 
   **What is left is the model's, and there is nothing to fix on our side for it.** Both models lose
   the same way: they write a test of their own that contradicts the stated rule — the 9B's was
