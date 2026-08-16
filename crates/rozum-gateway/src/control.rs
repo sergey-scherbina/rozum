@@ -240,6 +240,78 @@ async fn spa_static_route(
 /// An unreachable .ssc server answers 502 rather than falling back to the Rust handler: a silent
 /// fallback would make the switch untestable — it would look like it worked while serving the
 /// implementation it was supposed to replace.
+/// The header that says "this request came through the gate".
+///
+/// A DOOR, not an authorisation: it carries nothing about who is calling, and it is not a
+/// substitute for `require_auth`. It exists because the `.ssc` server binds a loopback TCP port
+/// (`std/http.ssc` offers `serve(port)` and no unix socket), so without it every local process —
+/// including every agent this project launches — can reach a route that `:8411` correctly gates.
+/// Reasoning and the measurement behind choosing this over re-implementing the session chain:
+/// `docs/specs/ucc-ssc-session.md`.
+pub(crate) const UCC_SSC_DOOR_HEADER: &str = "x-rozum-ucc-door";
+
+/// The shared secret, environment first and file second — the same resolution
+/// `ROZUM_WEB_SECRET` uses for the meeting REST server, so it does not matter who started the
+/// process (`crates/rozum-meeting/src/meeting/rest_read.rs`).
+pub(crate) fn ucc_ssc_door_secret() -> Option<String> {
+    resolve_door_secret(
+        std::env::var("ROZUM_UCC_SSC_SECRET").ok(),
+        &ucc_ssc_door_secret_path(),
+    )
+}
+
+/// `~/.rozum/secrets/ucc-ssc-door` — the same directory, ownership and 600 the messenger tokens
+/// and the meeting web secret use.
+fn ucc_ssc_door_secret_path() -> std::path::PathBuf {
+    rozum_paths::home_dir()
+        .unwrap_or_else(rozum_paths::temp_dir)
+        .join(".rozum")
+        .join("secrets")
+        .join("ucc-ssc-door")
+}
+
+/// Pure core, so the precedence is testable without the process environment or a real home.
+/// Empty and whitespace-only are NOT a secret: a file created by `touch` must leave the door open
+/// rather than close it against every caller including the console.
+fn resolve_door_secret(from_env: Option<String>, path: &std::path::Path) -> Option<String> {
+    let clean = |s: String| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(v) = from_env.and_then(clean) {
+        return Some(v);
+    }
+    std::fs::read_to_string(path).ok().and_then(clean)
+}
+
+#[cfg(test)]
+mod door_tests {
+    use super::*;
+
+    #[test]
+    fn the_door_secret_prefers_the_environment_and_ignores_an_empty_one() {
+        let dir = std::env::temp_dir().join(format!("rozum-door-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("ucc-ssc-door");
+        std::fs::write(&file, "  from-file\n").unwrap();
+
+        // Environment wins — that is what lets a launchd job carry it without a file.
+        assert_eq!(
+            resolve_door_secret(Some("from-env".into()), &file).as_deref(),
+            Some("from-env")
+        );
+        // File fallback, trimmed: a secret written with `echo` carries a newline.
+        assert_eq!(resolve_door_secret(None, &file).as_deref(), Some("from-file"));
+        // An EMPTY variable is not a secret. Treating it as one would close the door on the console
+        // itself the first time a job template sets the name with no value.
+        assert_eq!(resolve_door_secret(Some("   ".into()), &file).as_deref(), Some("from-file"));
+
+        // No secret anywhere → None → the proxy sends no header and the .ssc half stays open, which
+        // is what keeps a host that has not been given a secret serving exactly what it serves now.
+        std::fs::write(&file, "\n  \n").unwrap();
+        assert_eq!(resolve_door_secret(None, &file), None);
+        assert_eq!(resolve_door_secret(None, &dir.join("nope")), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
 async fn ucc_ssc_proxy(req: axum::extract::Request) -> axum::response::Response {
     use axum::response::IntoResponse;
     let Some(origin) = std::env::var("ROZUM_UCC_SSC_ORIGIN").ok().filter(|v| !v.is_empty()) else {
@@ -247,7 +319,17 @@ async fn ucc_ssc_proxy(req: axum::extract::Request) -> axum::response::Response 
     };
     let path_and_query = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let url = format!("{}{}", origin.trim_end_matches('/'), path_and_query);
-    match reqwest::Client::new().get(&url).send().await {
+    let mut out = reqwest::Client::new().get(&url);
+    if let Some(secret) = ucc_ssc_door_secret() {
+        out = out.header(UCC_SSC_DOOR_HEADER, secret);
+    }
+    // No secret configured → send the request anyway, WITHOUT the header. Fail-open is right in
+    // this direction and only this one: the two routes proxied today are public by design, so a
+    // host with no secret keeps serving them exactly as it did. The half that must fail CLOSED is
+    // the `.ssc` server's, and it is the one that decides: once it requires the door, a proxy
+    // without the secret gets 403 rather than silently serving ungated content. Refusing here
+    // instead would take a working console down on upgrade to buy nothing.
+    match out.send().await {
         Err(e) => (
             axum::http::StatusCode::BAD_GATEWAY,
             format!("ucc-ssc unreachable at {origin}: {e}"),

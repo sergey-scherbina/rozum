@@ -109,6 +109,32 @@ def badRequest(msg: String): Response =
 def ok(body: String): Response =
   Response(200, JSON_CT, body)
 
+// ── The door (slice 2, docs/specs/ucc-ssc-session.md) ──────────────────────────────────────────
+//
+// This server binds a loopback TCP port — `serve(port)` is what the toolkit offers, there is no
+// unix socket to hide behind — so ANY local process can reach it, including every agent this
+// project launches. That does not matter for the two routes here, which are public by design and
+// carry their own view token. It matters for every route after them: a gated route served this way
+// would answer on :8412 what :8411 correctly answers 401 to. The door is what makes those ports
+// agree, and it is built BEFORE the first gated route rather than after.
+//
+// It says "this came through the gate" and nothing about WHO — which the measurement in the spec
+// says is sufficient, because no route handler in control.rs reads the principal at all.
+//
+// FAILS CLOSED, and that is the whole point of this half: with a secret configured, a request that
+// does not carry it is refused, whatever it asks for. With no secret configured the door is open —
+// otherwise deploying this file would take the live console down until a file exists on the host,
+// which is the kind of upgrade that teaches people to skip upgrades.
+def doorSecret(): String =
+  envOrElse("ROZUM_UCC_SSC_SECRET", "")
+
+def doorOpen(req: Request): Boolean =
+  val want = doorSecret()
+  want == "" || req.headers.getOrElse("x-rozum-ucc-door", "") == want
+
+def noDoor(): Response =
+  Response(403, JSON_CT, jsonStringify(Map("error" -> "this port is reachable only through the console")))
+
 // ── /control/public/matrix/cell ────────────────────────────────────────────────────────────────
 // Find one cell in a matrix run: the per-run.csv row matching agent+model+task, plus the archived
 // agent log (tailed) and the verifier output when they were kept.
@@ -359,8 +385,11 @@ def viewRoute(req: Request): Response =
     Response(410, Map("Content-Type" -> "text/html; charset=utf-8"), expiredPage())
 
 def main(): Unit =
-  route("GET", "/control/public/matrix/cell", req => cellRoute(req))
-  route("GET", "/view/", r => viewRoute(r))
+  // The door is checked BEFORE the route's own rules, on every route, so adding a route cannot
+  // forget it. `guard` wrapping each handler rather than a middleware because the toolkit has no
+  // middleware hook — measured, not preferred.
+  route("GET", "/control/public/matrix/cell", req => if doorOpen(req) then cellRoute(req) else noDoor())
+  route("GET", "/view/", r => if doorOpen(r) then viewRoute(r) else noDoor())
   serve(8412)
 main()
 ```
