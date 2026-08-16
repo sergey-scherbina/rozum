@@ -300,6 +300,83 @@ mod tests {
 }
 EOF
       ;;
+    apportion)
+      # ATTEMPT FOUR, AND THE FIRST ONE DESIGNED FROM EVIDENCE RATHER THAN FROM A GUESS AT
+      # DIFFICULTY.
+      #
+      # Three predecessors missed, each for a reason worth not repeating. `leapday` removed the
+      # signpost but the rule it hides is the Gregorian calendar, which every model already knows —
+      # 4B cleared it 3/3. `board` asked for four interacting rules from scratch and neither model
+      # reached them: the 4B died on `expected &str, found String`, the 9B on `cannot borrow as
+      # mutable because it is also borrowed as immutable`, 0/3 each over 314-637 s cells. The
+      # ceiling on this stack is Rust's type and borrow system, not reasoning, so any write-it-from-
+      # scratch task hits that wall first and hides the difference behind it.
+      #
+      # So: a COMPILING skeleton, the change is to LOGIC and never to ownership structure (plain
+      # `Vec<u64>`, indices, integer arithmetic — the reference fix is nine lines and borrows
+      # nothing), and the rule is STATED in the doc comment instead of recalled. What is measured is
+      # whether the model holds the whole stated rule while editing, not whether it has memorised an
+      # algorithm.
+      #
+      # THE HALF-FIX IS AGAIN THE POINT, and this time it is measured, not assumed. The skeleton
+      # hands leftover units out from the END of the vector. Handing them out from the FRONT instead
+      # is the plausible edit, and it satisfies `equal_fractions_go_to_the_lower_index_first`
+      # completely — where all fractions tie, front-loading IS the correct answer. It still fails
+      # `leftover_follows_the_largest_fraction`. Measured in a scratch crate before this landed:
+      # skeleton 2/4, front-load 3/4, largest-remainder 4/4. A task nobody can pass is `board`
+      # again, so the reference solution was written and run first.
+      printf '[package]\nname = "apportion"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
+      mkdir -p "$2/src"
+      cat >"$2/src/lib.rs" <<'EOF'
+/// Split `total` into one part per weight, in proportion to the weights.
+///
+/// The parts must sum to exactly `total`. Whole units left over after the proportional split
+/// go to the parts whose exact share had the largest fractional part; where two fractional
+/// parts are equal, the lower index takes a unit first.
+pub fn apportion(total: u64, weights: &[u64]) -> Vec<u64> {
+    let sum: u64 = weights.iter().sum();
+    let mut parts: Vec<u64> = weights.iter().map(|w| total * w / sum).collect();
+    let mut leftover = total - parts.iter().sum::<u64>();
+    let mut i = parts.len();
+    while leftover > 0 {
+        i -= 1;
+        parts[i] += 1;
+        leftover -= 1;
+    }
+    parts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_division_leaves_nothing_over() {
+        assert_eq!(apportion(100, &[3, 3, 4]), vec![30, 30, 40]);
+    }
+
+    #[test]
+    fn every_unit_is_handed_out() {
+        for total in [1, 5, 7, 11, 100, 1001] {
+            let parts = apportion(total, &[2, 5, 3]);
+            assert_eq!(parts.iter().sum::<u64>(), total, "total {total}");
+        }
+    }
+
+    #[test]
+    fn leftover_follows_the_largest_fraction() {
+        assert_eq!(apportion(11, &[2, 5, 3]), vec![2, 6, 3]);
+        assert_eq!(apportion(7, &[1, 1, 2]), vec![2, 2, 3]);
+    }
+
+    #[test]
+    fn equal_fractions_go_to_the_lower_index_first() {
+        assert_eq!(apportion(5, &[1, 1, 1]), vec![2, 2, 1]);
+        assert_eq!(apportion(100, &[1, 1, 1, 1, 1, 1]), vec![17, 17, 17, 17, 16, 16]);
+    }
+}
+EOF
+      ;;
     leapday)
       # THE DEFECT IS TWO CALLS BELOW THE FAILING TEST, AND NOTHING POINTS AT IT.
       #
@@ -610,7 +687,7 @@ mkdir -p "$OUT/runs"
 CSV="$OUT/per-run.csv"
 TRIAGE_PY="$here/agentic_triage.py"
 echo "agent,model,task,difficulty,seconds,pass,rc,timeout,turns,tool_uses,agent_peak_mb,peak_cpu_pct,model_footprint_mb,repairs,verifier_kind,verdict,verdict_confidence,gateway_generation,context_window,mlx_active_mb,mlx_peak_mb,mlx_cache_mb" > "$CSV"
-declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 [wordcount]=7 [multibug]=8 [leapday]=9 [board]=10 )
+declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 [wordcount]=7 [multibug]=8 [leapday]=9 [apportion]=10 [board]=11 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -775,7 +852,7 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
       *)
         [ -f Cargo.toml ] || { echo "    FAIL  Cargo.toml missing"; fail=1; }
         ls src/*.rs >/dev/null 2>&1 || { echo "    FAIL  no src/*.rs"; fail=1; }
-        if [ "$t" = test ] || [ "$t" = debug ] || [ "$t" = multibug ] || [ "$t" = leapday ] || [ "$t" = board ]; then
+        if [ "$t" = test ] || [ "$t" = debug ] || [ "$t" = multibug ] || [ "$t" = leapday ] || [ "$t" = apportion ] || [ "$t" = board ]; then
           cargo test -q >/dev/null 2>"$w/cargo.err" && echo "    PASS  cargo test green" || { echo "    FAIL  cargo test red"; fail=1; }
         fi
         if [ "$t" = build ] || [ "$t" = test ] || [ "$t" = fix ]; then
@@ -815,6 +892,12 @@ bench_package_name() { # $1=task
     debug) echo "mathlib" ;;
     wordcount) echo "wordcount" ;;
     multibug) echo "twobugs" ;;
+    apportion) echo "apportion" ;;
+    # These two fell through to `reverse-cli` when they were added, so a model that broke the
+    # manifest was told to name the package after a different task. Harmless to the verifier —
+    # `cargo test` does not care what the crate is called — and wrong advice all the same.
+    leapday) echo "calendar" ;;
+    board) echo "board" ;;
     *) echo "reverse-cli" ;;
   esac
 }
