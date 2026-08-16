@@ -318,7 +318,11 @@ single-writer daemon). Each item below is its own spec+build later — listed to
 
 ## `com.rozum.ucc-ssc` has no plist in the repo (found 2026-08-16 during slice 4)
 
-- [ ] **ucc-ssc-plist-not-in-repo** — seven jobs keep their launchd definition under
+- [x] ~~**ucc-ssc-plist-not-in-repo**~~ — DONE 2026-08-16, and it was five definitions rather than
+  one: the check written to catch it found `meeting-daemon`, `meeting-ssc` and `mcp-http` in the
+  same state, plus `ROZUM_UCC_SSC_ORIGIN` missing from a template that DID exist. `svc:plists` now
+  reports the drift.
+- [x] ~~superseded — original text:~~ **ucc-ssc-plist-not-in-repo** — seven jobs keep their launchd definition under
   `clients/control/launchd/`; this one exists only in `~/Library/LaunchAgents`. It carries
   `SSC_HTTP_BIND=127.0.0.1` (without it the ScalaScript runtime binds 0.0.0.0 — measured), the
   working directory the cell route resolves `scripts/bench/results` against, and now `ROZUM_BIN`

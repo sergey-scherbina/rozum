@@ -1,5 +1,18 @@
 # Changelog
 
+## ucc-ssc-plist-in-repo — the setting that turns the switch on lived on one disk
+Completed: 2026-08-16
+
+`ROZUM_UCC_SSC_ORIGIN` routes nine console endpoints to the ScalaScript server, and it existed only
+in the installed plist — not in the template beside it in this repo. Rebuilding the machine from
+the checkout would have quietly served all nine from Rust, because falling back is the safe
+behaviour and therefore a silent one. Five job definitions are now carried in the repo (four had no
+copy at all), byte-identical to what launchd obeys.
+
+`doctor --services` gained `svc:plists`: it compares each declared service's installed plist with
+the repo's copy, names the keys that differ, and skips when not run from a checkout rather than
+guessing.
+
 ## ucc-ssc-backend slice 4 — nine action routes on ScalaScript, and one that must never move
 Completed: 2026-08-16
 
