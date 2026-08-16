@@ -1,0 +1,6 @@
+feature/ucc-ssc-read-routes 2026-08-16T10:25:58Z
+agent: claude-code
+heartbeat: 2026-08-16T10:25:58Z
+status: not-started
+done-so-far: door closed and live, so a ported gated route is reachable only through the console that gates it
+next: classify the 19 read routes by DATA SOURCE (files vs process-global state) before porting anything
