@@ -264,6 +264,18 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
 
+        /// Use the gateway ALREADY SERVING at this URL instead of resolving one.
+        ///
+        /// `--port` says where to SPAWN a gateway; this says where to CONNECT. Without it a
+        /// launch reuses whatever the active-gateway registry names, which is why "measure THIS
+        /// build" was impossible: a harness could point itself at one gateway while its agent
+        /// talked to another. Loopback only (`http://127.0.0.1:PORT`).
+        ///
+        /// A gateway named this way is NOT managed: no failover respawn, no client lease, no
+        /// idle takeover. It is somebody else's process and this launch only talks to it.
+        #[arg(long = "gateway-url")]
+        gateway_url: Option<String>,
+
         /// Context window in tokens. Default: the model's max context (from its
         /// config.json), capped so the KV cache stays within a fraction of RAM;
         /// falls back to 32768 if the model max is unknown. Lower it to save RAM.
@@ -1467,6 +1479,7 @@ async fn main() {
             strategy,
             offline,
             port,
+            gateway_url,
             n_ctx,
             dedicated,
             no_model,
@@ -1530,7 +1543,8 @@ async fn main() {
                     run_launch_url(url, model_spec, port, n_ctx, wakeup, program).await;
                 }
                 None => {
-                    run_launch(model, port, n_ctx, dedicated, no_model, wakeup, program).await;
+                    run_launch(model, port, gateway_url, n_ctx, dedicated, no_model, wakeup, program)
+                        .await;
                 }
             }
         }
@@ -3238,6 +3252,7 @@ fn claude_version_supports_channels(version: &str) -> bool {
 async fn run_launch(
     model: Option<String>,
     port: Option<u16>,
+    gateway_url: Option<String>,
     n_ctx: Option<u32>,
     dedicated: bool,
     no_model: bool,
@@ -3274,20 +3289,38 @@ async fn run_launch(
         return; // unreachable: the dedicated path execs + exits
     }
 
-    // Shared path: discover & reuse a running gateway, or spawn a detached daemon.
-    let (gw_port, effective_model) = match ensure_shared_gateway(&model_spec, n_ctx, port).await {
-        Some(x) => x,
-        None => std::process::exit(1),
+    // `--gateway-url`: talk to a gateway this launch does NOT manage.
+    //
+    // Three things are deliberately skipped for it, and each has its own reason. **No failover
+    // watchdog** — respawning somebody else's daemon on their port is worse than failing loudly.
+    // **No client lease** — the lease tells OUR shared daemon that a client is attached so it does
+    // not idle-exit; taking one for a gateway we are not using would be a lie to the registry.
+    // **No takeover** — takeover reclaims a port for the model we want, and here the caller has
+    // already decided which gateway to measure. What IS kept is the launch-local proxy: it belongs
+    // to this run rather than to the daemon, and it is where the decode policy is stamped, which
+    // is exactly what an A/B of two gateway builds needs.
+    let managed = gateway_url.is_none();
+    let (gw_port, effective_model) = match &gateway_url {
+        Some(url) => match connect_named_gateway(url).await {
+            Some(x) => x,
+            None => std::process::exit(1),
+        },
+        None => match ensure_shared_gateway(&model_spec, n_ctx, port).await {
+            Some(x) => x,
+            None => std::process::exit(1),
+        },
     };
-    // Hold a lease so the daemon knows a client is using it (and idle-exits only
-    // when none remain). The lease goes stale and is reaped after we exit.
-    let me_pid = std::process::id();
-    rozum::share::touch_lease(me_pid);
-    spawn_lease_heartbeat(me_pid);
+    if managed {
+        // Hold a lease so the daemon knows a client is using it (and idle-exits only
+        // when none remain). The lease goes stale and is reaped after we exit.
+        let me_pid = std::process::id();
+        rozum::share::touch_lease(me_pid);
+        spawn_lease_heartbeat(me_pid);
 
-    // Failover: while the agent runs, keep the shared daemon alive — if it dies,
-    // one launch respawns it on the same port. Spec: shared-gateway-failover.
-    spawn_failover_watchdog(effective_model.clone(), n_ctx, gw_port);
+        // Failover: while the agent runs, keep the shared daemon alive — if it dies,
+        // one launch respawns it on the same port. Spec: shared-gateway-failover.
+        spawn_failover_watchdog(effective_model.clone(), n_ctx, gw_port);
+    }
 
     // Launch-local reverse proxy: the agent talks to a per-launch loopback port
     // that forwards to the shared daemon. This is the path later phases use for
@@ -3650,6 +3683,94 @@ async fn run_launch_dedicated(
 /// daemon and wait for it to come up. Returns `(port, effective_model)` — the
 /// effective model may differ from `model_spec` if a gateway for another model is
 /// already running (MVP: reuse it with a warning rather than load a second model).
+/// Resolve `--gateway-url` to a port and the model that gateway is actually serving.
+///
+/// LOOPBACK ONLY, and that is a scope decision rather than a limitation of the idea: the
+/// launch-local proxy forwards to a PORT, so a remote host would be a larger change, and half
+/// supporting it — connecting but proxying somewhere else — is the class of silent mismatch this
+/// flag exists to remove.
+///
+/// The model comes from the TARGET (`/v1/models` → `display_name`), not from this machine's
+/// registry: the agent's model name must match what the gateway it talks to serves, and asking is
+/// the only way to be right about a process we do not manage.
+async fn connect_named_gateway(url: &str) -> Option<(u16, String)> {
+    let Some(port) = loopback_port(url) else {
+        eprintln!(
+            "rozum launch: --gateway-url must be a loopback URL with a port, e.g. \
+             http://127.0.0.1:8089 (got {url:?}). The launch-local proxy forwards to a port, so a \
+             remote gateway needs more than this flag."
+        );
+        return None;
+    };
+    let base = format!("http://127.0.0.1:{port}");
+    let body = match reqwest::Client::new()
+        .get(format!("{base}/v1/models"))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
+        Ok(r) => {
+            eprintln!("rozum launch: {base}/v1/models answered {} — not a gateway to measure", r.status());
+            return None;
+        }
+        Err(e) => {
+            eprintln!("rozum launch: nothing answers at {base} ({e}). Start it, or drop --gateway-url.");
+            return None;
+        }
+    };
+    let model = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| {
+            v.get("data")?
+                .as_array()?
+                .first()?
+                .get("display_name")?
+                .as_str()
+                .map(str::to_string)
+        });
+    let Some(model) = model else {
+        eprintln!("rozum launch: {base}/v1/models named no model — refusing rather than guessing one");
+        return None;
+    };
+    eprintln!("rozum launch: using the gateway at {base} (model {model}); not managing it");
+    Some((port, model))
+}
+
+#[cfg(test)]
+mod gateway_url_tests {
+    use super::loopback_port;
+
+    #[test]
+    fn only_a_loopback_url_with_a_port_is_accepted() {
+        assert_eq!(loopback_port("http://127.0.0.1:8089"), Some(8089));
+        assert_eq!(loopback_port("http://localhost:8199/"), Some(8199));
+        assert_eq!(loopback_port("http://[::1]:9000"), Some(9000));
+
+        // A remote host is REFUSED rather than half-supported: the launch-local proxy forwards to a
+        // port, so connecting here and proxying elsewhere is the silent mismatch this flag removes.
+        assert_eq!(loopback_port("http://10.0.0.5:8089"), None);
+        assert_eq!(loopback_port("http://gateway.local:8089"), None);
+        // No port, no scheme, nothing to connect to.
+        assert_eq!(loopback_port("http://127.0.0.1"), None);
+        assert_eq!(loopback_port("127.0.0.1:8089"), None);
+        assert_eq!(loopback_port(""), None);
+    }
+}
+
+/// The port of a loopback URL, or `None` for anything else. Pure, so the rule is testable.
+fn loopback_port(url: &str) -> Option<u16> {
+    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"))?;
+    // Split on the LAST colon, not the first: `[::1]:9000` is a legal loopback authority and
+    // splitting it at the first colon leaves the host as `[`.
+    let (host, rest) = rest.rsplit_once(':')?;
+    if !matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
+        return None;
+    }
+    let port = rest.split('/').next()?;
+    port.parse().ok()
+}
+
 async fn ensure_shared_gateway(
     model_spec: &str,
     n_ctx: u32,

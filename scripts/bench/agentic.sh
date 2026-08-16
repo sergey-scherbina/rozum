@@ -578,44 +578,6 @@ EOF
   seed_manifest "$2"
 }
 
-# Does the endpoint this run ANNOUNCES match the one the agent will actually talk to?
-#
-# It does not follow from setting `BENCH_GATEWAY_URL`. That variable steers this harness — the
-# readiness probe, the header line, the CSV — and nothing else. Every agent gets its base URL from
-# `rozum launch`, which resolves its own: `ensure_shared_gateway` reads the ACTIVE-gateway registry
-# and reuses whatever it names (src/main.rs), so `--port` is where it would SPAWN one, not where it
-# will connect. Measured 2026-08-15 with a recording proxy: the run printed "sharing an existing
-# gateway at http://127.0.0.1:8199", the proxy logged ZERO request bodies, and every token came
-# from :8089 — a full pass/fail cell attributed to a gateway that never saw it.
-#
-# That is worth refusing rather than warning about, because the mislabel is invisible afterwards:
-# the CSV row, the console header and the results directory all name the endpoint that was asked
-# for, and nothing in them records which gateway (which build, which model, which n_ctx) actually
-# answered. A red then reads as evidence about the wrong binary.
-#
-# Pure, so `test-agentic-gateway-url.sh` can cover every branch with no model and no network.
-# $1 = announced base URL, $2 = port from `rozum gateway status --json` (empty = none registered).
-# Echoes the reason when the run would lie; echoes nothing when the two agree.
-agent_gateway_mismatch() {
-  local base="$1" active="${2:-}" want
-  want="$(printf '%s' "$base" | sed -n 's|^[a-zA-Z][a-zA-Z0-9+.-]*://[^/:]*:\([0-9]\{1,5\}\)\(/.*\)\{0,1\}$|\1|p')"
-  if [ -z "$want" ]; then
-    echo "BENCH_GATEWAY_URL='$base' has no explicit port, so it cannot be compared with the gateway \`rozum launch\` resolves"
-    return 0
-  fi
-  if [ -z "$active" ]; then
-    # No registered gateway: `rozum launch` spawns its own daemon — a SECOND copy of the weights,
-    # which on a one-model host is the eviction the share-by-default block exists to prevent.
-    echo "no gateway is registered as active, so \`rozum launch\` would start its own instead of using :$want"
-    return 0
-  fi
-  if [ "$want" != "$active" ]; then
-    echo "\`rozum launch\` will use :$active (the active gateway), not :$want — the agent never sees BENCH_GATEWAY_URL"
-    return 0
-  fi
-  echo ""
-}
-
 # Copy a cell's evidence out of the temp workdir before it is deleted.
 #
 # A red used to leave NOTHING: `rm -rf "$work"` takes the program the model wrote, the stream-json
@@ -753,6 +715,8 @@ else
   DECODE_NOTE="FREE ENTROPY — a single red is one sample, not a result"
 fi
 
+# Empty unless a specific gateway was named: a run that starts its OWN gateway steers nothing.
+LAUNCH_GATEWAY_FLAG=()
 CELL_N=0   # cells run so far, so each gets its own seed (see the runner invocation)
 AGENT_RUN=()
 for a in ${AGENTS:-claude codex opencode}; do command -v "$a" >/dev/null && AGENT_RUN+=("$a") || echo "skip agent '$a' (not on PATH)"; done
@@ -1438,16 +1402,12 @@ for spec in "${MODELS[@]}"; do
     if ! curl -s -m5 "$base/v1/models" >/dev/null 2>&1; then
       echo "  ! $base does not answer — nothing to share" >&2; exit 1
     fi
-    # Answering is not the same as being the gateway the AGENT will use (`agent_gateway_mismatch`).
-    _active_port="$("$BIN" gateway status --json 2>/dev/null | tr -d '\n ' | sed -n 's/.*"port":\([0-9]*\).*/\1/p')"
-    _why="$(agent_gateway_mismatch "$base" "$_active_port")"
-    if [ -n "$_why" ]; then
-      echo "  ! $_why" >&2
-      echo "  ! refusing: this run would report a cell against a gateway that never served it." >&2
-      echo "  ! Point BENCH_GATEWAY_URL at the active gateway, unset it (it is borrowed by default)," >&2
-      echo "  ! or use BENCH_DEDICATED=1 for a private one." >&2
-      exit 1
-    fi
+    # The agent is STEERED here now, not merely announced. Until `rozum launch --gateway-url`
+    # existed this block refused the run instead: the knob moved this harness and nothing else, so
+    # a cell could be reported against a gateway that never served it (measured with a recording
+    # proxy — the run said :8199 and every token came from :8089). Refusing was the honest thing to
+    # do with no way to steer; steering is better, and the refusal is gone with the impossibility.
+    LAUNCH_GATEWAY_FLAG=(--gateway-url "$base")
     TIME_PID=""; GW_PID=""; SHARED_GW=1
   else
   SHARED_GW=0
@@ -1509,20 +1469,20 @@ for spec in "${MODELS[@]}"; do
           # answered → a model that calls it to "verify" loops till timeout): 33 tools/~4.9K → 4/~0.8K.
           aargs=(claude -p "$prompt" --output-format stream-json --verbose
                  --dangerously-skip-permissions --max-turns "$MAX_TURNS")
-          runner=("$BIN" launch --no-channel-wakeup --no-piggyback --lean "${aargs[@]}")
+          runner=("$BIN" launch "${LAUNCH_GATEWAY_FLAG[@]}" --no-channel-wakeup --no-piggyback --lean "${aargs[@]}")
         elif [ "$agent" = codex ]; then
           aargs=(codex exec "$prompt" --dangerously-bypass-approvals-and-sandbox)
-          runner=("$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}")
+          runner=("$BIN" launch "${LAUNCH_GATEWAY_FLAG[@]}" --no-channel-wakeup --no-piggyback "${aargs[@]}")
         elif [ "$agent" = nadia ]; then
           # nadia headless = `nadia run <prompt>`. No provider flags and no tool_hint: it
           # reads OPENAI_BASE_URL / ROZUM_GATEWAY_URL, which `rozum launch` already exports
           # to every agent, and its own system prompt covers "call tools, don't write prose".
           # Its workspace defaults to cwd, which `rozum launch` has already jailed.
           aargs=(nadia run "$prompt")
-          runner=("$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}")
+          runner=("$BIN" launch "${LAUNCH_GATEWAY_FLAG[@]}" --no-channel-wakeup --no-piggyback "${aargs[@]}")
         else  # opencode — `rozum launch` wires the gateway provider + -m rozum/local
           aargs=(opencode run "$prompt")
-          runner=("$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}")
+          runner=("$BIN" launch "${LAUNCH_GATEWAY_FLAG[@]}" --no-channel-wakeup --no-piggyback "${aargs[@]}")
         fi
 
         start=$(perl -MTime::HiRes=time -e 'printf "%.2f", time')

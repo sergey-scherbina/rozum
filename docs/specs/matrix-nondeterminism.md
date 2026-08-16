@@ -147,3 +147,27 @@ restore free entropy sampling (`${VAR-default}` substitutes only when *unset*).
    `SamplingParams.seed` so an API client can ask for reproducibility per-request without
    the global env (the env stays the bench/global knob). Small, additive; deferred until
    the end-to-end run confirms the approach.
+
+
+## What Claude Code actually sends (measured 2026-08-16, through a recording proxy)
+
+The first request of a real agent run, captured with `rozum launch --gateway-url` pointed at a
+proxy in front of the gateway — which is the capability that made this measurable at all:
+
+    model              claude-rozum-mlx-community-Qwen3-5-4B-MLX-4bit
+    metadata           {"user_id": …}
+    max_tokens         32000
+    thinking           {"type": "adaptive"}
+    context_management {"edits": [{"type": "clear_thinking_20251015", …}]}
+    output_config      {"effort": "xhigh"}
+    stream             true
+
+**No `temperature`, no `top_p`, no `top_k`, no `stop_sequences`.** Several entries have reasoned
+about what the client asks for; it asks for none of it, so the decode is entirely the gateway's
+default — which is exactly why `ROZUM_FORCE_GREEDY` mattered and why its silent loss (a
+gateway-process env var, inert for every borrowed run) was the whole story rather than a detail.
+It also means honouring `top_p`/`top_k` on the Anthropic dialect (BUG-031) could not have moved a
+matrix cell: the client never sends them.
+
+Three fields the gateway currently ignores are visible here — `thinking`, `context_management`,
+`output_config` — which is data for `anthropic-thinking` rather than a claim about it.
