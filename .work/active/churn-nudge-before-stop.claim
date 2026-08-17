@@ -1,0 +1,6 @@
+feature/churn-nudge-before-stop 2026-08-17T15:26:55Z
+agent: claude-code
+heartbeat: 2026-08-17T15:26:55Z
+status: in-progress
+done-so-far: after the four fixes 8 of 9 remaining failures are churn stops, each verified genuine (55-83% of added lines restored). The stop message asserts "the fix has most likely already been applied" - false on board, where the file is broken - and ends the run with no actionable information
+next: first detection = a corrective nudge naming the restored lines; second = the existing hard stop. Escalation derived from the transcript, no new state
