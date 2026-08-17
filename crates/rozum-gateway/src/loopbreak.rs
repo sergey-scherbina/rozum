@@ -14,6 +14,9 @@ pub(crate) const STUCK_LOOP_THRESHOLD: usize = 3;
 /// Edit-churn (signature 3): a single file edited this many times *with* a ping-pong
 /// (an added line re-introduces a previously-removed one) marks a model going in circles.
 pub(crate) const EDIT_CHURN_MIN: usize = 3;
+/// Marker carried by the first churn message, so the second detection can see that the model has
+/// already been told once. The escalation is read from the transcript, not held as state.
+pub(crate) const CHURN_NUDGE_MARK: &str = "[rozum: you just undid your own edit]";
 /// Backstop: a single file edited this many times is churning even without a strict ping-pong.
 pub(crate) const EDIT_CHURN_BACKSTOP: usize = 6;
 /// Signature 5: the same edit payload applied successfully to one file this many times. See the
@@ -254,6 +257,7 @@ pub(crate) fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
     let mut edits_per_file: HashMap<String, usize> = HashMap::new();
     let mut removed_seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let mut pingpong_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut restored: HashMap<String, Vec<String>> = HashMap::new();
     // Only edits that LANDED. An edit whose tool call errored changed nothing, so it cannot be
     // evidence that the file's content is going in circles — the same rule signature 5 already
     // applies, and signature 3 not applying it was a second way to count a non-edit as an edit.
@@ -272,6 +276,15 @@ pub(crate) fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
             *edits_per_file.entry(file.clone()).or_default() += 1;
             let seen = removed_seen.entry(file.clone()).or_default();
             if is_pingpong(&added, seen) {
+                // Keep the EVIDENCE, not just the verdict: the first thing said to the model
+                // is which lines it put back, and a verdict alone cannot say that.
+                let back: Vec<String> = added
+                    .iter()
+                    .filter(|l| is_substantive(l) && seen.contains(*l))
+                    .take(4)
+                    .cloned()
+                    .collect();
+                restored.insert(file.clone(), back);
                 pingpong_files.insert(file.clone());
             }
             seen.extend(removed.into_iter().filter(|l| is_substantive(l)));
@@ -282,10 +295,44 @@ pub(crate) fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
         n >= EDIT_CHURN_BACKSTOP || (n >= EDIT_CHURN_MIN && pingpong_files.contains(f.as_str()))
     });
     if let Some((file, n)) = churn {
+        // HELP ONCE BEFORE STOPPING.
+        //
+        // With BUG-054/056/057/058 fixed, 8 of the 9 remaining benchmark failures are this
+        // signature, and every one is genuine churn (55-83% of an edit's added lines restoring
+        // lines an earlier edit removed). That makes this the single most common thing the gateway
+        // ever says to a struggling model — and it was saying the wrong thing. It asserted "the fix
+        // has most likely already been applied", which is false on `board` where the file is
+        // broken, and it ended the run with nothing the model could act on.
+        //
+        // First detection: name the lines it put back, and ask for a DIFFERENT change. Second: the
+        // hard stop, because a model that churns after being told is the corrupting loop this
+        // signature was built for.
+        //
+        // The escalation reads the transcript instead of holding state — the nudge is IN the
+        // conversation, so "have I said this already?" is a question the messages answer. That
+        // keeps `detect_stuck_loop` a pure function of its input, which every test here relies on.
+        let already_nudged = messages.iter().any(|m| {
+            m.content.iter().any(|b| {
+                matches!(b, ContentBlock::Text { text } if text.contains(CHURN_NUDGE_MARK))
+            })
+        });
+        if !already_nudged {
+            let lines = restored
+                .get(file.as_str())
+                .map(|ls| ls.iter().map(|l| format!("\n  {l}")).collect::<Vec<_>>().join(""))
+                .unwrap_or_default();
+            return Some(format!(
+                "{CHURN_NUDGE_MARK} Your last edit to `{file}` put back lines that an earlier edit \
+                 of yours had removed:{lines}\n\nThat undoes your own work, so the file is now closer \
+                 to where it started than to a fix. Do NOT re-apply that edit. Read the file as it \
+                 stands now, run the test command to see the CURRENT failure, and make a change you \
+                 have not made before. If the file is already correct, say so in one line and stop."
+            ));
+        }
         return Some(format!(
             "The file `{file}` has been edited {n} times, re-doing and undoing the same change \
-             without net progress — the fix has most likely already been applied. Stopping to \
-             avoid corrupting the file in a churn loop; verify it builds and report in one line."
+             without net progress, and this was pointed out once already. Stopping to avoid \
+             corrupting the file in a churn loop; verify the current state and report it in one line."
         ));
     }
 

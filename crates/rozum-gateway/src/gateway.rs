@@ -2424,15 +2424,27 @@ mod tests {
             }
             detect_stuck_loop(&m).expect("signature 1 must fire")
         };
-        let sig3 = {
-            // Ping-pong edit churn.
-            let m = vec![
+        let churn = || {
+            vec![
                 Message::user("fix the reverse bug"),
                 cc_edit("c0", "src/main.rs", "s.to_string()", "s.chars().rev().collect::<String>()"),
                 cc_edit("c1", "src/main.rs", "s.chars().rev().collect::<String>()", "s.chars().rev().collect()"),
                 cc_edit("c2", "src/main.rs", "s.chars().rev().collect()", "s.chars().rev().collect::<String>()"),
-            ];
-            detect_stuck_loop(&m).expect("signature 3 must fire")
+            ]
+        };
+        // Signature 3 answers TWICE, and only the second answer ends the run. The nudge is a
+        // correction the model is expected to act on, so it deliberately does NOT carry the
+        // sentinel: a triage that filed a nudged-then-recovered run as `stopped_by_loopbreaker`
+        // would blame us for a run we helped.
+        let nudge = detect_stuck_loop(&churn()).expect("signature 3 must fire");
+        assert!(
+            !nudge.contains(SENTINEL) && nudge.contains(crate::loopbreak::CHURN_NUDGE_MARK),
+            "the first churn answer is a correction, not a stop: {nudge}"
+        );
+        let sig3 = {
+            let mut m = churn();
+            m.push(asst_text(&nudge)); // the model has now been told once
+            detect_stuck_loop(&m).expect("signature 3 must escalate to a stop")
         };
         let sig5 = {
             // The same successful edit, three times.
@@ -2452,6 +2464,43 @@ mod tests {
                  scripts/bench/agentic_triage.py in the same commit."
             );
         }
+    }
+
+    #[test]
+    fn the_first_churn_answer_corrects_and_the_second_stops() {
+        // Why this exists: after BUG-054/056/057/058, 8 of the 9 remaining benchmark failures were
+        // this signature, all genuine churn. So this is the most common thing the gateway says to a
+        // struggling model, and it used to say "stop" the first time — with a claim ("the fix has
+        // most likely already been applied") that is false whenever the file is actually broken.
+        let churn = || {
+            vec![
+                Message::user("fix it"),
+                cc_edit("c0", "src/lib.rs", "let x = old_thing();", "let x = new_thing();"),
+                cc_edit("c1", "src/lib.rs", "let x = new_thing();", "let x = other_thing();"),
+                cc_edit("c2", "src/lib.rs", "let x = other_thing();", "let x = new_thing();"),
+            ]
+        };
+
+        // First: a correction that names the restored line and asks for something different.
+        let first = detect_stuck_loop(&churn()).expect("churn must be detected");
+        assert!(first.contains("let x = new_thing();"), "must quote what was put back: {first}");
+        assert!(first.contains("have not made before"), "must ask for a different change: {first}");
+        assert!(!first.contains("Stopping"), "the first answer must not end the run: {first}");
+
+        // Second, with that correction now in the transcript: the hard stop.
+        let mut after = churn();
+        after.push(asst_text(&first));
+        let second = detect_stuck_loop(&after).expect("still churning");
+        assert!(second.contains("Stopping to avoid"), "the second answer must stop: {second}");
+        assert!(second.contains("pointed out once already"), "and say why it is final: {second}");
+
+        // A run that never churned is untouched by any of this.
+        let clean = vec![
+            Message::user("fix it"),
+            cc_edit("a", "src/lib.rs", "one", "two"),
+            cc_edit("b", "src/other.rs", "three", "four"),
+        ];
+        assert!(detect_stuck_loop(&clean).is_none());
     }
 
     #[test]
