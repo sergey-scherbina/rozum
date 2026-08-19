@@ -1,0 +1,6 @@
+feature/repair-diagnostic-wrong-task 2026-08-19T15:16:35Z
+agent: claude-code
+heartbeat: 2026-08-19T15:16:35Z
+status: in-progress
+done-so-far: reproduced — repair_diagnostic tells duration/board/apportion/leapday/multibug the program must print "olleh"
+next: give each task its own arm; make the fallback invent nothing; make the block testable
