@@ -448,7 +448,21 @@ fn resolve(p: &std::path::Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// The Rust toolchain + temp caches a build must read/write.
+/// The dev-toolchain state/cache dirs a build must read/write, so a coding agent gets
+/// the SAME toolchains working under the jail as it would running unsandboxed — env
+/// vars already pass through untouched (`Command` inherits the parent env by default;
+/// sandboxing here is a filesystem restriction, not an env one), so the only thing
+/// that breaks a real tool under `(deny default)` is its cache/config dir not being on
+/// the writable list. Each entry is env-overridable exactly the way the tool itself
+/// resolves it (so `CARGO_HOME=/x cargo …` and the sandbox agree on which dir to open
+/// up), falling back to that tool's real default location — which, past Rust, is
+/// often `~/Library/Caches/<vendor>` on macOS rather than the Linux XDG `~/.cache`.
+///
+/// Deliberately a CURATED list, not a blanket `~/Library/Caches` or `~/.cache` grant:
+/// those trees hold plenty that has nothing to do with a coding toolchain (browser,
+/// Animoji, other apps' state — checked on a real machine before writing this), and
+/// widening the jail to "everything a cache dir might be" defeats the point of a
+/// jail. New tools get a line here, not a wildcard.
 fn toolchain_paths() -> Vec<PathBuf> {
     let mut v = Vec::new();
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -457,11 +471,78 @@ fn toolchain_paths() -> Vec<PathBuf> {
             .map(PathBuf::from)
             .or_else(|| home.as_ref().map(|h| h.join(sub)))
     };
-    if let Some(c) = from_env_or_home("CARGO_HOME", ".cargo") {
-        v.push(resolve(&c));
+    let home_sub = |sub: &str| -> Option<PathBuf> { home.as_ref().map(|h| h.join(sub)) };
+    // macOS tools default to `~/Library/Caches/<x>`; everywhere else it's XDG `~/.cache/<x>`.
+    let os_cache = |mac_leaf: &str, xdg_leaf: &str| -> Option<PathBuf> {
+        home.as_ref().map(|h| {
+            if cfg!(target_os = "macos") { h.join("Library/Caches").join(mac_leaf) } else { h.join(".cache").join(xdg_leaf) }
+        })
+    };
+
+    // Rust.
+    if let Some(p) = from_env_or_home("CARGO_HOME", ".cargo") {
+        v.push(resolve(&p));
     }
-    if let Some(r) = from_env_or_home("RUSTUP_HOME", ".rustup") {
-        v.push(resolve(&r));
+    if let Some(p) = from_env_or_home("RUSTUP_HOME", ".rustup") {
+        v.push(resolve(&p));
+    }
+    // JVM / Scala / sbt — this project's own second toolchain (the ScalaScript sibling,
+    // REPOS.md). `sbt`/coursier read `~/.sbt`+`~/.ivy2` for config/dependency cache and
+    // resolve most artifacts through Coursier's cache; Maven-style resolution (`~/.m2`)
+    // and Gradle (`~/.gradle`) are common enough to include even where unused today.
+    if let Some(p) = from_env_or_home("SBT_HOME", ".sbt") {
+        v.push(resolve(&p));
+    }
+    if let Some(p) = from_env_or_home("IVY2_HOME", ".ivy2") {
+        v.push(resolve(&p));
+    }
+    if let Some(p) = std::env::var_os("COURSIER_CACHE").map(PathBuf::from).or_else(|| os_cache("Coursier", "coursier")) {
+        v.push(resolve(&p));
+    }
+    if let Some(p) = home_sub(".m2") {
+        v.push(resolve(&p));
+    }
+    if let Some(p) = home_sub(".gradle") {
+        v.push(resolve(&p));
+    }
+    // SDKMAN manages the java/scala/sbt installs themselves (candidate switches, downloads).
+    if let Some(p) = from_env_or_home("SDKMAN_DIR", ".sdkman") {
+        v.push(resolve(&p));
+    }
+    // Haskell (ghcup toolchain manager + cabal's package/build cache).
+    if let Some(p) = home_sub(".ghcup") {
+        v.push(resolve(&p));
+    }
+    if let Some(p) = from_env_or_home("CABAL_DIR", ".cabal") {
+        v.push(resolve(&p));
+    }
+    // Node / npm / yarn.
+    if let Some(p) = from_env_or_home("npm_config_cache", ".npm") {
+        v.push(resolve(&p));
+    }
+    if let Some(p) = home_sub(".yarn") {
+        v.push(resolve(&p));
+    }
+    if let Some(p) = os_cache("Yarn", "yarn") {
+        v.push(resolve(&p));
+    }
+    // Go.
+    if let Some(p) = from_env_or_home("GOPATH", "go") {
+        v.push(resolve(&p));
+    }
+    if let Some(p) = std::env::var_os("GOCACHE").map(PathBuf::from).or_else(|| os_cache("go-build", "go-build")) {
+        v.push(resolve(&p));
+    }
+    // Python (pip's download/wheel cache).
+    if let Some(p) = std::env::var_os("PIP_CACHE_DIR").map(PathBuf::from).or_else(|| os_cache("pip", "pip")) {
+        v.push(resolve(&p));
+    }
+    // Ruby.
+    if let Some(p) = from_env_or_home("GEM_HOME", ".gem") {
+        v.push(resolve(&p));
+    }
+    if let Some(p) = home_sub(".bundle") {
+        v.push(resolve(&p));
     }
     if let Some(t) = std::env::var_os("TMPDIR").map(PathBuf::from) {
         v.push(resolve(&t));
@@ -970,6 +1051,44 @@ mod tests {
         assert!(out.contains("RAW-OK"), "raw-mode ioctl denied under the jail: {out:?}\n{profile}");
     }
 
+    // A launched agent must get the SAME toolchains working under the jail as it would
+    // running unsandboxed (`ROZUM_SANDBOX=0`) — env vars already pass through untouched,
+    // so the only failure mode is a tool's cache/config dir missing from `toolchain_paths`.
+    // Runs each installed tool's version check under the real generated profile; a tool
+    // not installed on this machine is skipped rather than failing (this is an
+    // environment-dependent check, not a fixed matrix).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "spawns sandbox-exec + real toolchains; macOS only, needs those tools installed"]
+    fn generated_profile_lets_installed_toolchains_run() {
+        let ws = std::env::temp_dir().join(format!("rozum-sbx-toolchains-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let pol = SandboxPolicy::rust_coding(&[ws.clone()], NetPolicy::GatewayOnly);
+        let profile = pol.to_seatbelt_profile();
+        let f = std::env::temp_dir().join(format!("rozum-sbx-toolchains-{}.sb", std::process::id()));
+        std::fs::write(&f, &profile).unwrap();
+
+        let run = |bin: &str, args: &[&str]| -> Option<std::process::Output> {
+            if std::process::Command::new("which").arg(bin).output().map(|o| o.status.success()).unwrap_or(false) {
+                std::process::Command::new("sandbox-exec").arg("-f").arg(&f).arg(bin).args(args).output().ok()
+            } else {
+                None
+            }
+        };
+        for (bin, args) in [("cargo", &["--version"][..]), ("sbt", &["--version"][..]), ("npm", &["--version"][..])] {
+            let Some(out) = run(bin, args) else { continue };
+            assert!(
+                out.status.success(),
+                "{bin} failed under the jail (rc={:?}):\nstdout: {}\nstderr: {}\n{profile}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+        let _ = std::fs::remove_file(&f);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
     // Full e2e (macOS only; runs cargo + sandbox-exec; ignored — slow): build a
     // real crate INSIDE the rozum-generated jail (proves the toolchain paths are
     // right, so a coding model can actually build) AND prove a write OUTSIDE the
@@ -1028,4 +1147,5 @@ mod tests {
         assert!(!leaked, "SANDBOX ESCAPE: wrote outside the workspace");
     }
 }
+
 

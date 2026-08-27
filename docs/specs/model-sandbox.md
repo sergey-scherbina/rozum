@@ -34,7 +34,7 @@ mode** — `rw` (read/write/exec), `ro` (read-only), or `deny` — with
 | Class | Mode | Examples | Why |
 |---|---|---|---|
 | **Workspace(s)** | rw + exec | the task working dir(s); a scratch dir | full freedom — where the model does its work (may be **several** paths) |
-| **Toolchain caches** | rw | `~/.cargo`, `~/.rustup`, the build `target/`, `$TMPDIR` / `/tmp` | builds must work; these are caches/artifacts, not the operator's data |
+| **Toolchain caches** | rw | Rust (`~/.cargo`, `~/.rustup`), JVM/Scala/sbt (`~/.sbt`, `~/.ivy2`, `~/.m2`, `~/.gradle`, Coursier's cache, `~/.sdkman`), Haskell (`~/.ghcup`, `~/.cabal`), Node (`~/.npm`, `~/.yarn` + its cache), Go (`GOPATH`, `GOCACHE`), Python (pip's cache), Ruby (`~/.gem`, `~/.bundle`), the build `target/`, `$TMPDIR` / `/tmp` — one curated entry per tool in `toolchain_paths()` (`src/sandbox.rs`), not a blanket `~/Library/Caches`/`~/.cache` grant | every installed dev toolchain must work exactly as it does unsandboxed — env vars already pass through untouched, so a tool only fails here if its cache/config dir is missing from this list; caches/artifacts, not the operator's data |
 | **Read-only** | ro | system libs (`/usr`, `/bin`, `/System`, `/Library`), the repo source (optional), cached model snapshots | run tools / reference code without mutating it |
 | **Network** | loopback-only | `127.0.0.1:<gateway-port>` | reach the local model gateway; nothing else |
 | **Everything else** | deny | `~/.ssh`, `~/.aws`, `~/.config/*` creds, keychains, `/etc`, other projects, the rest of `$HOME` | secrets + the rest of the machine |
