@@ -962,6 +962,56 @@ enum MeetingsAction {
         mention_alias: Option<String>,
     },
 
+    /// Join a room as a LIVE CODING AGENT (`claude`/`nadia`/`codex`), not a chat model:
+    /// each reply is a real `rozum launch --model <local-spec> <agent> -p …` run with
+    /// file/shell access in a working directory, not a `/v1/chat/completions` call.
+    ///
+    /// A real risk increase over `participant` — a permitted sender can make the agent
+    /// edit files with no per-action prompts (bounded by the sandbox jail + `--acl`).
+    /// Spec: `docs/specs/agent-meeting-coordination.md`.
+    AgentParticipant {
+        /// Which agent to run: `claude` (default), `nadia`, `codex`, `opencode`.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        /// Local model spec the agent talks to through the gateway (e.g.
+        /// `mlx-community:Qwen3.6-35B-A3B-4bit`) — same routing `rozum launch --model` uses.
+        #[arg(long)]
+        model: String,
+        /// Room to join (created if absent).
+        #[arg(long)]
+        room: String,
+        /// Roster handle (default: the agent's name, e.g. `claude`).
+        #[arg(long = "as")]
+        as_handle: Option<String>,
+        /// When to reply: `mention` (default) | `always` | `manual`.
+        #[arg(long = "reply-policy", default_value = "mention")]
+        reply_policy: String,
+        /// Other participant handles in the room — so `--reply-policy always` never loops.
+        #[arg(long = "peer")]
+        peers: Vec<String>,
+        /// Persona / context prepended to every prompt. Default explains who it is + that
+        /// it has real file/shell access in its working directory.
+        #[arg(long)]
+        persona: Option<String>,
+        #[arg(long = "persona-file")]
+        persona_file: Option<std::path::PathBuf>,
+        /// Working directory the agent edits files in. Default:
+        /// `~/.local/state/rozum/agent-rooms/<room>` (created on demand, stable across
+        /// restarts so the room keeps its own project).
+        #[arg(long)]
+        workdir: Option<std::path::PathBuf>,
+        /// Gate WHO can trigger a turn by this ACL file's `shell` capability (managed live
+        /// from Telegram). Omitted → anyone the bridge admits can trigger the agent.
+        #[arg(long = "acl")]
+        acl: Option<std::path::PathBuf>,
+        /// The bot's messenger @username, for `--reply-policy mention` detection.
+        #[arg(long = "mention-alias")]
+        mention_alias: Option<String>,
+        /// Kill a stuck agent run after this many seconds (default 600).
+        #[arg(long = "timeout-secs")]
+        timeout_secs: Option<u64>,
+    },
+
     /// Supervise one participant per room: the primary `--room` plus every room in the Telegram
     /// group registry, each with its OWN per-room ACL. Reconciles as groups are connected/
     /// disconnected from the bot (`/addgroup` / `/removegroup`) and respawns crashed children.
@@ -1622,6 +1672,36 @@ async fn main() {
                     shell_no_network,
                     acl,
                     mention_alias,
+                )
+                .await
+            }
+            MeetingsAction::AgentParticipant {
+                agent,
+                model,
+                room,
+                as_handle,
+                reply_policy,
+                peers,
+                persona,
+                persona_file,
+                workdir,
+                acl,
+                mention_alias,
+                timeout_secs,
+            } => {
+                run_meetings_agent_participant(
+                    agent,
+                    model,
+                    room,
+                    as_handle,
+                    reply_policy,
+                    peers,
+                    persona,
+                    persona_file,
+                    workdir,
+                    acl,
+                    mention_alias,
+                    timeout_secs,
                 )
                 .await
             }
@@ -4978,7 +5058,8 @@ async fn run_meetings_participant(
     acl: Option<std::path::PathBuf>,
     mention_alias: Option<String>,
 ) {
-    use rozum::meeting::model_participant::{ReplyPolicy, derive_handle, run};
+    use rozum::meeting::model_participant::run;
+    use rozum::meeting::participant_loop::{ReplyPolicy, derive_handle};
     let policy: ReplyPolicy = match reply_policy.parse() {
         Ok(p) => p,
         Err(e) => {
@@ -5007,6 +5088,55 @@ async fn run_meetings_participant(
     .await
     {
         eprintln!("meetings participant: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// `rozum meetings agent-participant` — join a room as a real coding agent (see
+/// `rozum::meeting::agent_participant`'s module doc for the risk story).
+#[allow(clippy::too_many_arguments)]
+async fn run_meetings_agent_participant(
+    agent: String,
+    model: String,
+    room: String,
+    as_handle: Option<String>,
+    reply_policy: String,
+    peers: Vec<String>,
+    persona: Option<String>,
+    persona_file: Option<std::path::PathBuf>,
+    workdir: Option<std::path::PathBuf>,
+    acl: Option<std::path::PathBuf>,
+    mention_alias: Option<String>,
+    timeout_secs: Option<u64>,
+) {
+    use rozum::meeting::agent_participant::run;
+    use rozum::meeting::participant_loop::ReplyPolicy;
+    let policy: ReplyPolicy = match reply_policy.parse() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("meetings agent-participant: {e}");
+            std::process::exit(1);
+        }
+    };
+    let handle = as_handle.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| agent.clone());
+    // --persona-file takes precedence over inline --persona.
+    let persona = match persona_file {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("meetings agent-participant: --persona-file {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        },
+        None => persona,
+    };
+    if let Err(e) = run(
+        agent, model, room, handle, policy, peers, persona, workdir, acl, mention_alias,
+        timeout_secs,
+    )
+    .await
+    {
+        eprintln!("meetings agent-participant: {e}");
         std::process::exit(1);
     }
 }

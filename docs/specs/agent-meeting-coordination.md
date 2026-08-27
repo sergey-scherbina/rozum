@@ -180,6 +180,35 @@ turn/presence }`. New clients implement this; nothing privileged.
   transports currently preserve the stable external sender ID in message content and use a
   bridge Principal.
 
+## Agent participants: `agent-participant` vs `participant`
+
+Two kinds of automated room member, both joining via the same daemon and sharing one
+join/poll/reply-policy loop (`crates/rozum-meeting/src/meeting/participant_loop.rs`):
+
+- **`rozum meetings participant`** — a CHAT model: answers by calling the local
+  gateway's `/v1/chat/completions`, optionally with file/shell tools confined to
+  `--sandbox <dir>` (`sandbox_tools.rs`).
+- **`rozum meetings agent-participant`** — a real CODING AGENT (`claude` by default,
+  or `nadia`/`codex`/`opencode`): each reply is a full `rozum launch --model
+  <local-spec> --no-room-bridge <agent> -p <prompt> …` subprocess run with real
+  file/shell access in a **working directory**, not a chat completion. Workdir
+  defaults to `~/.local/state/rozum/agent-rooms/<sanitized-room>` (stable across
+  restarts) or an explicit `--workdir`.
+
+Because the Telegram/Discord bridges are agent-agnostic (they relay whatever is in a
+room), pointing a chat at an `agent-participant`'s room (`/addgroup`, or
+`TELEGRAM_EXTRA_CHATS`) is the whole integration — no bridge code changes needed.
+
+**This is a real risk increase over a chat-only participant**: a permitted sender can
+make the agent edit files autonomously, no per-action prompts (same headless shape as
+`coders.rs`'s existing UCC jobs). Bounded by two independent things: the Seatbelt jail
+`rozum launch` puts the agent under by default (`docs/specs/model-sandbox.md` —
+confined to the workdir + toolchain caches, no write outside it, loopback-only
+network), and `--acl <path>` gating WHO can even trigger a turn (checked against the
+sender's `shell` capability). Verified end-to-end 2026-08-28: a room message asking to
+create a file produced a real file in the workdir and a natural-language confirmation
+back in the room, via the real Telegram-facing meeting daemon.
+
 ## Open questions
 
 - Global room: should an agent be in its project room AND `commons` *simultaneously* (needs

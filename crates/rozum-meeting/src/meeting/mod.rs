@@ -1,4 +1,5 @@
 pub mod agent_identity;
+pub mod agent_participant;
 pub mod budget;
 pub mod client;
 pub mod daemon;
@@ -13,6 +14,7 @@ pub mod mcp_server;
 pub mod mention;
 pub mod model_participant;
 pub mod participant;
+pub mod participant_loop;
 pub mod piggyback;
 pub mod proxy;
 pub mod registry;
