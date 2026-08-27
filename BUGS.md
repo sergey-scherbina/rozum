@@ -11,31 +11,51 @@
 sequences and Enter only newlines instead of running the command; `rozum launch nadia` has the
 same broken-Enter symptom without the escape garbage.
 
-**Root cause.** `sandboxed_command` wraps the agent binary in `sandbox-exec -f <profile>` with
-`(deny default)`, and the profile allowed `file-read*` / `file-write*` on `/dev/tty` but never
-`file-ioctl`. `tcsetattr`/`ioctl(fd, TIOCSETA, …)` — what a TUI needs to leave canonical/echo mode
-and enter raw mode — is a distinct Seatbelt category from `file-write*`, so it was silently denied
-under `(deny default)`. With the tty stuck in canonical mode: Enter is handled by the kernel line
+**Root cause, first pass (wrong — reporter caught it):** `sandboxed_command` wraps the agent
+binary in `sandbox-exec -f <profile>` with `(deny default)`, and the profile allowed
+`file-read*`/`file-write*` on `/dev/tty` but never `file-ioctl`. Added
+`(allow file-ioctl (literal "/dev/tty") ...)` mirroring an existing rule in
+`crates/rozum-meeting/src/meeting/sandbox_tools.rs` — built it, confirmed the release binary the
+operator runs actually had the fix (`~/.cargo/bin/rozum-gateway` matched `target/release`
+byte-for-byte), and the operator still reproduced it. That forced verifying the mechanism directly
+instead of trusting the by-analogy fix.
+
+**Root cause, verified with a real pty (`python3 pty.openpty()` under `sandbox-exec`, before vs
+after each change):** a Seatbelt path rule on the **literal** `"/dev/tty"` only matches an
+explicit `open("/dev/tty")` call. stdio inherited from the launching terminal (fd 0/1/2 — the
+normal case for `rozum launch`) resolves to the **real device node**, `/dev/ttysNNN` (confirmed via
+`os.ttyname`), which a literal rule never matches. So both the pre-existing `file-write*` rule and
+the first-pass `file-ioctl` fix were dead code for the actual interactive path: `tcsetattr`'s
+`ioctl(fd, TIOCSETA, …)` — what a TUI needs to leave canonical/echo mode — kept coming back EPERM
+under the sandbox. With the tty stuck in canonical mode: Enter is handled by the kernel line
 discipline (echoes a newline, does not signal "submit" to the app), and any raw escape sequence the
 app would normally intercept (arrow keys, bracketed paste) is left unprocessed and shows up
 literally — exactly `claude`'s symptom; `nadia`'s simpler line-editing has no escape handling to
 break, so only the Enter symptom showed.
 
-Confirmed against a sibling profile already carrying the fix:
-`crates/rozum-meeting/src/meeting/sandbox_tools.rs` (the in-chat shell sandbox) already had
-`(allow file-ioctl (literal "/dev/tty") (literal "/dev/dtracehelper"))` — `src/sandbox.rs`'s
-`rust_coding` profile (the one `rozum launch` actually uses to wrap the agent) never got the same
-rule.
+**Fix.** Added `(regex #"^/dev/ttys[0-9]+$")` alongside the existing `/dev/tty` literal, to both
+the `file-write*` and `file-ioctl` allow rules, in `SandboxPolicy::to_seatbelt_profile`
+(`src/sandbox.rs`) and, for consistency, `sandbox_tools.rs`'s `seatbelt_profile` (same latent gap,
+not reported broken — that path pipes `run_command` output rather than driving a real tty, so it
+likely never hit this in practice, but the rule was equally dead there). Verified against the
+**actual rendered profile** (not a hand-written stand-in) with a real `openpty()` pair: raw-mode
+`tcsetattr` now succeeds where it EPERM'd before.
 
-**Fix.** Added the same `(allow file-ioctl (literal "/dev/tty") (literal "/dev/dtracehelper"))`
-line to `SandboxPolicy::to_seatbelt_profile`. `cargo test -p rozum sandbox::` (14 passed) and the
-macOS-only `generated_profile_parses_and_runs` (run with `--ignored`) both pass — the profile still
-parses and `sandbox-exec` still runs under it.
+**Regression test:** `sandbox::tests::generated_profile_allows_raw_mode_on_the_real_tty_device`
+(macOS-only, `#[ignore]`, run with `--include-ignored`) — spawns `sandbox-exec` under a real pty
+via the BSD `script` utility (a plain pipe has no tty semantics to deny) and asserts a
+`tcsetattr(TIOCSETA)` call succeeds under the generated jail. `cargo test -p rozum sandbox::tests
+-- --include-ignored --skip docker --skip agent_image`: 10 passed (Docker-backed tests skipped, no
+daemon running here).
 
-**Gate:** none yet — the existing sandbox tests assert the profile's write/secret rules but not
-interactive tty behavior (that needs a real pty, which `sandbox-exec` tests here don't spin up).
-Reporter should confirm Enter/escapes now behave normally in `rozum launch claude` / `rozum launch
-nadia` before this moves to `done`.
+**Lesson for next time:** verify the actual syscall behavior (a real pty test) before trusting a
+fix that reads correctly by inspection and matches a sibling profile — "the fix compiles, and a
+similar rule exists elsewhere" is not the same claim as "the rule matches the real path the sandbox
+sees at runtime." The reporter's "still broken" after a byte-identical-binary check was the signal
+that forced this.
+
+**Status:** reporter should confirm Enter/escapes now behave normally in `rozum launch claude` /
+`rozum launch nadia` before this moves to `done`.
 
 ## BUG-058 — a tool-call body generates in silence, and the inactivity watchdog kills it as a wedge
 

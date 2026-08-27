@@ -45,8 +45,8 @@ fn seatbelt_profile(root: &Path, allow_network: bool) -> String {
          (allow ipc-posix-shm*)\n\
          (allow file-read*)\n\
          (allow file-write* (subpath \"{r}\"))\n\
-         (allow file-write-data (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (literal \"/dev/stdout\") (literal \"/dev/stderr\"))\n\
-         (allow file-ioctl (literal \"/dev/tty\") (literal \"/dev/dtracehelper\"))\n\
+         (allow file-write-data (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (literal \"/dev/stdout\") (literal \"/dev/stderr\") (regex #\"^/dev/ttys[0-9]+$\"))\n\
+         (allow file-ioctl (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/ttys[0-9]+$\"))\n\
          {network}\n"
     )
 }

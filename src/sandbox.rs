@@ -252,13 +252,24 @@ impl SandboxPolicy {
         ] {
             p.push_str(&format!("  (literal \"{dev}\")\n"));
         }
+        // `/dev/tty` above is the controlling-terminal ALIAS — it only matches a literal
+        // `open("/dev/tty")`. stdio inherited from the launching terminal (fd 0/1/2, the
+        // normal case for an interactive agent) resolves to the REAL device node,
+        // `/dev/ttysNNN`, which the literal rule never matches. Without this regex, an
+        // interactive agent (claude, nadia) could write echo/prompt bytes (that part
+        // happened to work off other allow-alls) but its ioctl below was matched against
+        // the wrong path and silently denied.
+        p.push_str("  (regex #\"^/dev/ttys[0-9]+$\")\n");
         p.push_str(")\n");
         // `tcsetattr`/`ioctl(TIOCSETA, ...)` on the controlling tty — without this, an
-        // interactive agent (claude, nadia) can never leave canonical/echo mode: Enter
-        // just inserts a newline instead of submitting, and raw escape sequences (arrow
-        // keys, bracketed paste) leak through unprocessed. `(deny default)` blocks ioctl
-        // just like any other syscall; `file-write*` on /dev/tty above does not cover it.
-        p.push_str("(allow file-ioctl (literal \"/dev/tty\") (literal \"/dev/dtracehelper\"))\n");
+        // interactive agent can never leave canonical/echo mode: Enter just inserts a
+        // newline instead of submitting, and raw escape sequences (arrow keys, bracketed
+        // paste) leak through unprocessed. `(deny default)` blocks ioctl like any other
+        // syscall; `file-write*` above does not cover it. Same literal-vs-real-device-path
+        // gotcha as above: both the alias AND the real `/dev/ttysNNN` node are listed.
+        p.push_str(
+            "(allow file-ioctl (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/ttys[0-9]+$\"))\n",
+        );
         // Secrets LAST (Seatbelt is last-match-wins): never readable AND never
         // writable — even when the workspace (e.g. a cwd at `$HOME` under the
         // default-on jail) would otherwise grant write access to a subpath of it.
@@ -909,6 +920,56 @@ mod tests {
         assert!(status.success(), "generated profile failed to parse/run:\n{profile}");
     }
 
+    // BUG-059 regression (macOS only; ignored — spawns a real pty + sandbox-exec):
+    // a plain `file-write*`/`file-ioctl` allow on the LITERAL "/dev/tty" is a no-op
+    // for stdio inherited from the launching terminal — that fd resolves to the REAL
+    // device node, `/dev/ttysNNN`, not the controlling-terminal alias. Without the
+    // `regex #"^/dev/ttys[0-9]+$"` half of the rule, `tcsetattr`'s
+    // `ioctl(fd, TIOCSETA, ...)` came back EPERM under the sandbox, so an interactive
+    // agent could never leave canonical/echo mode: Enter just inserted a newline
+    // instead of submitting. Proven with a real `openpty()` pair, not a plain pipe —
+    // a pipe has no tty semantics to deny.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "spawns sandbox-exec under a real pty (via `script`); macOS only"]
+    fn generated_profile_allows_raw_mode_on_the_real_tty_device() {
+        let pol = SandboxPolicy::rust_coding(&[std::env::temp_dir()], NetPolicy::GatewayOnly);
+        let profile = pol.to_seatbelt_profile();
+        let id = std::process::id();
+        let f = std::env::temp_dir().join(format!("rozum-sbx-tty-{id}.sb"));
+        std::fs::write(&f, &profile).unwrap();
+        let out_file = std::env::temp_dir().join(format!("rozum-sbx-tty-{id}.out"));
+
+        // `script` allocates a REAL pty (unlike a plain pipe, which has no tty semantics to
+        // deny), so stdio inside resolves to `/dev/ttysNNN` — exactly the path the sandbox
+        // profile must allow ioctl on for `tcsetattr` to succeed.
+        let py = "import termios\n\
+                  a = termios.tcgetattr(0)\n\
+                  a[3] &= ~(termios.ICANON | termios.ECHO)\n\
+                  try:\n\
+                  \x20   termios.tcsetattr(0, termios.TCSANOW, a)\n\
+                  \x20   print('RAW-OK')\n\
+                  except Exception as e:\n\
+                  \x20   print('RAW-FAIL', e)\n";
+        let status = std::process::Command::new("script")
+            .arg("-q")
+            .arg(&out_file)
+            .arg("sandbox-exec")
+            .arg("-f")
+            .arg(&f)
+            .arg("python3")
+            .arg("-c")
+            .arg(py)
+            .status()
+            .expect("spawn script");
+        let out = std::fs::read_to_string(&out_file).unwrap_or_default();
+        let _ = std::fs::remove_file(&f);
+        let _ = std::fs::remove_file(&out_file);
+
+        assert!(status.success(), "script/sandbox-exec did not run cleanly:\n{out}");
+        assert!(out.contains("RAW-OK"), "raw-mode ioctl denied under the jail: {out:?}\n{profile}");
+    }
+
     // Full e2e (macOS only; runs cargo + sandbox-exec; ignored — slow): build a
     // real crate INSIDE the rozum-generated jail (proves the toolchain paths are
     // right, so a coding model can actually build) AND prove a write OUTSIDE the
@@ -967,3 +1028,4 @@ mod tests {
         assert!(!leaked, "SANDBOX ESCAPE: wrote outside the workspace");
     }
 }
+
