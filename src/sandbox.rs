@@ -253,6 +253,12 @@ impl SandboxPolicy {
             p.push_str(&format!("  (literal \"{dev}\")\n"));
         }
         p.push_str(")\n");
+        // `tcsetattr`/`ioctl(TIOCSETA, ...)` on the controlling tty — without this, an
+        // interactive agent (claude, nadia) can never leave canonical/echo mode: Enter
+        // just inserts a newline instead of submitting, and raw escape sequences (arrow
+        // keys, bracketed paste) leak through unprocessed. `(deny default)` blocks ioctl
+        // just like any other syscall; `file-write*` on /dev/tty above does not cover it.
+        p.push_str("(allow file-ioctl (literal \"/dev/tty\") (literal \"/dev/dtracehelper\"))\n");
         // Secrets LAST (Seatbelt is last-match-wins): never readable AND never
         // writable — even when the workspace (e.g. a cwd at `$HOME` under the
         // default-on jail) would otherwise grant write access to a subpath of it.

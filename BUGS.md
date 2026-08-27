@@ -1,5 +1,42 @@
 # Bugs
 
+## BUG-059 — the Seatbelt jail around `rozum launch` swallows raw-mode ioctl, breaking Enter and escapes for every interactive agent
+
+- **Status:** FIXED (`src/sandbox.rs`, `SandboxPolicy::to_seatbelt_profile`).
+- **Severity:** P1 — the default-on sandbox (`rozum launch claude`/`nadia`, and any other
+  interactive agent) was unusable: Enter didn't submit, just inserted a newline, and `claude`
+  additionally leaked raw escape sequences onto the screen.
+
+**Reported (operator, interactive session):** `rozum launch claude` prints garbled escape
+sequences and Enter only newlines instead of running the command; `rozum launch nadia` has the
+same broken-Enter symptom without the escape garbage.
+
+**Root cause.** `sandboxed_command` wraps the agent binary in `sandbox-exec -f <profile>` with
+`(deny default)`, and the profile allowed `file-read*` / `file-write*` on `/dev/tty` but never
+`file-ioctl`. `tcsetattr`/`ioctl(fd, TIOCSETA, …)` — what a TUI needs to leave canonical/echo mode
+and enter raw mode — is a distinct Seatbelt category from `file-write*`, so it was silently denied
+under `(deny default)`. With the tty stuck in canonical mode: Enter is handled by the kernel line
+discipline (echoes a newline, does not signal "submit" to the app), and any raw escape sequence the
+app would normally intercept (arrow keys, bracketed paste) is left unprocessed and shows up
+literally — exactly `claude`'s symptom; `nadia`'s simpler line-editing has no escape handling to
+break, so only the Enter symptom showed.
+
+Confirmed against a sibling profile already carrying the fix:
+`crates/rozum-meeting/src/meeting/sandbox_tools.rs` (the in-chat shell sandbox) already had
+`(allow file-ioctl (literal "/dev/tty") (literal "/dev/dtracehelper"))` — `src/sandbox.rs`'s
+`rust_coding` profile (the one `rozum launch` actually uses to wrap the agent) never got the same
+rule.
+
+**Fix.** Added the same `(allow file-ioctl (literal "/dev/tty") (literal "/dev/dtracehelper"))`
+line to `SandboxPolicy::to_seatbelt_profile`. `cargo test -p rozum sandbox::` (14 passed) and the
+macOS-only `generated_profile_parses_and_runs` (run with `--ignored`) both pass — the profile still
+parses and `sandbox-exec` still runs under it.
+
+**Gate:** none yet — the existing sandbox tests assert the profile's write/secret rules but not
+interactive tty behavior (that needs a real pty, which `sandbox-exec` tests here don't spin up).
+Reporter should confirm Enter/escapes now behave normally in `rozum launch claude` / `rozum launch
+nadia` before this moves to `done`.
+
 ## BUG-058 — a tool-call body generates in silence, and the inactivity watchdog kills it as a wedge
 
 - **Status:** FIXED 2026-08-16 (`ChatEvent::Progress` + the tick in `BatchSeq::push`).
