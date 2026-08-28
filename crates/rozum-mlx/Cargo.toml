@@ -71,3 +71,6 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # loads a real model tokenizer to measure token-level acceptance on a real code edit.
 # Dev-only + pure Rust, so it does NOT pull the MLX C++ and the default build is untouched.
 tokenizers = "0.22"
+# Isolated XDG_STATE_HOME per test (elastic-context-on-demand's grow_context tests write to the
+# real residency ledger and must not collide with a real gateway's or another test's files).
+tempfile = "3"

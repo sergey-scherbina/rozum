@@ -329,11 +329,7 @@ pub fn fit_model_params(
     min_free: u64,
     n_ctx_floor: u32,
 ) -> Option<(u32, u64)> {
-    let kv_per_pos = resolve_model_dir(spec)
-        .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|cfg| kv_bytes_per_position(&cfg))
-        .unwrap_or(0);
+    let kv_per_pos = kv_per_pos_bytes(spec);
     // Start from the operator's cache preference, else the size-scaled default (a small model gets a
     // smaller cap — see `default_cache_cap_gib`), and only ever shrink it to fit.
     let max_cache_gib = std::env::var("ROZUM_MLX_CACHE_GB")
@@ -342,6 +338,45 @@ pub fn fit_model_params(
         .unwrap_or_else(|| default_cache_cap_gib(weight_bytes))
         .clamp(1, 8);
     fit_params_with_kv(weight_bytes, kv_per_pos, req_n_ctx, available, min_free, n_ctx_floor, max_cache_gib)
+}
+
+/// KV bytes-per-token for `spec`'s architecture, read from its cached `config.json` — `0` if the
+/// model isn't cached or the config doesn't carry the fields [`kv_bytes_per_position`] recognizes.
+/// Factored out of [`fit_model_params`] so a caller that already has an `n_ctx`/`cache_gib` pair
+/// (e.g. growing an ALREADY-resident model, elastic-context-on-demand) can compute the matching
+/// footprint via [`footprint_for`] without re-deriving this by hand.
+pub fn kv_per_pos_bytes(spec: &str) -> u64 {
+    resolve_model_dir(spec)
+        .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|cfg| kv_bytes_per_position(&cfg))
+        .unwrap_or(0)
+}
+
+/// The on-disk weight size for `spec`, in bytes — `0` if it isn't cached locally. Thin wrapper
+/// over [`resolve_model_dir`] + the catalog's own directory-size scan, exposed so a caller outside
+/// `rozum-models` (a backend deciding whether it can grow its own served context) doesn't need its
+/// own copy of "how big is this checkpoint on disk".
+pub fn model_weight_bytes(spec: &str) -> u64 {
+    resolve_model_dir(spec).map(|d| crate::models::dir_size(&d)).unwrap_or(0)
+}
+
+/// The MLX cache-cap reserve for `cache_gib` — the same constant [`fit_params_with_kv`] budgets
+/// against (`cache_gib` GiB for the cap itself + a fixed 1.5 GiB activation/prefill headroom).
+fn cache_reserve_bytes(cache_gib: u64) -> u64 {
+    const GB: u64 = 1 << 30;
+    cache_gib.saturating_mul(GB).saturating_add(GB + GB / 2)
+}
+
+/// The footprint a load (or a GROWN, already-resident model — elastic-context-on-demand) with
+/// these exact params reserves: weights + `n_ctx` worth of KV + the cache/activation reserve. The
+/// same formula [`fit_model_params`] fits against, exposed so a caller that already has a
+/// `(n_ctx, cache_gib)` pair doesn't have to re-derive it (and can't silently drift from what
+/// admission actually checked).
+pub fn footprint_for(weight_bytes: u64, kv_per_pos: u64, n_ctx: u32, cache_gib: u64) -> u64 {
+    weight_bytes
+        .saturating_add(kv_per_pos.saturating_mul(n_ctx as u64))
+        .saturating_add(cache_reserve_bytes(cache_gib))
 }
 
 /// The pure fitting math (see [`fit_model_params`]) over an explicit `kv_per_pos` + cache ceiling —
@@ -356,18 +391,11 @@ fn fit_params_with_kv(
     n_ctx_floor: u32,
     max_cache_gib: u64,
 ) -> Option<(u32, u64)> {
-    const GB: u64 = 1 << 30;
     let budget = available.saturating_sub(min_free);
-    let reserve = |cache_gib: u64| cache_gib.saturating_mul(GB).saturating_add(GB + GB / 2);
-    let footprint = |n_ctx: u64, cache_gib: u64| {
-        weight_bytes
-            .saturating_add(kv_per_pos.saturating_mul(n_ctx))
-            .saturating_add(reserve(cache_gib))
-    };
     // 1. Requested context fits → keep it; prefer the largest cache (≤ the ceiling) that still fits.
     let mut cache_gib = max_cache_gib.max(1);
     loop {
-        if footprint(req_n_ctx as u64, cache_gib) <= budget {
+        if footprint_for(weight_bytes, kv_per_pos, req_n_ctx, cache_gib) <= budget {
             return Some((req_n_ctx, cache_gib));
         }
         if cache_gib <= 1 {
@@ -379,7 +407,7 @@ fn fit_params_with_kv(
     if kv_per_pos == 0 {
         return None; // can't shrink without a KV term, and the request didn't fit
     }
-    let room = budget.saturating_sub(weight_bytes.saturating_add(reserve(1)));
+    let room = budget.saturating_sub(weight_bytes.saturating_add(cache_reserve_bytes(1)));
     let max_n_ctx = (room / kv_per_pos / 1024) * 1024;
     let n_ctx = max_n_ctx.min(req_n_ctx as u64);
     (n_ctx >= n_ctx_floor as u64).then_some((n_ctx as u32, 1))
@@ -389,11 +417,24 @@ fn fit_params_with_kv(
 mod tests {
     use super::{
         activation_reserve_bytes, config_model_type, default_cache_cap_gib, fit_params_with_kv,
-        kv_bytes_per_position, process_reserve_bytes, resolve_model_dir, runtime_active_bytes,
-        runtime_footprint_bytes, same_model, spec_to_hf_repo,
+        footprint_for, kv_bytes_per_position, process_reserve_bytes, resolve_model_dir,
+        runtime_active_bytes, runtime_footprint_bytes, same_model, spec_to_hf_repo,
     };
 
     const GB: u64 = 1 << 30;
+
+    // elastic-context-on-demand: footprint_for must agree with what fit_params_with_kv itself
+    // checks against `budget` — a caller growing an already-resident model computes the ledger
+    // reservation to publish from THIS, and it must be the exact number admission was fit against.
+    #[test]
+    fn footprint_for_matches_the_fit_boundary() {
+        const KV: u64 = 128 * 1024;
+        let w = 17 * GB;
+        // At exactly the fit boundary from the test below: 8192 ctx, 2 GiB cache, tight budget.
+        let budget = 26 * GB - 3 * GB; // available - min_free from the case that picked cache=2
+        assert!(footprint_for(w, KV, 8192, 2) <= budget, "the case that fit at cache=2 must still fit");
+        assert!(footprint_for(w, KV, 8192, 4) > budget, "the case that needed to shrink must still not fit at cache=4");
+    }
 
     // Adaptive loading: pick the best (largest n_ctx, then largest cache) params that fit available
     // RAM; refuse only if the weights themselves don't fit. KV = 128 KiB/token (so n_ctx 8192 ⇒ 1 GiB).

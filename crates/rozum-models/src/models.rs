@@ -218,7 +218,9 @@ fn home() -> PathBuf {
     rozum_paths::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn dir_size(path: &Path) -> u64 {
+/// Total bytes under `path` (symlinks resolved — hf-hub snapshot dirs are symlink forests into
+/// `blobs/`). Recursive. `0` for a missing/unreadable directory.
+pub fn dir_size(path: &Path) -> u64 {
     let mut total = 0u64;
     let Ok(entries) = std::fs::read_dir(path) else {
         return 0;

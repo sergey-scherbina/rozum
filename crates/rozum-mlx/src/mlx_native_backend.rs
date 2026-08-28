@@ -441,7 +441,19 @@ mod inner {
         /// Metal context).
         worker: Option<thread::JoinHandle<()>>,
         model_id: String,
-        n_ctx: u32,
+        /// The CURRENTLY served ceiling — an atomic (elastic-context-on-demand) so `try_grow_context`
+        /// can raise it in place, with no drain/reload: nothing in the load path pre-allocates
+        /// against this value (KV grows lazily; see the module doc), so it's a live policy number,
+        /// not a buffer size. `context_window()` reads it fresh on every call.
+        n_ctx: std::sync::atomic::AtomicU32,
+        /// The model's real architectural ceiling (`max_position_embeddings`, BEFORE any adaptive/
+        /// CLI cap) — `try_grow_context` never raises `n_ctx` past this. Immutable for the backend's
+        /// lifetime (it describes the checkpoint, not the RAM decision).
+        arch_max_n_ctx: u32,
+        /// On-disk weight size, for the same footprint formula the initial admission reservation
+        /// used ([`rozum_models::model_source::footprint_for`]) — needed to compute what a GROWN
+        /// reservation should publish to the ledger.
+        weight_bytes: u64,
         /// Set if this model was ever co-resident with another (its process-global peak is then
         /// contaminated → not recorded to the footprint cache). See [`LIVE_RESIDENTS`].
         co_resident: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -529,10 +541,12 @@ mod inner {
             max_ctx: Option<u32>,
         ) -> ModelResult<Self> {
             cap_mlx_memory();
-            let (mut n_ctx, eos, model_type, kv_per_pos) = read_config(&model_dir);
+            let (arch_max_n_ctx, eos, model_type, kv_per_pos) = read_config(&model_dir);
+            let mut n_ctx = arch_max_n_ctx;
             if let Some(cap) = max_ctx {
                 n_ctx = n_ctx.min(cap);
             }
+            let weight_bytes = rozum_models::models::dir_size(&model_dir);
             let (jobs_tx, jobs_rx) = mpsc::unbounded_channel::<Job>();
             let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
             let label = model_id.clone();
@@ -565,7 +579,9 @@ mod inner {
                         jobs: Some(jobs_tx),
                         worker: Some(worker),
                         model_id,
-                        n_ctx,
+                        n_ctx: std::sync::atomic::AtomicU32::new(n_ctx),
+                        arch_max_n_ctx,
+                        weight_bytes,
                         co_resident,
                         jobs_in_channel,
                     })
@@ -654,7 +670,15 @@ mod inner {
         }
 
         fn context_window(&self) -> u32 {
-            self.n_ctx
+            self.n_ctx.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        fn max_context_window(&self) -> u32 {
+            self.arch_max_n_ctx
+        }
+
+        fn try_grow_context(&self, want: u32) -> u32 {
+            grow_context(&self.n_ctx, self.arch_max_n_ctx, self.weight_bytes, &self.model_id, want)
         }
 
         fn label(&self) -> &'static str {
@@ -668,6 +692,188 @@ mod inner {
             // worker can batch them (continuous batched decode, dense Qwen3 + greedy);
             // 1 = the proven serial path. Non-batchable requests still run serially.
             Some(batch_cap())
+        }
+    }
+
+    /// elastic-context-on-demand: try to raise `n_ctx` toward `want`, never past `arch_max_n_ctx`,
+    /// checking a live RAM/ledger admission before committing. Free function (not a method) so the
+    /// decision logic is testable without a live `MlxNativeBackend` (which needs a real worker
+    /// thread + loaded model) — `context_window`/`try_grow_context` are thin wrappers over this.
+    ///
+    /// Order matters for the hard invariant (`docs/specs/residency-admission-queue.md`): the ledger
+    /// reservation is grown FIRST, `n_ctx` is bumped SECOND — a reader must never see a served
+    /// ceiling wider than what's actually reserved. `update_own_footprint` best-effort swallows IO
+    /// errors (same as the rest of the residency ledger); if it fails, `n_ctx` is not bumped either,
+    /// so the two can't drift apart.
+    fn grow_context(
+        n_ctx: &std::sync::atomic::AtomicU32,
+        arch_max_n_ctx: u32,
+        weight_bytes: u64,
+        model_id: &str,
+        want: u32,
+    ) -> u32 {
+        use std::sync::atomic::Ordering;
+        let current = n_ctx.load(Ordering::Relaxed);
+        if matches!(std::env::var("ROZUM_ELASTIC_CTX").ok().as_deref(), Some("0" | "false" | "off")) {
+            return current; // ROZUM_ELASTIC_CTX=0: today's fixed-at-load behavior
+        }
+        let want = want.min(arch_max_n_ctx);
+        if want <= current {
+            return current; // nothing to gain — already there, or already past the model's own max
+        }
+        let Some(available) = rozum_core::share::available_ram_for_admission() else {
+            return current; // can't measure free RAM → don't guess
+        };
+        let min_free = rozum_core::share::min_free_ram_bytes();
+        // Reuses the EXACT load-time fitting math: the largest n_ctx (≤ `want`) that fits `available`
+        // right now, never smaller than what's already served (`current` as the floor — a transient
+        // RAM squeeze must never SHRINK an already-committed ceiling here; that is a separate,
+        // deliberate lever, not a side effect of a failed grow attempt).
+        let Some((fit_n_ctx, fit_cache_gib)) =
+            crate::model_source::fit_model_params(model_id, weight_bytes, want, available, min_free, current)
+        else {
+            return current; // even `current` no longer fits (RAM got tighter since load) — leave it
+        };
+        if fit_n_ctx <= current {
+            return current; // RAM-constrained: no real room to grow into right now
+        }
+        let kv_per_pos = crate::model_source::kv_per_pos_bytes(model_id);
+        let new_footprint = crate::model_source::footprint_for(weight_bytes, kv_per_pos, fit_n_ctx, fit_cache_gib);
+        // Ledger lever: the grown TOTAL must still fit against every OTHER resident's reservation +
+        // the host budget — `dry_run_admission` runs the exact same two-lever check a fresh load
+        // would (ledger AND actual-free-RAM AND kernel pressure), just without taking the admit lock
+        // (nothing else is being loaded right now; there's no race to serialize against).
+        if !rozum_core::share::dry_run_admission(new_footprint).admit {
+            return current;
+        }
+        if !rozum_core::share::update_own_footprint(model_id, new_footprint) {
+            return current; // couldn't publish the new reservation — do NOT grow n_ctx past it
+        }
+        n_ctx.store(fit_n_ctx, Ordering::Relaxed);
+        eprintln!(
+            "mlx-native: grew served context {current} → {fit_n_ctx} tokens on demand \
+             ({fit_cache_gib} GiB cache, footprint now {} MB)",
+            new_footprint / 1_048_576,
+        );
+        fit_n_ctx
+    }
+
+    #[cfg(test)]
+    mod grow_context_tests {
+        use super::*;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // Serializes the tests below that mutate process-global env vars (RAM override,
+        // XDG_STATE_HOME) — same reason `rozum-core`'s own env-mutating tests serialize
+        // themselves, just a local lock since this is a different crate's test binary.
+        fn env_lock() -> &'static std::sync::Mutex<()> {
+            static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+            LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        }
+
+        #[test]
+        fn noop_when_want_is_already_covered() {
+            let n_ctx = AtomicU32::new(8192);
+            // No env touched, no RAM/ledger call reachable — proven by NOT needing the lock: if this
+            // read past the early return it would race every other test in this module.
+            assert_eq!(grow_context(&n_ctx, 32768, 999 << 30, "irrelevant/model", 8192), 8192);
+            assert_eq!(grow_context(&n_ctx, 32768, 999 << 30, "irrelevant/model", 4096), 8192);
+            assert_eq!(n_ctx.load(Ordering::Relaxed), 8192, "must not have touched n_ctx");
+        }
+
+        #[test]
+        fn never_exceeds_the_architectural_max() {
+            // want (99999) is capped to arch_max (8192) BEFORE comparing to current (8192) — so this
+            // resolves to the same no-RAM-touched early return as the case above, deterministically.
+            let n_ctx = AtomicU32::new(8192);
+            assert_eq!(grow_context(&n_ctx, 8192, 999 << 30, "irrelevant/model", 99_999), 8192);
+        }
+
+        #[test]
+        fn rozum_elastic_ctx_0_disables_growth() {
+            let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("ROZUM_ELASTIC_CTX");
+            unsafe { std::env::set_var("ROZUM_ELASTIC_CTX", "0") };
+            // A `want` well above `current` and within `arch_max` would normally reach the RAM/ledger
+            // checks — the opt-out must short-circuit before any of that.
+            let n_ctx = AtomicU32::new(4096);
+            assert_eq!(grow_context(&n_ctx, 32768, 2u64 << 30, "irrelevant/model", 16384), 4096);
+            unsafe {
+                match prev {
+                    Some(v) => std::env::set_var("ROZUM_ELASTIC_CTX", v),
+                    None => std::env::remove_var("ROZUM_ELASTIC_CTX"),
+                }
+            }
+        }
+
+        #[test]
+        fn grows_when_ram_and_ledger_allow() {
+            let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().unwrap();
+            let prev_xdg = std::env::var_os("XDG_STATE_HOME");
+            let prev_ram = std::env::var_os("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES");
+            let prev_pressure = std::env::var_os("ROZUM_HOST_PRESSURE");
+            unsafe {
+                std::env::set_var("XDG_STATE_HOME", dir.path());
+                // Plenty of room: 32 GiB free, min_free is a small fixed floor.
+                std::env::set_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES", (32u64 << 30).to_string());
+                // Pin kernel pressure: this reads the REAL host, not the RAM-bytes override, and a
+                // busy dev machine makes the admit check fail for reasons this test isn't about
+                // (rozum-core's own admission tests hit exactly this and pin it the same way).
+                std::env::set_var("ROZUM_HOST_PRESSURE", "normal");
+            }
+            // grow_context updates an EXISTING reservation (`update_own_footprint`) — it never
+            // creates one, same as the real gateway process, which acquires it once at load time
+            // via `acquire_residency` and only ever grows it in place afterward.
+            let _residency = rozum_core::share::acquire_residency("test/does-not-exist", 2u64 << 30)
+                .expect("test setup: acquire the initial reservation this pid's grow will update");
+            let n_ctx = AtomicU32::new(4096);
+            // Unresolvable spec → kv_per_pos_bytes() == 0, so `fit_model_params` only has to fit
+            // weight_bytes + the cache reserve — a small, controlled footprint (2 GiB weights).
+            let grown = grow_context(&n_ctx, 32768, 2u64 << 30, "test/does-not-exist", 16384);
+            assert!(grown > 4096, "expected growth with 32 GiB free and a 2 GiB model, got {grown}");
+            assert_eq!(n_ctx.load(Ordering::Relaxed), grown, "n_ctx must reflect the grant");
+            unsafe {
+                match prev_xdg {
+                    Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                    None => std::env::remove_var("XDG_STATE_HOME"),
+                }
+                match prev_ram {
+                    Some(v) => std::env::set_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES", v),
+                    None => std::env::remove_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES"),
+                }
+                match prev_pressure {
+                    Some(v) => std::env::set_var("ROZUM_HOST_PRESSURE", v),
+                    None => std::env::remove_var("ROZUM_HOST_PRESSURE"),
+                }
+            }
+        }
+
+        #[test]
+        fn declines_when_ram_is_tight() {
+            let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().unwrap();
+            let prev_xdg = std::env::var_os("XDG_STATE_HOME");
+            let prev_ram = std::env::var_os("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES");
+            unsafe {
+                std::env::set_var("XDG_STATE_HOME", dir.path());
+                // Less free RAM than the model's own weights — nothing can fit, grow or not.
+                std::env::set_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES", (1u64 << 30).to_string());
+            }
+            let n_ctx = AtomicU32::new(4096);
+            let grown = grow_context(&n_ctx, 32768, 8u64 << 30, "test/does-not-exist", 16384);
+            assert_eq!(grown, 4096, "must decline and leave n_ctx exactly as it was");
+            assert_eq!(n_ctx.load(Ordering::Relaxed), 4096);
+            unsafe {
+                match prev_xdg {
+                    Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                    None => std::env::remove_var("XDG_STATE_HOME"),
+                }
+                match prev_ram {
+                    Some(v) => std::env::set_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES", v),
+                    None => std::env::remove_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES"),
+                }
+            }
         }
     }
 
@@ -3035,7 +3241,13 @@ mod inner {
                         jobs: Some(jobs_tx),
                         worker: Some(worker),
                         model_id: target_id,
-                        n_ctx,
+                        n_ctx: std::sync::atomic::AtomicU32::new(n_ctx),
+                        // Elastic growth is not supported for spec-decode (out of scope, see
+                        // docs/specs/elastic-context-on-demand.md): `arch_max_n_ctx == n_ctx` makes
+                        // `try_grow_context` a guaranteed no-op (`want.min(arch_max) <= current`
+                        // always holds), and `weight_bytes` is never read in that path.
+                        arch_max_n_ctx: n_ctx,
+                        weight_bytes: 0,
                         co_resident,
                         jobs_in_channel: std::sync::Arc::new(
                             std::sync::atomic::AtomicUsize::new(0),

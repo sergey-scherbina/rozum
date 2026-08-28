@@ -1,6 +1,7 @@
 # Spec: elastic context on demand — grow a resident model's served n_ctx live, shrink it back when idle
 
-Status: 2026-08-28 — DRAFT (operator-proposed). Builds on the shipped
+Status: 2026-08-28 — **SHIPPED (v1: grow only — no preemption, no shrink-back; see Decisions).**
+Builds on the shipped
 `docs/specs/residency-admission-queue.md` (cooperative preemption, event-driven wait queue)
 and `docs/specs/safe-multi-model-residency.md` (the RAM ledger, `crates/rozum-core/src/share.rs`).
 
@@ -23,56 +24,64 @@ load time by adaptive-load's RAM estimate. A policy number can be changed live.
 
 ## Interface
 
-- No required CLI/config change — the behavior is automatic once enabled. `ROZUM_ELASTIC_CTX=0`
-  disables it (falls back to today's fixed-at-load behavior), matching the existing
-  `ROZUM_GATEWAY_ADAPTIVE_LOAD` opt-out convention.
-- `rozum-mlx`: the backend's stored `n_ctx: u32` becomes an `AtomicU32` (or an equivalent interior-
-  mutable cell); `context_window()` reads it fresh on every call instead of returning a value fixed
-  at construction.
-- `rozum-core/src/share.rs`: a new ledger operation, `update_footprint(pid, new_footprint) -> bool`
-  — rewrites an **already-admitted** resident's `residents/<pid>` entry in place, under the same
-  `residency.lock` and the same `admits` check the initial `acquire_residency` uses (grow is a
-  second admission decision, not a bypass). Shrink is unconditional (always safe to reserve less).
-- Reuses, unchanged: the `preempt/<pid>` cooperative-preemption protocol (`request_preemption`,
-  `preempt_requested`, `clear_preemption`, `pick_preempt_victim`) from the admission queue.
+- No required CLI/config change — the behavior is automatic. `ROZUM_ELASTIC_CTX=0` disables it
+  (falls back to today's fixed-at-load behavior), matching the existing `ROZUM_GATEWAY_ADAPTIVE_LOAD`
+  opt-out convention.
+- `ChatBackend` trait (`rozum-core/src/backend.rs`) gained two default methods, so every OTHER
+  backend keeps compiling unchanged: `max_context_window()` (default: same as `context_window()` —
+  never grows) and `try_grow_context(want) -> u32` (default: no-op, returns `context_window()`).
+  Only `mlx-native` overrides both.
+- `rozum-mlx`: `MlxNativeBackend`'s `n_ctx` field is now `AtomicU32` (was `u32`); two new immutable
+  fields, `arch_max_n_ctx` (the real ceiling from `config.json`, captured before any adaptive/CLI
+  cap) and `weight_bytes` (on-disk size, for the footprint formula). `context_window()` reads the
+  atomic fresh; `try_grow_context` delegates to a free function `grow_context` (kept free so the
+  decision logic is unit-testable without a live worker thread + loaded model).
+- `rozum-models/src/model_source.rs` gained three small pure exports, factored out of the existing
+  `fit_model_params`/`fit_params_with_kv` rather than duplicated: `kv_per_pos_bytes(spec)`,
+  `model_weight_bytes(spec)`, `footprint_for(weight_bytes, kv_per_pos, n_ctx, cache_gib)`.
+  `models::dir_size` went from private to `pub` for the same reason.
+- `rozum-core/src/share.rs` gained `update_own_footprint(model, new_footprint) -> bool` — updates
+  the CALLING PROCESS's own `residents/<mypid>` entry via `std::process::id()`, no `ResidencyGuard`
+  handle needed (the guard is held several layers away, in `main.rs`'s startup code, unreachable
+  from deep inside the backend). Turned out `ResidencyGuard::update_footprint` and
+  `dry_run_admission` already existed (residency-unify U1) — no NEW ledger primitive was needed for
+  the admission check itself, only this pid-keyed variant of the write.
 
 ## Behavior
 
-- [ ] A request whose estimated prompt tokens exceed the currently served `n_ctx`, but fit within
+- [x] A request whose estimated prompt tokens exceed the currently served `n_ctx`, but fit within
       the model's real architectural max, triggers a grow attempt **before** `fit_to_context` trims
       history — trimming stays the fallback, not the first move.
-- [ ] Grow attempt: ask the ledger whether raising this resident's footprint by the delta still
-      satisfies `admits` (ledger sum **and** actual-free-RAM, same two-lever check the initial load
-      uses). If yes: `update_footprint` + flip the atomic `n_ctx` — no drain, no reload, in-flight
-      requests unaffected, this request proceeds at the new ceiling.
-- [ ] If it doesn't fit: look for an **idle** (`inflight == 0`), lower-or-equal-priority sibling and
-      request preemption via the existing `preempt/<pid>` file — same mechanism the admission queue
-      already uses for a new model's load, retargeted at "make room for a grow" instead of "make room
-      for a new resident." Bounded wait (short — this is in the hot path of a live request, not a
-      cold load); on timeout, proceed to the fallback.
-- [ ] Fallback (preemption unavailable, or nothing frees in time): trim to the **current** `n_ctx`
-      exactly as today — a grow attempt must never turn into a request failure or a hang.
-- [ ] Shrink-back: a resident whose actual usage has stayed well under an elevated `n_ctx` for a
-      cooldown window (idle, no growth pressure) voluntarily lowers its own reservation back toward
-      the RAM-derived floor `adapt_n_ctx_to_fit` would have picked fresh — same spirit as the
-      existing idle-shed behavior, so elevated reservations don't squat on RAM indefinitely.
-- [ ] The hard invariant from `residency-admission-queue.md` holds at every instant: the ledger
-      update and the atomic `n_ctx` flip are ordered so there is never a window where the reservation
-      lags what could actually be requested (grow the ledger entry **first**, flip `n_ctx` **second**;
-      shrink is the reverse order).
-- [ ] `mistralrs` backend: excluded from live-grow (see Decisions) — a request there still falls
-      through to today's trim-at-current-n_ctx behavior; growing that backend's ceiling still
-      requires `gateway switch` (a real reload), unchanged by this spec.
+      (`crates/rozum-gateway/src/gateway.rs`, the `estimate_prompt_tokens` pre-fit check.)
+- [x] Grow attempt: ask the ledger whether raising this resident's footprint to the new total still
+      satisfies `dry_run_admission` (ledger sum **and** actual-free-RAM **and** kernel pressure, the
+      same three-lever check the initial load uses). If yes: `update_own_footprint` + store the
+      atomic `n_ctx` — no drain, no reload, in-flight requests unaffected, this request proceeds at
+      the new ceiling. (`grow_context` in `mlx_native_backend.rs`.)
+- [ ] ~~If it doesn't fit: preempt an idle sibling.~~ **NOT built in v1** — see Decisions. Today a
+      grow that doesn't fit just falls through to the existing trim fallback.
+- [x] Fallback (nothing to grow into): trim to the **current** `n_ctx` exactly as today — a grow
+      attempt never turns into a request failure or a hang (every early-return in `grow_context`
+      returns `current` unchanged, never an error).
+- [ ] ~~Shrink-back after an idle cooldown.~~ **NOT built in v1** — see Decisions. An elevated
+      reservation is released only by an operator-initiated `gateway switch` (unchanged, pre-existing
+      lever), same as before this spec.
+- [x] The hard invariant from `residency-admission-queue.md` holds at every instant: the ledger
+      update happens FIRST (`update_own_footprint`), the atomic `n_ctx` store SECOND, and only if the
+      ledger write itself succeeded — a reader can never see a served ceiling wider than what's
+      actually reserved.
+- [x] `mistralrs` backend: excluded from live-grow via the trait's default no-op — a request there
+      still falls through to today's trim-at-current-n_ctx behavior; growing that backend's ceiling
+      still requires `gateway switch` (a real reload), unchanged by this spec.
+- [x] `ROZUM_ELASTIC_CTX=0` disables growth entirely (checked first in `grow_context`, before
+      touching RAM/ledger at all).
 
 ## Out of scope
 
 - Continuous/periodic RAM re-measurement — explicitly rejected by the operator; this is
   event-triggered only, on an actual request that needs more room.
-- Partially shrinking an idle sibling's *own* served `n_ctx` to free room (rather than fully
-  preempting/unloading it). The existing preemption primitive only knows whole-resident eviction;
-  teaching a sibling to shrink itself on request is the same live-adjust machinery this spec builds,
-  recursively applied to another process — worth a follow-up once whole-eviction is proven
-  insufficient in practice, not built speculatively now.
+- Preempting an idle sibling when a grow doesn't fit on its own, and shrinking an elevated
+  reservation back down after a cooldown — both PLANNED but deferred out of v1; see Decisions.
 - `mistralrs` / any backend whose KV pool is pre-allocated at load (PagedAttention) — needs an
   actual reload; out of scope here, `gateway switch` already covers it.
 - Growing past the model's own architectural `max_position_embeddings` — never a goal; the ceiling
@@ -81,30 +90,37 @@ load time by adaptive-load's RAM estimate. A policy number can be changed live.
 
 ## Design
 
+As shipped (v1 — no preemption branch, see Decisions):
+
 ```
 request arrives, prompt tokens > current n_ctx (but ≤ model's real max)
+        │                                            gateway.rs, before fit_to_context
+        ▼
+  backend.try_grow_context(want)
+        │                                            mlx_native_backend.rs::grow_context
+        ▼
+  ROZUM_ELASTIC_CTX=0? ──yes──▶ return current (fallback)
+        │no
+        ▼
+  fit_model_params(spec, weight_bytes, want, available_ram_now, min_free, current)
+        │                                            reuses the EXACT load-time fitting math
+        ├─ None, or fit_n_ctx ≤ current ─────────────▶ return current (fallback)
+        │
+        ▼ fit_n_ctx > current
+  footprint_for(weight_bytes, kv_per_pos, fit_n_ctx, fit_cache_gib)
         │
         ▼
-  try_grow(delta)                         (new, gateway.rs, before fit_to_context)
-        │
-        ├─ share::admits(my_pid, footprint + delta)?  ──yes──▶ update_footprint + n_ctx.store(new)
-        │         │no
-        │         ▼
-        │  pick an idle, ≤-priority sibling (reuse pick_preempt_victim)
-        │         │
-        │         ├─ found ──▶ request_preemption(victim) ──▶ bounded wait for it to free
-        │         │                    │ freed in time            │ timed out
-        │         │                    ▼                          ▼
-        │         │              retry admits() once          fall through
-        │         │                                                │
-        │         └─ none found ─────────────────────────────────►│
-        ▼                                                          ▼
-  (grown — proceed at new n_ctx)                      fit_to_context(current n_ctx) — today's path
+  dry_run_admission(new_footprint).admit?  ──no──────▶ return current (fallback)
+        │yes
+        ▼
+  update_own_footprint(model, new_footprint)  ──failed──▶ return current (fallback)
+        │ok
+        ▼
+  n_ctx.store(fit_n_ctx)  →  return fit_n_ctx (grown)
 ```
 
-Shrink-back runs on the existing idle-watch tick already present for idle-shed (whichever loop
-polls `inflight`/last-activity for that purpose today) — added as one more condition on the same
-tick, not a new timer.
+Every non-growth path returns `current` unchanged and falls through to `fit_to_context(current)` —
+today's trim behavior, verbatim.
 
 ## Decisions
 
@@ -121,13 +137,23 @@ tick, not a new timer.
   need the pool itself resized, which is a reload. Rejected doing both backends in one pass: the
   mistralrs path already has a working lever (`gateway switch`) and conflating "make mlx-native
   live-elastic" with "make mistralrs live-elastic too" would block the easy 90% behind the hard 10%.
-- **Reuse whole-resident preemption rather than inventing partial-shrink-of-siblings** — chosen
-  because whole-eviction of an idle victim is already shipped and proven
-  (`residency-admission-queue.md` P4/P5); asking a sibling to shrink *itself* by some delta is the
-  same live-adjust capability this spec is building, applied recursively to another process. Simpler
-  to ship "evict the idle victim entirely" first and observe whether that's too coarse in practice
-  (an idle sibling losing its whole resident state to free 2 GB) before building the finer-grained
-  version.
+- **Preemption of idle siblings deferred out of v1, not built** — the original plan was to reuse
+  whole-resident preemption (`residency-admission-queue.md` P4/P5) when a grow doesn't fit on its
+  own. Cut from v1 for two reasons found while implementing, not anticipated when this spec was
+  drafted: (1) preemption is currently keyed to a NEW model's cold load, not a live in-flight
+  request — retargeting it needs the SAME bounded-wait-in-the-hot-path plumbing this spec already
+  has to get right once (the grow attempt itself), and doing both in one pass risked neither being
+  well-tested; (2) the fallback (trim to `current`) is a genuinely fine outcome, not a degraded one
+  — it's exactly what happens today, unconditionally. Shipping grow-only first, observing how often
+  the fallback actually fires in practice (see Results), is the same "ship the easy 90%, don't block
+  it behind the hard 10%" call already made for `mlx-native`-only. Revisit as its own follow-up spec
+  if the fallback rate turns out to matter.
+- **Shrink-back deferred out of v1, not built** — same reasoning: no existing idle-watch tick to
+  hang a "release what I grew and haven't used" condition on was found without adding new
+  background-timer machinery, which sits uneasily next to "event-triggered, not continuous polling"
+  being the entire point of this feature. An elevated reservation today is released the same way any
+  reservation was released before this spec: an operator-run `gateway switch`. Worth a follow-up
+  once it's clear grows are common enough that never shrinking back actually costs something.
 - **Grow-then-flip ordering (ledger before n_ctx, not after)** — chosen to preserve the hard
   invariant from `residency-admission-queue.md`: the reservation must never lag what a request could
   actually claim. Shrinking reverses the order (flip `n_ctx` down first, then release the
@@ -136,5 +162,26 @@ tick, not a new timer.
 
 ## Results
 
-<!-- fill in after implementation: measured grow/shrink latency, whether the preemption path was
-ever exercised in practice, any cases where the fallback (trim) fired instead of growing. -->
+Shipped as: `crates/rozum-core/src/backend.rs` (trait defaults), `crates/rozum-core/src/share.rs`
+(`update_own_footprint`), `crates/rozum-models/src/model_source.rs` (`kv_per_pos_bytes`,
+`model_weight_bytes`, `footprint_for`, `dir_size` → `pub`), `crates/rozum-mlx/src/mlx_native_backend.rs`
+(`grow_context` + wiring), `crates/rozum-gateway/src/gateway.rs` (the pre-fit trigger).
+
+Tests: 5 new (`grow_context_tests` in `mlx_native_backend.rs`) covering the no-op/capped/opt-out
+fast paths (no I/O) and the grow/decline paths against a real isolated ledger
+(`XDG_STATE_HOME` + `ROZUM_GATEWAY_AVAILABLE_RAM_BYTES` + `ROZUM_HOST_PRESSURE` pinned, following
+the exact pattern `rozum-core`'s own admission tests already use to stay host-independent) — plus 1
+new test each in `rozum-models` (`footprint_for` agrees with the fit boundary) confirming the
+extraction didn't drift from the formula it replaced. Full existing suites re-run clean after the
+change: `rozum-core` 169, `rozum-models` 26, `rozum-gateway` 161, `rozum-mlx` 49 (44 ignored/live).
+
+One real bug caught by the "grows" test before it was a test-setup bug, not a real one, worth
+recording: `update_own_footprint` correctly refused (returns `false`) when no `residents/<mypid>`
+file exists yet — which is exactly the real gateway's shape (a reservation always exists first, via
+`acquire_residency` at load), but the FIRST version of the test never created one. Fixed by having
+the test call the real `acquire_residency` first, which is arguably the more honest test anyway (it
+exercises the actual read-then-grow shape a live gateway would follow, not the update in isolation).
+
+Not yet measured (needs live traffic, not unit tests): how often the fallback (trim) actually fires
+vs. a successful grow in practice, and whether that rate justifies building the deferred preemption/
+shrink-back halves.

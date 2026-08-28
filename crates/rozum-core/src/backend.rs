@@ -281,8 +281,26 @@ impl AdmissionSnapshot {
 #[async_trait::async_trait]
 pub trait ChatBackend: Send + Sync {
     async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream>;
-    /// Maximum context length in tokens this backend accepts.
+    /// Maximum context length in tokens this backend accepts RIGHT NOW — may be smaller than
+    /// [`Self::max_context_window`] (elastic-context-on-demand: RAM allowed less at load time than
+    /// the model architecturally supports).
     fn context_window(&self) -> u32;
+    /// The largest [`Self::context_window`] could ever grow to via [`Self::try_grow_context`] — the
+    /// model's real architectural ceiling. Default: same as `context_window()`, i.e. this backend
+    /// never grows (most backends: the served ceiling is fixed for the process's lifetime).
+    fn max_context_window(&self) -> u32 {
+        self.context_window()
+    }
+    /// Try to raise the served ceiling to (at most) `want` tokens, checking a live RAM/ledger
+    /// admission before committing — never past [`Self::max_context_window`], never by shrinking.
+    /// Returns the ceiling AFTER the attempt: unchanged (`context_window()`) if `want` was already
+    /// at or below it, if there wasn't room, or if this backend doesn't support growing at all
+    /// (the default no-op). A backend that does support it (`mlx-native`) reserves the delta against
+    /// the host RAM ledger before returning a larger number, so a caller never has to admission-check
+    /// this itself. Called on the hot request path — must be cheap when there's nothing to do.
+    fn try_grow_context(&self, _want: u32) -> u32 {
+        self.context_window()
+    }
     /// Short identifier for observability (`GET /stats`, the JSONL log).
     fn label(&self) -> &'static str {
         "backend"

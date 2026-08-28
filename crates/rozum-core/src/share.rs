@@ -623,6 +623,21 @@ fn write_resident_entry(
     file.flush()
 }
 
+/// Update THIS process's own resident-reservation footprint in place, without needing a handle to
+/// the [`ResidencyGuard`] returned at load time. elastic-context-on-demand: the decision to grow a
+/// served context lives deep inside the backend crate, several layers away from wherever the guard
+/// returned by [`acquire_residency`] is held (the process's startup code) — `mypid` is always THIS
+/// process's own reservation, so no handle is needed to find it. `false` if this process never
+/// acquired one (no `residents/<mypid>` file) — a caller that reaches this should already know it
+/// holds a reservation, so that case is "did not have to update" rather than a real error to log.
+pub fn update_own_footprint(model: &str, new_footprint_bytes: u64) -> bool {
+    let path = resident_path(std::process::id());
+    if !path.exists() {
+        return false;
+    }
+    write_resident_entry(&path, model, new_footprint_bytes).is_ok()
+}
+
 /// Held for the lifetime of a resident model: the exclusive lock on this gateway's
 /// `residents/.<pid>.lock` sidecar. Dropping it — or the process dying — releases
 /// liveness; `Drop` also unlinks the sidecar and its readable metadata file.

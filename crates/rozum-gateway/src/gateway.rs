@@ -578,9 +578,18 @@ async fn serve_wire<D: WireDialect>(
         sampling,
     } = dialect.into_internal(&lease);
 
+    // elastic-context-on-demand: if the RAW (pre-fit) prompt needs more than the currently served
+    // ceiling, try to grow it FIRST — trimming stays the fallback, not the first move. Checked
+    // against a real RAM/ledger admission inside `try_grow_context`; a backend that doesn't support
+    // growing (or has no room right now) just returns its unchanged ceiling, so this is always safe
+    // to call and cheap when there's nothing to do (one comparison against the common case).
+    let mut ctx_win = lease.backend.context_window();
+    let pre_fit_est = estimate_prompt_tokens(&messages, &tools);
+    if pre_fit_est > ctx_win {
+        ctx_win = lease.backend.try_grow_context(pre_fit_est);
+    }
     // gateway-auto-context: fit the prompt to the window (drop oldest turns, then compress tool
     // schemas) instead of erroring, then attach an elision note for the dropped turns.
-    let ctx_win = lease.backend.context_window();
     let (messages, tools, dropped) = match fit_to_context(messages, tools, ctx_win) {
         Ok(t) => t,
         Err(resp) => return resp,
