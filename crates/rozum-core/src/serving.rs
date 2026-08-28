@@ -588,6 +588,27 @@ fn repair_tool_object(b: &[u8], start: usize) -> Option<(String, usize)> {
         out.extend(std::iter::repeat_n(b'}', depth as usize));
         return String::from_utf8(out).ok().map(|s| (s, b.len()));
     }
+    // Sibling of the above, still inside a string, but with the SAME unambiguous signal: the
+    // model forgot only the closing `"` and generation ended right there — its own `depth`
+    // closing braces are already present, just swallowed into the string as literal text because
+    // nothing closed it first. Observed live (BUG-062 follow-up, GLM-4-9B):
+    // `{"name":"Read","arguments":{"file_path":"/Users/…/AGENTS.md}}` — the value never got its
+    // closing quote, so both real `}`s read as string content and the object never balanced.
+    //
+    // This is recoverable ONLY when the tail is EXACTLY `depth` `}` bytes and nothing else — that
+    // is the one case where "where the model meant the value to end" is not a guess: the correct
+    // envelope is already there, one quote short. `repair_leaves_a_still_open_string_alone` is the
+    // sibling case (trailing filler, not braces) and must keep returning `None` — the tail check
+    // below fails there, since the filler isn't `}` bytes.
+    if in_str && depth > 0 {
+        let n = depth as usize;
+        if out.len() >= n && out[out.len() - n..].iter().all(|&c| c == b'}') {
+            out.truncate(out.len() - n);
+            out.push(b'"');
+            out.extend(std::iter::repeat_n(b'}', n));
+            return String::from_utf8(out).ok().map(|s| (s, b.len()));
+        }
+    }
     None
 }
 
@@ -1713,6 +1734,21 @@ mod tests {
         assert_eq!(calls[0].0, "Bash");
         let v: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
         assert_eq!(v["command"], "cat /Cargo.toml && echo ");
+    }
+
+    #[test]
+    fn repair_recovers_a_string_whose_closing_quote_was_never_emitted() {
+        // BUG-062 follow-up, captured verbatim (GLM-4-9B, 2026-08-28): the model forgot the
+        // closing `"` on the LAST string value, so its own two closing `}`s land inside the
+        // string as literal text instead of ending the object — `repair_tool_object` used to
+        // balance the string (never) and return `None`, leaking the whole `<tool_call>{…}` blob
+        // as garbled text instead of running the (perfectly valid) Read call.
+        let malformed = "<tool_call>\n{\"name\":\"Read\",\"arguments\":{\"file_path\":\"/Users/sergiy/rozum-sandbox/rozum/AGENTS.md}}";
+        let calls = parse_tool_calls(malformed);
+        assert_eq!(calls.len(), 1, "calls: {calls:?}");
+        assert_eq!(calls[0].0, "Read");
+        let v: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(v["file_path"], "/Users/sergiy/rozum-sandbox/rozum/AGENTS.md");
     }
 
     #[test]
