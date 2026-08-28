@@ -1,5 +1,61 @@
 # Bugs
 
+## BUG-060 — a `<tool_call>` that closes its own string early then hits EOS leaks as literal garbled text in both `claude` and `nadia`
+
+- **Status:** PARTIALLY FIXED (`crates/rozum-core/src/serving.rs::repair_tool_object`).
+- **Severity:** P2 — no data loss/damage, but the agent's terminal fills with unparseable
+  `<tool_call>{...}` JSON plus runs of control characters instead of a clean turn, in every driver
+  (`claude`, `nadia`) since both route through the same gateway parser.
+
+**Reported (operator):** pasted a `claude`/`nadia` session showing raw `<tool_call>` JSON blocks
+(sometimes `"Bash"`, sometimes `"bash"`) leaking as assistant text, with malformed/truncated JSON
+and stray whitespace/control characters mixed in.
+
+**Root cause, found from `~/.rozum/gateway.jsonl`'s existing `toolcall_parse_miss` observability
+log (33 real hits going back to 2026-08-15, all `mlx-community/Qwen3.5-4B-MLX-4bit`, all a `Bash`/
+`bash` tool call).** Two DISTINCT failure shapes share one symptom:
+
+1. **Recoverable — an accidental early string close.** `repair_tool_object`'s own rule for
+   detecting a string CLOSE (`"` followed by end-of-input/`:`/`}`/`]`/a `,`+next-key) fires on the
+   model's own inner quote inside e.g. `"command":"cat /Cargo.toml && echo "` — correct, that
+   really is where the string ends per the rule. But generation then just STOPS (EOS) before the
+   two enclosing `}`s, and `repair_tool_object` required reaching depth 0 to succeed — "balanced
+   the string, never balanced the object" returned `None`, and the whole tag+JSON leaked as text
+   instead of running the (perfectly valid) recovered command.
+2. **Not recoverable — the string never closes at all.** A second, sibling pattern: after
+   `"command":\n`, the model degenerates into repeating `" \r"` (space + CR) until EOS — no closing
+   quote ever appears. Total output is short (~60-120 chars, confirmed via the log's `text_chars`
+   field) — this is NOT a `max_tokens` truncation (the existing `is_runaway_loop` token-periodicity
+   guard never gets the ~64-token window it needs before EOS fires on its own). There is no signal
+   for where the intended content would have ended, so this one genuinely can't be repaired without
+   fabricating command content — worse than leaving it as a visible miss.
+
+Both `claude` and `nadia` hit this because `crates/rozum-gateway/src/gateway.rs`'s `serve_wire`
+routes BOTH `/v1/chat/completions` and `/v1/messages` through the same `chat()` call → the same
+`crate::serving::parse_tool_calls` at finalize (`rozum-core/engine.rs::consume_tokens` for the
+single-request path, `rozum-mlx/mlx_native_backend.rs::BatchSeq::finalize` for the batched path) —
+one shared parser, confirmed by grep (no wire-specific tool-call logic exists).
+
+**Fix (case 1 only).** `repair_tool_object`: reaching end-of-input with `depth > 0` while OUTSIDE a
+string now appends exactly `depth` closing `}` characters and returns the repaired object, instead
+of `None`. This never invents string content — `depth` is precisely how many braces the model's own
+(already-repaired) object is short by; a still-open string (case 2) is explicitly left alone (`if
+!in_str && depth > 0`), because closing it would mean guessing what command the model meant to run.
+
+**Regression tests:** `repair_closes_a_tool_call_truncated_right_at_generation_end` (case 1, the
+exact captured bytes — recovers `{"command":"cat /Cargo.toml && echo "}` and runs it) and
+`repair_leaves_a_still_open_string_alone` (case 2, the exact captured bytes — still correctly
+empty). `cargo test -p rozum-core --lib`: 164 passed.
+
+**What this does NOT fix:** case 2 (the still-open-string degeneration) has no code-level recovery
+— the actual fix there is on the model-quality side (Qwen3.5-4B occasionally garbles a `Bash`
+argument's embedded quote and never recovers). A future direction worth spec'ing: an internal
+regenerate-on-`toolcall_parse_miss` retry at the request-serving layer, since at the point this
+decision is made NOTHING has been streamed to the client yet (tool markup is fully suppressed until
+finalize) — a clean re-roll is architecturally free of any "already said something" complication.
+Not attempted this round: it requires re-invoking the whole decode loop from the request-serving
+layer, a larger change than this session's scope.
+
 ## BUG-059 — the Seatbelt jail around `rozum launch` swallows raw-mode ioctl, breaking Enter and escapes for every interactive agent
 
 - **Status:** FIXED (`src/sandbox.rs`, `SandboxPolicy::to_seatbelt_profile`).

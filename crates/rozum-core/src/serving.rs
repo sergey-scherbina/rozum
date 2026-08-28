@@ -460,8 +460,17 @@ fn find_name_brace(b: &[u8], from: usize) -> Option<usize> {
 /// JSON + the index just past the closing `}`. A `"` is a string CLOSE only if the
 /// next non-space byte is `:` / `}` / `]` / end, or a `,` followed by the next key's
 /// `"` — so a content quote (e.g. in `println!("{}", x)`) is escaped, not treated as
-/// a close, and the braces inside that string never unbalance the object. `None` if
-/// it never balances.
+/// a close, and the braces inside that string never unbalance the object.
+///
+/// Reaching end-of-input with `depth > 0` and OUTSIDE a string means the model's own
+/// premature-quote-close heuristic above already ended the value, and generation then
+/// simply stopped (EOS) before the object's own closing braces — observed on
+/// Qwen3.5-4B: `{"name":"bash","arguments":{"command":"cat x && echo "` (the trailing
+/// `"` closes the string per the rule above — nothing follows it), then the run ends.
+/// The braces are APPENDED, never invented content: `depth` is exactly how many are
+/// missing, so this only completes an envelope the model already filled in, and never
+/// closes a value that's still open (leaves that `None`, below) — no fabricated string
+/// content ever reaches a tool argument. `None` if it never balances.
 fn repair_tool_object(b: &[u8], start: usize) -> Option<(String, usize)> {
     let mut out: Vec<u8> = Vec::with_capacity(64);
     let (mut depth, mut in_str, mut esc) = (0i32, false, false);
@@ -522,6 +531,13 @@ fn repair_tool_object(b: &[u8], start: usize) -> Option<(String, usize)> {
             }
         }
         i += 1;
+    }
+    // Ran out of input mid-object. Safe to close ONLY outside a string (see doc comment) — a
+    // still-open string means we don't know where the model meant its value to end, and guessing
+    // would put fabricated content in a tool argument.
+    if !in_str && depth > 0 {
+        out.extend(std::iter::repeat_n(b'}', depth as usize));
+        return String::from_utf8(out).ok().map(|s| (s, b.len()));
     }
     None
 }
@@ -1557,6 +1573,35 @@ mod tests {
             "content: {}",
             v["content"]
         );
+    }
+
+    #[test]
+    fn repair_closes_a_tool_call_truncated_right_at_generation_end() {
+        // BUG-060, captured verbatim from `~/.rozum/gateway.jsonl` (Qwen3.5-4B, 2026-08-16):
+        // the model's own inner quote inside an `echo "…"` argument closes the "command" string
+        // early per repair_tool_object's rule (nothing follows it), and generation then just
+        // ENDS (EOS) before the two enclosing `}`s — previously `repair_tool_object` returned
+        // `None` here (it balanced the string but never reached depth 0), so the whole
+        // `<tool_call>{…}` blob leaked to the client as literal, malformed text instead of
+        // running the (perfectly valid) recovered command.
+        let malformed = "<tool_call>\n{\"name\":\"Bash\",\"arguments\":{\"command\":\"cat /Cargo.toml && echo \"";
+        let calls = parse_tool_calls(malformed);
+        assert_eq!(calls.len(), 1, "calls: {calls:?}");
+        assert_eq!(calls[0].0, "Bash");
+        let v: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(v["command"], "cat /Cargo.toml && echo ");
+    }
+
+    #[test]
+    fn repair_leaves_a_still_open_string_alone() {
+        // Sibling failure captured the same day: the model never closes the "command" string at
+        // all — it degenerates into repeating " \r" filler until EOS. There is no signal for
+        // where the intended value ends, so this must NOT be repaired (fabricating a cut point
+        // would put made-up content in an executed command) — it stays a parse miss, same as
+        // before this fix.
+        let malformed =
+            "<tool_call>\n{\"name\":\"bash\",\"arguments\":{\"command\":\n    \r \r \r \r \r \r \r \r";
+        assert!(parse_tool_calls(malformed).is_empty());
     }
 
     #[test]
