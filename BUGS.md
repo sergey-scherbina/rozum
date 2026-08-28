@@ -1,5 +1,46 @@
 # Bugs
 
+## BUG-062 — a weak local model (GLM-4-9B) re-reads one large file in chunks forever instead of acting on it
+
+- **Status:** FIXED (`crates/rozum-gateway/src/loopbreak.rs::detect_stuck_loop`, signature 6 —
+  `READ_CHURN_MIN`/`read_target`/`READ_ONLY_TOOLS`/`MUTATING_TOOLS`). Branch
+  `feature/loopbreak-read-churn`, not yet merged to `master`.
+- **Severity:** P2 — no data loss, but the run never converges: the agent burns its whole
+  `--max-turns` budget re-reading and never edits the file the operator asked for.
+
+**Reported (operator):** pasted a `claude` session against a local GLM-4-9B, asked to add RAG and
+LoRA tasks to `BACKLOG.md` per `AGENTS.md`. The transcript showed a repeating pattern: `Read`
+`BACKLOG.md` (a different offset each time), followed by a near-identical assistant line ("I can
+see the backlog file has been read. Let me continue reading the rest of the file...") — ~10 rounds
+with no `Edit` ever issued, running to the visible "Deciphering… (19m 5s)" spinner before the
+operator noticed and asked to break the loop.
+
+**Root cause.** `crates/rozum-gateway/src/loopbreak.rs::detect_stuck_loop` already had 5 stuck-loop
+signatures (see `project-agentic-loop-root-cause` — weak local models don't reliably notice they've
+already done something and stop), but none covered "reading forever": signature 1 (identical
+failing call) and signature 4 (windowed identical recurrence) both key on byte-identical tool
+calls, and each `Read` here carried a different `offset`, so no two calls matched; signature 2
+(text-repeat) needs the *same* assistant text to recur, and GLM-4-9B paraphrased it slightly each
+turn. `BACKLOG.md` (1641 lines) fits GLM-4-9B's context window fine, so this is not a context
+overflow — the model's own state-tracking is the limit, not context size.
+
+**Fix.** New signature 6: fires when one target (file_path/path/pattern, so it keys the same
+across differing offset/limit) has been hit by a read-only tool (`Read`/`Grep`/`Glob`/`LS`/
+`NotebookRead`) `READ_CHURN_MIN` (6) times or more, **and** no mutating tool
+(`Edit`/`MultiEdit`/`Write`/`NotebookEdit`/`Bash`/`apply_patch`) has appeared anywhere in the
+conversation — so a model that reads a file six times and then acts elsewhere is never touched.
+Follows signature 3's "help once, then stop" shape: the first hit returns a nudge (marked
+`READ_NUDGE_MARK`, kept out of the triage sentinel so a recovered run isn't mis-filed as
+`stopped_by_loopbreaker`) telling the model to grep the section it needs or act on what it already
+saw instead of re-reading from the top; a second hit after the nudge is a hard stop (carries
+"Stopping to avoid", the triage sentinel `scripts/bench/agentic_triage.py` keys on).
+
+**Regression tests (`crates/rozum-gateway/src/gateway.rs`):**
+`stuck_loop_fires_on_read_without_progress`, `stuck_loop_ignores_reading_then_editing` (read-then-
+edit is progress, must not fire), `stuck_loop_ignores_a_few_chunked_reads` (below threshold),
+`every_loopbreak_message_carries_the_triage_sentinel` extended with a sig-6 nudge-then-stop case.
+`cargo test -p rozum-gateway --lib`: 161 passed.
+
 ## BUG-061 — a digit-looking XML/Hermes tool-arg (e.g. a task id) parses as a JSON number and the client rejects the whole call as "Invalid tool parameters"
 
 - **Status:** FIXED (`crates/rozum-core/src/serving.rs::coerce_args_to_declared_schema`, called from
