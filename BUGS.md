@@ -1,5 +1,41 @@
 # Bugs
 
+## BUG-064 — a `content`-shaped tool-arg whose raw text is itself valid JSON parses as an object/array and still triggers "Invalid tool parameters"
+
+- **Status:** FIXED (`crates/rozum-core/src/serving.rs::coerce_args_to_declared_schema`).
+- **Severity:** P2 — same family and impact as BUG-061 (client rejects the whole tool call, no data
+  loss, costs a wasted turn).
+
+**Reported (operator):** hit `Invalid tool parameters` again on `Qwen3.5-9B-MLX-4bit` in a fresh
+session, after BUG-061's fix was already live. Session log showed `Read` succeeding twice, then the
+error — no `toolcall_parse_miss` in `~/.rozum/gateway.jsonl` for the window (confirmed the tool-call
+JSON itself parsed fine, same signature as BUG-061: a schema-type mismatch, not a parse failure).
+
+**Root cause.** BUG-061's fix (`coerce_args_to_declared_schema`) retypes a schema-`string` property
+back to a string when the XML/Hermes reader guessed `Number` or `Bool` — but explicitly left
+`Object`/`Array` untouched ("there is no sane string rendering of a nested structure to guess at").
+That reasoning missed one real case: a `content`-shaped string parameter (e.g. `Write`'s file
+content) whose ENTIRE raw text happens to be valid JSON on its own — a file being written that is
+itself nothing but a JSON snippet, or a spec/doc section quoting one verbatim. `parse_xml_function`
+still tries `serde_json::from_str` on the whole span first, so that text parses as a JSON
+object/array instead of the literal string the model meant, and the (unfixed) object/array reaches
+the client, which rejects the call.
+
+**Fix.** `Object`/`Array` now re-serialize to their own compact JSON text (`serde_json::to_string`)
+and land as a STRING holding exactly that text — recovering what the model wrote losslessly, since
+the re-serialization is of the SAME value the raw span already parsed into. `Null` is still left
+alone (unchanged reasoning: it most likely means "omitted", not "the literal string null").
+
+**Not reproduced live this round** (a fresh `ROZUM_RAW_DUMP` repro on Qwen3.5-9B was in flight when
+this was written and didn't reach the failing step before it was superseded by this fix going out) —
+shipped on the strength of the code-level gap being real and the fix being strictly safe (it only
+adds handling for a previously-unhandled type; no existing coerced case changes). Regression tests
+cover the exact shape (`content` param whose text is JSON) plus confirm `Null` still passes through.
+
+**Regression tests (`crates/rozum-core/src/serving.rs`):**
+`schema_fixup_restores_a_content_param_whose_text_was_itself_valid_json`,
+`schema_fixup_leaves_null_alone`. `cargo test -p rozum-core --lib serving::`: 40 passed.
+
 ## BUG-063 — a tool-call whose last string never got its closing quote leaks as garbled literal text
 
 - **Status:** FIXED (`crates/rozum-core/src/serving.rs::repair_tool_object`). Branch

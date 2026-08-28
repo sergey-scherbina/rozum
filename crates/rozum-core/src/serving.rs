@@ -261,17 +261,19 @@ fn parse_xml_function(body: &str) -> Option<(String, String)> {
     Some((name.to_string(), Value::Object(args).to_string()))
 }
 
-/// Fix a class of "Invalid tool parameters" rejection from the client (BUG-061): the
-/// XML/Hermes parameter reader above (and `repair_tool_object`'s bare-literal path) tries
-/// `serde_json::from_str` on every value BEFORE falling back to a string, because some real
-/// parameters genuinely need a number (`timeout_ms>10000<`). But that same guess silently
-/// mistypes a string field whose value happens to look numeric — a task id (`taskId>1<`), a
-/// numeric-looking file id — into a JSON number. The client's tool schema then rejects the
-/// whole call. There is no schema-free way to tell those two apart from the raw text, but by
-/// finalize time the tool's schema IS known (`meta.tools` / `job.tools`), so fix it up after
-/// the fact: wherever the schema says a property is `"type": "string"`, force its value back
-/// to a JSON string. Only touches properties that exist in the schema; leaves everything else
-/// (including genuinely numeric/boolean properties) alone.
+/// Fix a class of "Invalid tool parameters" rejection from the client (BUG-061, extended by
+/// BUG-064): the XML/Hermes parameter reader above (and `repair_tool_object`'s bare-literal path)
+/// tries `serde_json::from_str` on every value BEFORE falling back to a string, because some real
+/// parameters genuinely need a number (`timeout_ms>10000<`). But that same guess silently mistypes
+/// a string field whose value happens to look like JSON on its own — a task id (`taskId>1<`), or a
+/// `content`/text param whose ENTIRE text is itself valid JSON (`{...}`/`[...]`) — into a JSON
+/// number/object/array. The client's tool schema then rejects the whole call. There is no
+/// schema-free way to tell those apart from the raw text, but by finalize time the tool's schema IS
+/// known (`meta.tools` / `job.tools`), so fix it up after the fact: wherever the schema says a
+/// property is `"type": "string"`, force its value back to a JSON string (numbers/bools stringify
+/// directly; objects/arrays re-serialize to their own JSON text, recovering exactly what the model
+/// wrote). Only touches properties that exist in the schema; leaves everything else (including
+/// genuinely numeric/boolean/object/array-typed properties) alone.
 pub fn coerce_args_to_declared_schema(name: &str, args: &str, tools: &[crate::backend::ToolDef]) -> String {
     let Some(tool) = tools.iter().find(|t| t.name == name) else {
         return args.to_string();
@@ -295,9 +297,17 @@ pub fn coerce_args_to_declared_schema(name: &str, args: &str, tools: &[crate::ba
         let coerced = match val {
             Value::Number(n) => Some(n.to_string()),
             Value::Bool(b) => Some(b.to_string()),
-            // Null and object/array are left alone: null likely means "omitted", and there is
-            // no sane string rendering of a nested structure to guess at.
-            _ => None,
+            // A `content`-shaped string param whose raw text happens to be valid JSON on its own
+            // (e.g. a Write's file content that's nothing but a JSON snippet) parses as an object/
+            // array instead of the literal text the model meant — re-serialize it back to exactly
+            // that JSON text (BUG-064) rather than leaving a type the client will reject outright.
+            // `to_string()` on a `Value` IS its compact JSON rendering, so this is lossless for the
+            // case that actually happens (the raw span already parsed as valid JSON).
+            Value::Object(_) | Value::Array(_) => serde_json::to_string(&*val).ok(),
+            // Null is left alone: it most likely means "omitted", and turning it into the string
+            // "null" would be actively wrong more often than it's right.
+            Value::Null => None,
+            Value::String(_) => None, // unreachable (guarded by val.is_string() above); exhaustive for clarity
         };
         if let Some(s) = coerced {
             *val = Value::String(s);
@@ -1573,6 +1583,54 @@ mod tests {
         );
         let v: Value = serde_json::from_str(&unchanged).unwrap();
         assert_eq!(v["timeout_ms"], serde_json::json!(10000), "numeric schema field stays a number");
+    }
+
+    #[test]
+    fn schema_fixup_restores_a_content_param_whose_text_was_itself_valid_json() {
+        // BUG-064: a Write-style `content` param whose ENTIRE raw text happens to be valid JSON on
+        // its own (e.g. the file being written is nothing but a JSON snippet) parses as a JSON
+        // object instead of the literal text — must come back as a STRING holding that exact JSON
+        // text, not stay an object (which the client rejects) and not get dropped.
+        let tools = vec![crate::backend::ToolDef {
+            name: "Write".into(),
+            description: "".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+            }),
+        }];
+        let fixed = coerce_args_to_declared_schema(
+            "Write",
+            r#"{"file_path":"a.json","content":{"a":1,"b":[2,3]}}"#,
+            &tools,
+        );
+        let v: Value = serde_json::from_str(&fixed).unwrap();
+        assert_eq!(
+            v["content"],
+            serde_json::json!(r#"{"a":1,"b":[2,3]}"#),
+            "content must become a STRING holding the exact original JSON text"
+        );
+    }
+
+    #[test]
+    fn schema_fixup_leaves_null_alone() {
+        // Null most likely means "the model omitted this" — turning it into the string "null"
+        // would be wrong more often than right, so it's the one non-string type left untouched.
+        let tools = vec![crate::backend::ToolDef {
+            name: "Edit".into(),
+            description: "".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"old_string": {"type": "string"}},
+            }),
+        }];
+        let unchanged =
+            coerce_args_to_declared_schema("Edit", r#"{"old_string":null}"#, &tools);
+        let v: Value = serde_json::from_str(&unchanged).unwrap();
+        assert!(v["old_string"].is_null());
     }
 
     #[test]
