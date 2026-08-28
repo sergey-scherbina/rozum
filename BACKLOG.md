@@ -741,6 +741,19 @@ Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
 - [ ] distillation-plan - Design a later LoRA/QLoRA or distillation path.
   - Do not implement until evals provide a baseline.
 
+- [ ] **elastic-context-on-demand** (operator-proposed 2026-08-28) — grow a resident `mlx-native`
+  model's served `n_ctx` live, triggered by an actual request that needs more room (event-triggered,
+  explicitly NOT continuous RAM polling), reclaiming idle siblings' reservation via the existing
+  cooperative-preemption protocol when needed; shrink back down after a cooldown when unused. Spec:
+  `docs/specs/elastic-context-on-demand.md` (written + verified against code before this entry: the
+  served `n_ctx` is only a request-fitting/trim boundary at the gateway layer — nothing in the
+  mlx-native load path pre-allocates against it, since KV grows lazily — so growing it is a live
+  policy-number change, not a model reload). **Needs, before coding:** a new `share.rs` ledger op
+  (`update_footprint` — grow an already-admitted resident's reservation in place, not just the
+  initial `acquire_residency`) and a trigger hook in `gateway.rs::handle_chat` before
+  `fit_to_context`. `mistralrs` backend explicitly out of scope (its PagedAttention KV pool is fixed
+  at load — needs an actual `gateway switch` reload, unchanged by this).
+
 # BLOCKED — on another repository
 
 ## The meeting PWA cannot be rebuilt from source (found 2026-08-08)
