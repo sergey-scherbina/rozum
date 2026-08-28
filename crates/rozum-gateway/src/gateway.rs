@@ -2456,7 +2456,31 @@ mod tests {
             }
             detect_stuck_loop(&m).expect("signature 5 must fire")
         };
-        for (name, msg) in [("sig1", &sig1), ("sig3", &sig3), ("sig5", &sig5)] {
+        let read_churn = || {
+            let mut m = vec![Message::user("add RAG and LoRA tasks to BACKLOG.md")];
+            for i in 0..6 {
+                m.push(asst(tool_use(
+                    &format!("r{i}"),
+                    "Read",
+                    json!({ "file_path": "BACKLOG.md", "offset": i * 200 }),
+                )));
+                m.push(tool_out(&format!("r{i}"), "some lines"));
+            }
+            m
+        };
+        // Signature 6, like signature 3, answers a nudge before it stops — same reasoning: the
+        // first answer is a correction the model can act on, not a verdict on the run.
+        let nudge6 = detect_stuck_loop(&read_churn()).expect("signature 6 must fire");
+        assert!(
+            !nudge6.contains(SENTINEL) && nudge6.contains(crate::loopbreak::READ_NUDGE_MARK),
+            "the first read-churn answer is a correction, not a stop: {nudge6}"
+        );
+        let sig6 = {
+            let mut m = read_churn();
+            m.push(asst_text(&nudge6));
+            detect_stuck_loop(&m).expect("signature 6 must escalate to a stop")
+        };
+        for (name, msg) in [("sig1", &sig1), ("sig3", &sig3), ("sig5", &sig5), ("sig6", &sig6)] {
             assert!(
                 msg.contains(SENTINEL),
                 "{name} no longer contains the triage sentinel {SENTINEL:?}: {msg}\n\
@@ -2640,6 +2664,57 @@ mod tests {
             msgs.push(cc_edit(&format!("e{i}"), "src/main.rs", &format!("bad{i}"), &format!("good{i}")));
         }
         assert!(detect_stuck_loop(&msgs).is_none(), "3 identical builds amid real edits are not a loop");
+    }
+
+    /// Signature 6 — read-without-progress: a weak model re-reads one large file in chunks
+    /// (offset/limit differ each call, so sigs 1/4 see no byte-identical call) and never reaches
+    /// an edit. Modeled on a real GLM-4-9B session that re-read a 1641-line `BACKLOG.md` in a
+    /// loop, narrating "let me continue reading" every turn without ever calling `Edit`.
+    #[test]
+    fn stuck_loop_fires_on_read_without_progress() {
+        let mut msgs = vec![Message::user("add RAG and LoRA tasks to BACKLOG.md")];
+        for i in 0..6 {
+            msgs.push(asst(tool_use(
+                &format!("r{i}"),
+                "Read",
+                json!({ "file_path": "BACKLOG.md", "offset": i * 200 }),
+            )));
+            msgs.push(tool_out(&format!("r{i}"), &format!("lines {}..{}", i * 200, i * 200 + 200)));
+        }
+        let reason = detect_stuck_loop(&msgs).expect("6 chunked reads with no edit must trip sig-6");
+        assert!(reason.contains("BACKLOG.md"), "{reason}");
+    }
+
+    #[test]
+    fn stuck_loop_ignores_reading_then_editing() {
+        // Healthy: read a file in chunks, THEN act on it — the ordinary way to work on a large
+        // file. Must not trip even though the read count alone matches signature 6's threshold.
+        let mut msgs = vec![Message::user("add a task to BACKLOG.md")];
+        for i in 0..6 {
+            msgs.push(asst(tool_use(
+                &format!("r{i}"),
+                "Read",
+                json!({ "file_path": "BACKLOG.md", "offset": i * 200 }),
+            )));
+            msgs.push(tool_out(&format!("r{i}"), "some lines"));
+        }
+        msgs.push(cc_edit("e0", "BACKLOG.md", "## Backlog", "## Backlog\n\n- RAG support"));
+        assert!(detect_stuck_loop(&msgs).is_none(), "reading then editing is progress, not a loop");
+    }
+
+    #[test]
+    fn stuck_loop_ignores_a_few_chunked_reads() {
+        // Below the threshold: reading a file in 3 chunks before deciding what to do is normal.
+        let mut msgs = vec![Message::user("summarize BACKLOG.md")];
+        for i in 0..3 {
+            msgs.push(asst(tool_use(
+                &format!("r{i}"),
+                "Read",
+                json!({ "file_path": "BACKLOG.md", "offset": i * 200 }),
+            )));
+            msgs.push(tool_out(&format!("r{i}"), "some lines"));
+        }
+        assert!(detect_stuck_loop(&msgs).is_none(), "3 chunked reads is below the read-churn threshold");
     }
 
     #[tokio::test]

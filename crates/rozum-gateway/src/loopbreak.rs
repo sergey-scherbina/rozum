@@ -22,6 +22,14 @@ pub(crate) const EDIT_CHURN_BACKSTOP: usize = 6;
 /// Signature 5: the same edit payload applied successfully to one file this many times. See the
 /// signature for why three and not two — it is a measured number, not a chosen one.
 const IDENTICAL_EDIT_THRESHOLD: usize = 3;
+/// Signature 6: a weak model re-reading one target (varying offset/limit each time, so sigs 1/4
+/// never see a byte-identical call) this many times without ever having made a single mutating
+/// call, anywhere in the conversation. Higher than the edit thresholds: legitimately reading a
+/// large file in several chunks before acting is normal, so this must not fire on ordinary
+/// chunked reading — only on reading that never converges to an action.
+const READ_CHURN_MIN: usize = 6;
+/// Marker carried by the first read-churn nudge, mirrored on [`CHURN_NUDGE_MARK`].
+pub(crate) const READ_NUDGE_MARK: &str = "[rozum: you're re-reading instead of acting]";
 /// A ping-pong needs this share of the edit's substantive added lines to be lines a previous edit
 /// removed. One shared line is not evidence of anything: see [`is_pingpong`].
 const PINGPONG_MIN_SHARE: f64 = 0.5;
@@ -155,6 +163,31 @@ pub(crate) fn edit_target_and_lines(input: &Value) -> Option<(String, Vec<String
         }
     }
     file.map(|f| (f, removed, added))
+}
+
+/// Tool names that only observe state. Used by signature 6 — re-reading one of these forever
+/// without ever calling a [`MUTATING_TOOLS`] tool is the "stuck reading" shape, distinct from the
+/// edit-churn signatures above (which need a mutating call to have happened at all).
+const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob", "LS", "NotebookRead"];
+/// Any of these anywhere in the conversation is evidence the model DID act, so signature 6 must
+/// not fire — `Bash` is included even though many Bash calls are themselves read-only (`cat`,
+/// `git status`) because treating it as "acted" only makes the signature more conservative, never
+/// blind to a real loop: a model whose Bash calls are genuinely all inspection still has to reach
+/// an Edit/Write eventually or another signature already covers it.
+const MUTATING_TOOLS: &[&str] = &["Edit", "MultiEdit", "Write", "NotebookEdit", "Bash", "apply_patch"];
+
+/// The file/path this read-only call targets, normalized so calls that differ only in
+/// `offset`/`limit` (chunked reads of one file) still key together.
+fn read_target(name: &str, input: &Value) -> Option<String> {
+    if !READ_ONLY_TOOLS.contains(&name) {
+        return None;
+    }
+    for key in ["file_path", "path", "notebook_path", "pattern"] {
+        if let Some(s) = input.get(key).and_then(|v| v.as_str()) {
+            return Some(format!("{name}:{s}"));
+        }
+    }
+    None
 }
 
 /// Detect the agentic stuck-loop signature in the incoming conversation. A weak local
@@ -412,6 +445,42 @@ pub(crate) fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
             }
         }
     }
+    // ── Signature 6: read-without-progress ──
+    // A weak model (observed: GLM-4-9B on a 1641-line BACKLOG.md) re-reads one target in chunks,
+    // narrating "let me continue reading" each turn, and never reaches an edit — sigs 1/4 miss it
+    // because the offset/limit differ each call, so no two calls are byte-identical; sig 2 misses
+    // it because the assistant text is paraphrased, not repeated verbatim. Only fires when NO
+    // mutating call has happened anywhere in the conversation — a model that read a file six times
+    // and then edited something else entirely already made progress, and this must not stop it.
+    if !calls.iter().any(|(name, _, _, _)| MUTATING_TOOLS.contains(name)) {
+        let mut reads_per_target: HashMap<String, usize> = HashMap::new();
+        for (name, input, _, _) in &calls {
+            if let Some(target) = read_target(name, input) {
+                *reads_per_target.entry(target).or_default() += 1;
+            }
+        }
+        if let Some((target, n)) = reads_per_target.iter().find(|&(_, &c)| c >= READ_CHURN_MIN) {
+            let already_nudged = messages.iter().any(|m| {
+                m.content.iter().any(|b| {
+                    matches!(b, ContentBlock::Text { text } if text.contains(READ_NUDGE_MARK))
+                })
+            });
+            if !already_nudged {
+                return Some(format!(
+                    "{READ_NUDGE_MARK} You've read `{target}` {n} times and haven't made a single \
+                     edit or run a command yet. Stop reading it from the start each time — grep for \
+                     the section you need, or append/edit directly using what you already saw. If \
+                     you don't yet know what to add, say so in one line and stop."
+                ));
+            }
+            return Some(format!(
+                "`{target}` has been read {n} times with no edit or command in between, and this \
+                 was pointed out once already. Stopping to avoid an infinite read loop; report what \
+                 you know in one short line."
+            ));
+        }
+    }
+
     None
 }
 
