@@ -1,5 +1,37 @@
 # Bugs
 
+## BUG-063 — a tool-call whose last string never got its closing quote leaks as garbled literal text
+
+- **Status:** FIXED (`crates/rozum-core/src/serving.rs::repair_tool_object`). Branch
+  `feature/repair-unterminated-string-tail`, not yet merged to `master`.
+- **Severity:** P2 — no data loss, but the intended tool call never runs: the client shows the raw
+  `<tool_call>{…}` JSON as assistant text instead.
+
+**Reported (operator):** pasted a `claude` session against GLM-4-9B (same retry of the BUG-062
+task — "add RAG and LoRA to BACKLOG.md per AGENTS.md") showing the literal line
+`{"name":"Read","arguments":{"file_path":"/Users/sergiy/rozum-sandbox/rozum/AGENTS.md}}` printed
+as assistant text instead of running as a tool call.
+
+**Root cause.** `repair_tool_object` already handles two shapes: a string that closes EARLY (its
+own quote-is-a-close heuristic fires, generation ends before the enclosing `}`s — BUG-060, fixed by
+appending the missing braces) and a string that never closes AT ALL (no signal where the value
+ends — correctly left as `None`, `repair_leaves_a_still_open_string_alone`). This is the sibling of
+the first, on the LAST string of the object: the model forgets only the closing `"`, and generation
+ends immediately after — so its own (correct) closing braces (`}}`) get consumed as literal string
+content instead of ending the object, and the string is still "open" by the time input runs out.
+The existing repair only appended braces when `!in_str`, so this case fell through to `None` and
+the whole malformed blob leaked to the client.
+
+**Fix.** A second branch in `repair_tool_object`, checked when input runs out `in_str && depth >
+0`: if the trailing `depth` bytes already emitted are exactly `}` characters and nothing else,
+that is the unambiguous case — the real envelope is already there, one quote short. Truncate those
+trailing braces back off, close the string with `"`, then re-append them. Never fabricates content:
+it only fires when the correct closing sequence is already present verbatim.
+
+**Regression test (`crates/rozum-core/src/serving.rs`):**
+`repair_recovers_a_string_whose_closing_quote_was_never_emitted` (the exact captured payload).
+`cargo test -p rozum-core --lib`: 169 passed.
+
 ## BUG-062 — a weak local model (GLM-4-9B) re-reads one large file in chunks forever instead of acting on it
 
 - **Status:** FIXED (`crates/rozum-gateway/src/loopbreak.rs::detect_stuck_loop`, signature 6 —
