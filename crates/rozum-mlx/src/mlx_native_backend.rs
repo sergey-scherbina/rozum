@@ -994,18 +994,28 @@ mod inner {
                 );
             }
         }
-        // Qwen3.5-VL: load the vision tower alongside the text stack so image
-        // requests can be spliced. Text-only / non-VL models leave this None.
-        let mut vision = if matches!(model_type.as_str(), "qwen3_5" | "qwen3_5_moe")
-            && config_has_vision(&model_dir)
+        // Qwen3.5-VL: the vision tower is loaded LAZILY — only on the first request that
+        // actually carries an image, not unconditionally for every VL-capable checkpoint. Most
+        // chat use (Telegram, coding agents) never sends an image, and its RAM was already
+        // counted into this model's admission reservation regardless (`m.size_bytes` is the
+        // whole checkpoint including the vision shard) — eagerly touching it bought nothing but
+        // a bigger real footprint for a feature that might never be used this session.
+        // `ROZUM_MLX_EAGER_VISION=1` restores the old load-at-start behavior, for a deployment
+        // that always expects images and would rather pay the load cost up front than on the
+        // first image request's latency.
+        let vision_capable = matches!(model_type.as_str(), "qwen3_5" | "qwen3_5_moe")
+            && config_has_vision(&model_dir);
+        let mut vision_load_failed = false;
+        let mut vision = if vision_capable && std::env::var_os("ROZUM_MLX_EAGER_VISION").is_some()
         {
             match qwen3_5_vision::load_vision_tower(&model_dir) {
                 Ok(v) => {
-                    eprintln!("mlx-native: Qwen3.5 vision tower loaded (VL enabled)");
+                    eprintln!("mlx-native: Qwen3.5 vision tower loaded (VL enabled, eager)");
                     Some(v)
                 }
                 Err(e) => {
                     eprintln!("mlx-native: vision tower load failed: {e} (text-only)");
+                    vision_load_failed = true;
                     None
                 }
             }
@@ -1083,6 +1093,14 @@ mod inner {
             // If the counter reaches 0, no other jobs are currently queued (batch short-circuit).
             let remaining_queued =
                 jobs_in_channel.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) - 1;
+
+            ensure_vision_loaded(
+                &mut vision,
+                vision_capable,
+                &mut vision_load_failed,
+                &model_dir,
+                &first.messages,
+            );
 
             // Prompt-lookup (ROZUM_PLOOKUP, default off): a greedy, dense, unconstrained
             // job decodes via draft-free n-gram speculative decoding — byte-identical to
@@ -1187,6 +1205,13 @@ mod inner {
                 serial.extend(batchable);
             }
             for job in serial {
+                ensure_vision_loaded(
+                    &mut vision,
+                    vision_capable,
+                    &mut vision_load_failed,
+                    &model_dir,
+                    &job.messages,
+                );
                 run_job(
                     &mut model,
                     &mut tokenizer,
@@ -1612,6 +1637,103 @@ mod inner {
             .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .is_some_and(|c| c.get("vision_config").is_some())
+    }
+
+    /// Any `ContentBlock::Image` in any message — the trigger for a lazy vision-tower load.
+    fn job_has_image(messages: &[Message]) -> bool {
+        messages
+            .iter()
+            .any(|m| m.content.iter().any(|c| matches!(c, ContentBlock::Image { .. })))
+    }
+
+    /// Load the vision tower the first time it's actually needed: `vision` is still `None`, this
+    /// checkpoint has one, a load hasn't already failed this session, and `messages` carries an
+    /// image. No-op in every other case — including a repeat image request after a failed load,
+    /// so a broken tower doesn't retry (and eprintln) on every single image turn.
+    fn ensure_vision_loaded(
+        vision: &mut Option<qwen3_5_vision::VisionModel>,
+        vision_capable: bool,
+        vision_load_failed: &mut bool,
+        model_dir: &std::path::Path,
+        messages: &[Message],
+    ) {
+        if vision.is_some() || !vision_capable || *vision_load_failed || !job_has_image(messages) {
+            return;
+        }
+        match qwen3_5_vision::load_vision_tower(model_dir) {
+            Ok(v) => {
+                eprintln!("mlx-native: Qwen3.5 vision tower loaded on demand (first image request)");
+                *vision = Some(v);
+            }
+            Err(e) => {
+                eprintln!("mlx-native: vision tower load failed: {e} (image ignored as text-only)");
+                *vision_load_failed = true;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod lazy_vision_tests {
+        use super::*;
+
+        fn text_message() -> Message {
+            Message { role: Role::User, content: vec![ContentBlock::Text { text: "hi".into() }] }
+        }
+
+        fn image_message() -> Message {
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Text { text: "what is this?".into() },
+                    ContentBlock::Image { data: vec![0u8; 4] },
+                ],
+            }
+        }
+
+        #[test]
+        fn job_has_image_finds_an_image_anywhere_in_the_message_list() {
+            assert!(!job_has_image(&[text_message()]));
+            assert!(job_has_image(&[text_message(), image_message()]));
+            assert!(job_has_image(&[image_message()]));
+            assert!(!job_has_image(&[]));
+        }
+
+        // `ensure_vision_loaded`'s guards, proven WITHOUT a real model dir: each case must
+        // return before ever calling `load_vision_tower` (a bogus path would otherwise set
+        // `vision_load_failed`, which these assert stays false — the tell that no load was
+        // attempted at all, not that one was attempted and failed).
+        #[test]
+        fn ensure_vision_loaded_skips_a_text_only_job() {
+            let mut vision = None;
+            let mut failed = false;
+            ensure_vision_loaded(&mut vision, true, &mut failed, Path::new("/nonexistent"), &[
+                text_message(),
+            ]);
+            assert!(vision.is_none());
+            assert!(!failed, "must not have attempted a load for a text-only job");
+        }
+
+        #[test]
+        fn ensure_vision_loaded_skips_a_non_vl_checkpoint() {
+            let mut vision = None;
+            let mut failed = false;
+            ensure_vision_loaded(&mut vision, false, &mut failed, Path::new("/nonexistent"), &[
+                image_message(),
+            ]);
+            assert!(vision.is_none());
+            assert!(!failed, "vision_capable=false must skip before touching disk");
+        }
+
+        #[test]
+        fn ensure_vision_loaded_does_not_retry_after_a_prior_failure() {
+            let mut vision = None;
+            let mut failed = true; // a load already failed earlier this session
+            ensure_vision_loaded(&mut vision, true, &mut failed, Path::new("/nonexistent"), &[
+                image_message(),
+            ]);
+            assert!(vision.is_none());
+            assert!(failed, "still marked failed — no new attempt, no eprintln spam per turn");
+        }
     }
 
     /// Build the multimodal context for a Qwen3.5-VL request: preprocess EVERY image
