@@ -143,6 +143,18 @@ pub(crate) fn unload_idle_secs() -> u64 {
         .unwrap_or(300)
 }
 
+/// Idle seconds before the watchdog releases any context grown on demand
+/// (`ChatBackend::shrink_idle_context`) back to what the resident model loaded with.
+/// `ROZUM_ELASTIC_CTX_SHRINK_IDLE_SECS`, default 120 (2 min) — deliberately shorter than
+/// `unload_idle_secs`' 300s default, so a grown reservation is given back on its own before the
+/// model is unloaded wholesale for the same idleness. elastic-context-on-demand.
+pub(crate) fn elastic_shrink_idle_secs() -> u64 {
+    std::env::var("ROZUM_ELASTIC_CTX_SHRINK_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120)
+}
+
 // ── Multi-resident warm cache (shared-gateway-multislot Phase 2) ─────────────────
 
 /// On by default; `ROZUM_MULTISLOT=0|false|off` disables it (→ exactly the single-resident path).

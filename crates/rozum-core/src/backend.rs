@@ -301,6 +301,15 @@ pub trait ChatBackend: Send + Sync {
     fn try_grow_context(&self, _want: u32) -> u32 {
         self.context_window()
     }
+    /// Release any headroom [`Self::try_grow_context`] grew, back down to what this backend
+    /// loaded with, if it's currently above that baseline. Called periodically from the gateway's
+    /// idle watchdog — ONLY while idle (no in-flight generation; the caller enforces this, not the
+    /// implementation) — never mid-generation. Returns `Some((old, new))` if it shrank (for
+    /// logging), `None` if there was nothing above baseline to release. Default: no-op (a backend
+    /// that never overrides `try_grow_context` has nothing to shrink either).
+    fn shrink_idle_context(&self) -> Option<(u32, u32)> {
+        None
+    }
     /// Short identifier for observability (`GET /stats`, the JSONL log).
     fn label(&self) -> &'static str {
         "backend"

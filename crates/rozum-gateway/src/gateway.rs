@@ -1448,6 +1448,25 @@ pub async fn serve_on(
                     }
                 }
 
+                // 1c. elastic-context-on-demand: release any context grown on demand back to the
+                // resident model's loaded baseline once it's been idle for a while — shorter than
+                // the idle-unload timeout below, so a grow gives itself back before the whole model
+                // gets unloaded for the same idleness. Same idle/generating guard as idle-unload;
+                // a no-op read for any backend that doesn't support growing (the trait default).
+                if idle_for >= elastic_shrink_idle_secs()
+                    && sb.generating.load(Ordering::SeqCst) == 0
+                {
+                    let shrunk = sb.backend.read().ok().and_then(|g| {
+                        g.as_ref().and_then(|b| b.shrink_idle_context())
+                    });
+                    if let Some((old, new)) = shrunk {
+                        crate::obs::log_event(serde_json::json!({
+                            "event": "gateway_elastic_ctx_shrink",
+                            "idle_secs": idle_for, "old_n_ctx": old, "new_n_ctx": new,
+                        }));
+                    }
+                }
+
                 // 2. idle-unload: model resident, nothing generating, quiet for
                 // `unload_secs`. `is_loaded()` makes this fire once, not every tick.
                 if unload_on_idle

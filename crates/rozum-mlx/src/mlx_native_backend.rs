@@ -454,6 +454,10 @@ mod inner {
         /// used ([`rozum_models::model_source::footprint_for`]) — needed to compute what a GROWN
         /// reservation should publish to the ledger.
         weight_bytes: u64,
+        /// The ceiling this backend was actually LOADED with (after any CLI/adaptive cap, before
+        /// any live grow) — what `shrink_idle_context` releases back down to. Immutable: a fresh
+        /// load, not a moving target, so shrink always undoes exactly what grow added, never more.
+        loaded_n_ctx: u32,
         /// Set if this model was ever co-resident with another (its process-global peak is then
         /// contaminated → not recorded to the footprint cache). See [`LIVE_RESIDENTS`].
         co_resident: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -582,6 +586,7 @@ mod inner {
                         n_ctx: std::sync::atomic::AtomicU32::new(n_ctx),
                         arch_max_n_ctx,
                         weight_bytes,
+                        loaded_n_ctx: n_ctx,
                         co_resident,
                         jobs_in_channel,
                     })
@@ -681,6 +686,10 @@ mod inner {
             grow_context(&self.n_ctx, self.arch_max_n_ctx, self.weight_bytes, &self.model_id, want)
         }
 
+        fn shrink_idle_context(&self) -> Option<(u32, u32)> {
+            shrink_context(&self.n_ctx, self.loaded_n_ctx, self.weight_bytes, &self.model_id)
+        }
+
         fn label(&self) -> &'static str {
             "mlx-native"
         }
@@ -758,18 +767,72 @@ mod inner {
         fit_n_ctx
     }
 
+    /// elastic-context-on-demand: release whatever `grow_context` added, back down to
+    /// `loaded_n_ctx`, if `n_ctx` is currently above it. Unlike growing, shrinking needs NO
+    /// admission check — reserving less is always safe — so this can't be refused; it only ever
+    /// returns `None` when there's genuinely nothing above baseline to give back. The CALLER (the
+    /// gateway's idle watchdog) is responsible for only calling this while idle (no in-flight
+    /// generation); this function does not itself check that, the same division of responsibility
+    /// `ChatBackend::shrink_idle_context`'s doc comment states.
+    ///
+    /// Order is the mirror image of `grow_context`'s, for the same hard-invariant reason: `n_ctx` is
+    /// lowered FIRST, the ledger reservation SECOND — a served ceiling must never advertise more
+    /// than what's reserved, so on the way down the public number has to move before the promise
+    /// backing it is allowed to shrink.
+    fn shrink_context(
+        n_ctx: &std::sync::atomic::AtomicU32,
+        loaded_n_ctx: u32,
+        weight_bytes: u64,
+        model_id: &str,
+    ) -> Option<(u32, u32)> {
+        use std::sync::atomic::Ordering;
+        let current = n_ctx.load(Ordering::Relaxed);
+        if current <= loaded_n_ctx {
+            return None; // never grown above baseline (or already shrunk back) — nothing to do
+        }
+        let available = rozum_core::share::available_ram_for_admission().unwrap_or(u64::MAX);
+        let min_free = rozum_core::share::min_free_ram_bytes();
+        const SHRINK_FLOOR: u32 = 4096; // same floor load-time adaptive fitting uses
+        // Reuses the same fitting math as a fresh load would at `loaded_n_ctx` — not because
+        // shrinking needs to be admitted, but so the (n_ctx, cache_gib) pair this publishes is
+        // consistent with what `grow_context`/the initial load would have chosen at this size,
+        // rather than inventing a different cache policy on the way back down. `unwrap_or` covers
+        // the pathological case (RAM got tighter than even `loaded_n_ctx` needs since load) by
+        // shrinking to the floor rather than not shrinking at all — strictly safer either way.
+        let (target_n_ctx, target_cache_gib) = crate::model_source::fit_model_params(
+            model_id, weight_bytes, loaded_n_ctx, available, min_free, SHRINK_FLOOR,
+        )
+        .unwrap_or((SHRINK_FLOOR, 1));
+        n_ctx.store(target_n_ctx, Ordering::Relaxed);
+        let kv_per_pos = crate::model_source::kv_per_pos_bytes(model_id);
+        let new_footprint = crate::model_source::footprint_for(weight_bytes, kv_per_pos, target_n_ctx, target_cache_gib);
+        let _ = rozum_core::share::update_own_footprint(model_id, new_footprint); // best-effort, same as grow_context
+        eprintln!(
+            "mlx-native: shrank served context {current} → {target_n_ctx} tokens (idle, back toward \
+             loaded baseline {loaded_n_ctx}), footprint now {} MB",
+            new_footprint / 1_048_576,
+        );
+        Some((current, target_n_ctx))
+    }
+
+    // Serializes every test below (in BOTH `grow_context_tests` and `shrink_context_tests`) that
+    // mutates process-global env vars (RAM override, XDG_STATE_HOME, host pressure) — same reason
+    // `rozum-core`'s own admission tests serialize themselves. ONE lock shared by both modules: two
+    // separate per-module locks looked serialized but weren't — `cargo test` runs different test
+    // functions on different threads by default, and each module's lock only excluded ITS OWN
+    // tests, so a grow test and a shrink test could still stomp each other's env vars concurrently
+    // (caught live: `grows_when_ram_and_ledger_allow` timed out waiting on RAM another thread's
+    // `declines_when_ram_is_tight` had just pinned to 1 GiB).
+    #[cfg(test)]
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[cfg(test)]
     mod grow_context_tests {
         use super::*;
         use std::sync::atomic::{AtomicU32, Ordering};
-
-        // Serializes the tests below that mutate process-global env vars (RAM override,
-        // XDG_STATE_HOME) — same reason `rozum-core`'s own env-mutating tests serialize
-        // themselves, just a local lock since this is a different crate's test binary.
-        fn env_lock() -> &'static std::sync::Mutex<()> {
-            static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-            LOCK.get_or_init(|| std::sync::Mutex::new(()))
-        }
 
         #[test]
         fn noop_when_want_is_already_covered() {
@@ -863,6 +926,85 @@ mod inner {
             let n_ctx = AtomicU32::new(4096);
             let grown = grow_context(&n_ctx, 32768, 8u64 << 30, "test/does-not-exist", 16384);
             assert_eq!(grown, 4096, "must decline and leave n_ctx exactly as it was");
+            assert_eq!(n_ctx.load(Ordering::Relaxed), 4096);
+            unsafe {
+                match prev_xdg {
+                    Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                    None => std::env::remove_var("XDG_STATE_HOME"),
+                }
+                match prev_ram {
+                    Some(v) => std::env::set_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES", v),
+                    None => std::env::remove_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES"),
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod shrink_context_tests {
+        use super::*;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        #[test]
+        fn noop_when_not_above_baseline() {
+            // At baseline, and even BELOW it (can't happen in practice, but the guard is `<=` on
+            // purpose — never "shrink" upward) — no RAM/ledger call reachable either way.
+            let n_ctx = AtomicU32::new(8192);
+            assert_eq!(shrink_context(&n_ctx, 8192, 999 << 30, "irrelevant/model"), None);
+            let n_ctx = AtomicU32::new(4096);
+            assert_eq!(shrink_context(&n_ctx, 8192, 999 << 30, "irrelevant/model"), None);
+        }
+
+        #[test]
+        fn releases_back_to_the_loaded_baseline() {
+            let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().unwrap();
+            let prev_xdg = std::env::var_os("XDG_STATE_HOME");
+            let prev_ram = std::env::var_os("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES");
+            unsafe {
+                std::env::set_var("XDG_STATE_HOME", dir.path());
+                std::env::set_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES", (32u64 << 30).to_string());
+            }
+            // A prior reservation must already exist — shrink updates one in place, same as grow.
+            let _residency = rozum_core::share::acquire_residency("test/does-not-exist", 2u64 << 30)
+                .expect("test setup: acquire the reservation shrink will update");
+            let n_ctx = AtomicU32::new(16384); // simulates a prior grow above the 4096 baseline
+            let result = shrink_context(&n_ctx, 4096, 2u64 << 30, "test/does-not-exist");
+            assert_eq!(result, Some((16384, 4096)));
+            assert_eq!(n_ctx.load(Ordering::Relaxed), 4096, "n_ctx must actually be lowered");
+            unsafe {
+                match prev_xdg {
+                    Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                    None => std::env::remove_var("XDG_STATE_HOME"),
+                }
+                match prev_ram {
+                    Some(v) => std::env::set_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES", v),
+                    None => std::env::remove_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES"),
+                }
+            }
+        }
+
+        #[test]
+        fn shrinks_to_the_floor_when_even_baseline_no_longer_fits() {
+            let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().unwrap();
+            let prev_xdg = std::env::var_os("XDG_STATE_HOME");
+            let prev_ram = std::env::var_os("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES");
+            unsafe { std::env::set_var("XDG_STATE_HOME", dir.path()) };
+            // Acquire the initial reservation FIRST, while RAM is still plentiful — mirrors the
+            // real scenario (the model loaded when there was room; available RAM only got tight
+            // LATER). Acquiring it under the already-tight 1 GiB below would fail for an unrelated
+            // reason (the reservation itself gets refused, not the shrink logic under test).
+            let _residency = rozum_core::share::acquire_residency("test/does-not-exist", 8u64 << 30)
+                .expect("test setup");
+            unsafe {
+                // NOW tighten: less free RAM than even the 8 GiB weights need — the pathological
+                // unwrap_or path in shrink_context.
+                std::env::set_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES", (1u64 << 30).to_string());
+            }
+            let n_ctx = AtomicU32::new(16384);
+            let result = shrink_context(&n_ctx, 8192, 8u64 << 30, "test/does-not-exist");
+            assert_eq!(result, Some((16384, 4096)), "falls back to the 4096 floor, not stuck at 16384");
             assert_eq!(n_ctx.load(Ordering::Relaxed), 4096);
             unsafe {
                 match prev_xdg {
@@ -3248,6 +3390,7 @@ mod inner {
                         // always holds), and `weight_bytes` is never read in that path.
                         arch_max_n_ctx: n_ctx,
                         weight_bytes: 0,
+                        loaded_n_ctx: n_ctx,
                         co_resident,
                         jobs_in_channel: std::sync::Arc::new(
                             std::sync::atomic::AtomicUsize::new(0),

@@ -741,24 +741,24 @@ Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
 - [ ] distillation-plan - Design a later LoRA/QLoRA or distillation path.
   - Do not implement until evals provide a baseline.
 
-- [x] **elastic-context-on-demand — CLOSED 2026-08-28 (v1: grow only).** A resident `mlx-native`
-  model now raises its own served `n_ctx` live (no drain, no reload) the moment a request needs more
-  than it currently serves, checked against a real RAM/ledger admission
+- [x] **elastic-context-on-demand — CLOSED 2026-08-28 (v1: grow + idle shrink-back).** A resident
+  `mlx-native` model raises its own served `n_ctx` live (no drain, no reload) the moment a request
+  needs more than it currently serves, checked against a real RAM/ledger admission
   (`crates/rozum-mlx/src/mlx_native_backend.rs::grow_context`, wired in `gateway.rs` before
-  `fit_to_context`). `ROZUM_ELASTIC_CTX=0` opts out. Spec + Results: `docs/specs/elastic-context-on-
-  demand.md`. Reused two already-existing primitives (`ResidencyGuard::update_footprint`,
-  `dry_run_admission`) rather than the new ledger op this entry originally called for — a smaller
-  change than planned.
+  `fit_to_context`), and releases the difference back down after `ROZUM_ELASTIC_CTX_SHRINK_IDLE_SECS`
+  (default 120s) of idleness — piggybacked on the gateway's PRE-EXISTING idle-watchdog tick (the same
+  loop idle-unload/pressure-shed already use), not a new timer. `ROZUM_ELASTIC_CTX=0` opts out.
+  Spec + Results: `docs/specs/elastic-context-on-demand.md`. Reused two already-existing primitives
+  (`ResidencyGuard::update_footprint`, `dry_run_admission`) rather than the new ledger op this entry
+  originally called for — a smaller change than planned.
 
-- [ ] **elastic-context-preempt-and-shrink** (follow-up, split out of `elastic-context-on-demand`
-  2026-08-28) — the two halves deliberately cut from v1 (see that spec's Decisions): (1) when a grow
-  doesn't fit on its own, preempt an idle lower-priority sibling via the existing
-  `residency-admission-queue.md` P4 protocol instead of just falling through to trim; (2) release an
-  elevated reservation back down after a cooldown once it's no longer being used, instead of holding
-  it until an operator runs `gateway switch`. **Build only if** v1's fallback (trim) turns out to
-  fire often enough in practice to matter — not measured yet; `grow_context` eprintln's every
-  successful grow to the gateway service log, so a quiet log over real usage vs. a chatty one is the
-  signal to watch before building either half.
+- [ ] **elastic-context-preempt-on-denial** (follow-up, split out of `elastic-context-on-demand`
+  2026-08-28; renamed 2026-08-28 — the shrink half of the original split shipped same-day) — when a
+  grow doesn't fit on its own, preempt an idle lower-priority sibling via the existing
+  `residency-admission-queue.md` P4 protocol instead of just falling through to trim. **Build only
+  if** v1's fallback (trim) turns out to fire often enough in practice to matter — not measured yet;
+  `grow_context` eprintln's every successful grow to the gateway service log, so a quiet log over
+  real usage vs. a chatty one is the signal to watch before building this.
 
 # BLOCKED — on another repository
 

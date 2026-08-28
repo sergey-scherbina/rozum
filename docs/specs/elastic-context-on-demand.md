@@ -1,6 +1,6 @@
 # Spec: elastic context on demand — grow a resident model's served n_ctx live, shrink it back when idle
 
-Status: 2026-08-28 — **SHIPPED (v1: grow only — no preemption, no shrink-back; see Decisions).**
+Status: 2026-08-28 — **SHIPPED (v1: grow + idle shrink-back; no preemption-on-denial — see Decisions).**
 Builds on the shipped
 `docs/specs/residency-admission-queue.md` (cooperative preemption, event-driven wait queue)
 and `docs/specs/safe-multi-model-residency.md` (the RAM ledger, `crates/rozum-core/src/share.rs`).
@@ -46,6 +46,16 @@ load time by adaptive-load's RAM estimate. A policy number can be changed live.
   from deep inside the backend). Turned out `ResidencyGuard::update_footprint` and
   `dry_run_admission` already existed (residency-unify U1) — no NEW ledger primitive was needed for
   the admission check itself, only this pid-keyed variant of the write.
+- `ChatBackend` gained a third default method, `shrink_idle_context(&self) -> Option<(u32, u32)>`
+  (default: no-op `None`), called from the gateway's PRE-EXISTING idle watchdog tick (the same 2s
+  loop that already drives idle-unload/pressure-shed in `gateway.rs`) — not a new timer. Gated on a
+  new `elastic_shrink_idle_secs()` (`ROZUM_ELASTIC_CTX_SHRINK_IDLE_SECS`, default 120s — shorter than
+  `unload_idle_secs`' 300s, so a grow gives itself back before the whole model unloads for the same
+  idleness) and the same `generating == 0` guard idle-unload already uses.
+- `rozum-mlx`: one more immutable field, `loaded_n_ctx` (the ceiling actually loaded with, before
+  any grow) — what `shrink_idle_context` releases back down to. `shrink_context` is `grow_context`'s
+  mirror: no admission check needed (reserving less is always safe), reverse ordering (`n_ctx` down
+  first, ledger second).
 
 ## Behavior
 
@@ -63,9 +73,10 @@ load time by adaptive-load's RAM estimate. A policy number can be changed live.
 - [x] Fallback (nothing to grow into): trim to the **current** `n_ctx` exactly as today — a grow
       attempt never turns into a request failure or a hang (every early-return in `grow_context`
       returns `current` unchanged, never an error).
-- [ ] ~~Shrink-back after an idle cooldown.~~ **NOT built in v1** — see Decisions. An elevated
-      reservation is released only by an operator-initiated `gateway switch` (unchanged, pre-existing
-      lever), same as before this spec.
+- [x] Shrink-back after an idle cooldown: a resident whose `n_ctx` is above `loaded_n_ctx` releases
+      the difference once idle (no in-flight generation) for `ROZUM_ELASTIC_CTX_SHRINK_IDLE_SECS`
+      (default 120s) — piggybacked on the gateway's existing idle-watchdog tick, not a new timer.
+      (`shrink_context` in `mlx_native_backend.rs`, called from `gateway.rs`'s watchdog loop.)
 - [x] The hard invariant from `residency-admission-queue.md` holds at every instant: the ledger
       update happens FIRST (`update_own_footprint`), the atomic `n_ctx` store SECOND, and only if the
       ledger write itself succeeded — a reader can never see a served ceiling wider than what's
@@ -80,8 +91,8 @@ load time by adaptive-load's RAM estimate. A policy number can be changed live.
 
 - Continuous/periodic RAM re-measurement — explicitly rejected by the operator; this is
   event-triggered only, on an actual request that needs more room.
-- Preempting an idle sibling when a grow doesn't fit on its own, and shrinking an elevated
-  reservation back down after a cooldown — both PLANNED but deferred out of v1; see Decisions.
+- Preempting an idle sibling when a grow doesn't fit on its own — PLANNED but deferred out of v1;
+  see Decisions. (Shrink-back after a cooldown IS built — see Behavior.)
 - `mistralrs` / any backend whose KV pool is pre-allocated at load (PagedAttention) — needs an
   actual reload; out of scope here, `gateway switch` already covers it.
 - Growing past the model's own architectural `max_position_embeddings` — never a goal; the ceiling
@@ -122,6 +133,27 @@ request arrives, prompt tokens > current n_ctx (but ≤ model's real max)
 Every non-growth path returns `current` unchanged and falls through to `fit_to_context(current)` —
 today's trim behavior, verbatim.
 
+Shrink, on the existing idle-watchdog tick (`gateway.rs`, alongside idle-unload):
+
+```
+idle_for ≥ ROZUM_ELASTIC_CTX_SHRINK_IDLE_SECS (120s) and generating == 0?  ──no──▶ (skip this tick)
+        │yes
+        ▼
+  backend.shrink_idle_context()                      mlx_native_backend.rs::shrink_context
+        │
+        ▼
+  n_ctx > loaded_n_ctx?  ──no──▶ None (nothing above baseline — no-op)
+        │yes
+        ▼
+  fit_model_params(spec, weight_bytes, loaded_n_ctx, available_ram_now, min_free, floor)
+        │                                            no admission check — releasing is always safe
+        ▼
+  n_ctx.store(target_n_ctx)              ◀── flipped DOWN first (mirror of grow's ordering)
+        │
+        ▼
+  update_own_footprint(model, footprint_for(...))     ledger released second
+```
+
 ## Decisions
 
 - **Event-triggered, not a continuous poller** — chosen because the operator explicitly asked for
@@ -148,12 +180,13 @@ today's trim behavior, verbatim.
   the fallback actually fires in practice (see Results), is the same "ship the easy 90%, don't block
   it behind the hard 10%" call already made for `mlx-native`-only. Revisit as its own follow-up spec
   if the fallback rate turns out to matter.
-- **Shrink-back deferred out of v1, not built** — same reasoning: no existing idle-watch tick to
-  hang a "release what I grew and haven't used" condition on was found without adding new
-  background-timer machinery, which sits uneasily next to "event-triggered, not continuous polling"
-  being the entire point of this feature. An elevated reservation today is released the same way any
-  reservation was released before this spec: an operator-run `gateway switch`. Worth a follow-up
-  once it's clear grows are common enough that never shrinking back actually costs something.
+- **Shrink-back reuses the gateway's PRE-EXISTING idle watchdog, not a new timer** — the tick
+  already exists and already runs idle-unload/cache-squeeze/pressure-shed on the same 2s cadence
+  (`gateway.rs`, spawned whenever `idle_exit`/`unload_on_idle`/`launch_managed`/`shed_active` apply
+  — true for the durable service either way). Adding one more idle-gated condition to an existing
+  loop is not the "continuous polling" the operator ruled out — that loop watches for OTHER reasons
+  regardless of this feature; shrink just piggybacks on it rather than spinning up its own timer.
+  Initially scoped as deferred (original draft, below) before this loop was found on a second pass.
 - **Grow-then-flip ordering (ledger before n_ctx, not after)** — chosen to preserve the hard
   invariant from `residency-admission-queue.md`: the reservation must never lag what a request could
   actually claim. Shrinking reverses the order (flip `n_ctx` down first, then release the
@@ -183,5 +216,25 @@ the test call the real `acquire_residency` first, which is arguably the more hon
 exercises the actual read-then-grow shape a live gateway would follow, not the update in isolation).
 
 Not yet measured (needs live traffic, not unit tests): how often the fallback (trim) actually fires
-vs. a successful grow in practice, and whether that rate justifies building the deferred preemption/
-shrink-back halves.
+vs. a successful grow in practice, and whether that rate justifies building the deferred preemption
+half.
+
+**Shrink-back, added same day after the operator asked for it explicitly.** Shipped as:
+`ChatBackend::shrink_idle_context` (default), `MlxNativeBackend::loaded_n_ctx` +
+`mlx_native_backend.rs::shrink_context`, `switchboard.rs::elastic_shrink_idle_secs`, wired into
+`gateway.rs`'s existing idle-watchdog tick. 3 new tests (`shrink_context_tests`): no-op at/below
+baseline, releases to baseline, falls back to the floor when even the baseline no longer fits.
+
+One real bug caught by the test suite itself, worth recording since it's a durable lesson, not just
+a fixed typo: the two test modules (`grow_context_tests`, `shrink_context_tests`) each defined their
+OWN `env_lock()` — different `OnceLock` statics — so they looked serialized (each module's tests
+waited on `its` lock) but weren't serialized AGAINST EACH OTHER. `cargo test` runs different test
+functions on different threads by default, and a `grow` test and a `shrink` test mutating the same
+process-global `ROZUM_GATEWAY_AVAILABLE_RAM_BYTES` concurrently produced a real 240s hang (one
+test's "make RAM tight" stepped on another's in-flight `acquire_residency` wait). Fixed by hoisting
+one `env_lock()` shared by both modules. The lesson: a lock scoped to "this file's tests" is not
+lock scoped to "this global resource" — the mutex must be co-located with the RESOURCE it guards
+(the env var), not with whichever module happened to need it first.
+
+Full suites re-run clean after the fix: `rozum-core` 169, `rozum-gateway` 161, `rozum-mlx` 53
+(44 ignored/live).
