@@ -1,5 +1,49 @@
 # Bugs
 
+## BUG-061 — a digit-looking XML/Hermes tool-arg (e.g. a task id) parses as a JSON number and the client rejects the whole call as "Invalid tool parameters"
+
+- **Status:** FIXED (`crates/rozum-core/src/serving.rs::coerce_args_to_declared_schema`, called from
+  `crates/rozum-core/src/engine.rs::consume_tokens` and
+  `crates/rozum-mlx/src/mlx_native_backend.rs::BatchSeq::finalize`).
+- **Severity:** P2 — no data loss, but every hit burns 1-2 wasted turns: the client (`claude`) prints
+  `Invalid tool parameters`, the model has to notice and retry the same tool with different-looking
+  args, and the operator sees two bare error lines with no explanation.
+
+**Reported (operator):** pasted a `rozum launch claude` session on `Qwen3.5-4B-MLX-4bit` showing
+`Invalid tool parameters` twice in a row before a normal `LS`-style call ("Listed 1 directory")
+finally succeeded.
+
+**Repro (this session).** `~/.rozum/gateway.jsonl` around the reported timestamp had no
+`toolcall_parse_miss` — the tool-call JSON parsed fine, so this is a different class of bug from
+BUG-060 (which is a parse failure). Reproduced live with `ROZUM_RAW_DUMP=1 rozum launch claude
+--dedicated -p "как использовать агентов в розуме через телеграмм?"`: the raw dump showed the model
+emitting the Hermes/XML tool-call dialect (`<function=NAME><parameter=KEY>VALUE</parameter>…`) mixed
+with plain JSON `{"name":…,"arguments":…}` calls in the SAME session — and among the XML calls,
+`TaskUpdate`/`TaskGet` used `<parameter=taskId>\n1\n</parameter>`.
+
+**Root cause.** `parse_xml_function` (serving.rs) tries `serde_json::from_str` on every raw
+parameter VALUE before falling back to a string — needed for genuinely numeric parameters like
+Bash's `timeout_ms>10000<`, but the same guess silently retypes a STRING field that happens to look
+numeric (a task id) into a JSON number. `taskId: 1` (number) vs. the client's schema, which declares
+`taskId` as a string, is a schema mismatch — Claude Code rejects the whole tool call rather than
+coercing it, hence the bare `Invalid tool parameters` with no further detail. There is no way to
+tell "wants a number" from "wants a string that looks like one" from the raw text alone.
+
+**Fix.** By finalize time the tool's schema IS available (`meta.tools` in the engine seam,
+`job.tools` in the batched MLX seam) — `coerce_args_to_declared_schema` runs after parsing and
+retypes any property the schema declares `"type": "string"` back to a JSON string if the parser
+guessed non-string (number/bool). Properties absent from the schema, or whose declared type isn't
+`"string"`, are left untouched, so a real numeric param (`timeout_ms`) keeps working. Applied
+uniformly to every parse path (native XML/Hermes, JSON, GLM synth, harmony) since all funnel through
+the same two finalize seams.
+
+**Regression tests (`crates/rozum-core/src/serving.rs`):**
+`xml_hermes_digit_looking_param_parses_as_json_number_before_schema_fixup` (documents the bug in
+isolation, no schema in play), `schema_fixup_retypes_a_numeric_looking_string_param_back_to_a_string`
+(the fix, using the exact captured `TaskUpdate` shape), `schema_fixup_leaves_a_genuinely_numeric_param_alone`
+(`timeout_ms` must NOT get stringified), `schema_fixup_is_a_noop_for_an_unknown_tool_or_missing_property`.
+`cargo test -p rozum-core --lib serving::`: 37 passed.
+
 ## BUG-060 — a `<tool_call>` that closes its own string early then hits EOS leaks as literal garbled text in both `claude` and `nadia`
 
 - **Status:** PARTIALLY FIXED (`crates/rozum-core/src/serving.rs::repair_tool_object`).

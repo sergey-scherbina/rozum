@@ -467,7 +467,7 @@ where
     }
 
     // Finalize: a cancelled run reports as-is; otherwise parse any tool calls.
-    let tool_calls = if matches!(stop_reason, StopReason::Cancelled) {
+    let mut tool_calls = if matches!(stop_reason, StopReason::Cancelled) {
         Vec::new()
     } else if meta.harmony {
         crate::harmony::parse_harmony(&full_text).tool_calls
@@ -501,6 +501,14 @@ where
         }
         calls
     };
+    // BUG-061: a bare digit-looking string param (e.g. a task id) can get parsed as a JSON
+    // number by the XML/Hermes reader (or the bare-literal repair path); retype it back to a
+    // string wherever the tool's own schema says the property is a string, or the client
+    // rejects the whole call ("Invalid tool parameters"). Applies to every parse path
+    // (native, harmony) since all share the same client-side schema check.
+    for c in tool_calls.iter_mut() {
+        c.1 = crate::serving::coerce_args_to_declared_schema(&c.0, &c.1, &meta.tools);
+    }
     // Observability (gw-toolcall-parse-observability): tool-call markup present but NOTHING parsed —
     // the driver/model tool-DELIVERY mismatch signature (a malformed apply_patch form, an unknown XML
     // dialect, escaped-JSON code). Log the miss to `~/.rozum/gateway.jsonl` so it's grep-able instead

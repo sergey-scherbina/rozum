@@ -261,6 +261,55 @@ fn parse_xml_function(body: &str) -> Option<(String, String)> {
     Some((name.to_string(), Value::Object(args).to_string()))
 }
 
+/// Fix a class of "Invalid tool parameters" rejection from the client (BUG-061): the
+/// XML/Hermes parameter reader above (and `repair_tool_object`'s bare-literal path) tries
+/// `serde_json::from_str` on every value BEFORE falling back to a string, because some real
+/// parameters genuinely need a number (`timeout_ms>10000<`). But that same guess silently
+/// mistypes a string field whose value happens to look numeric — a task id (`taskId>1<`), a
+/// numeric-looking file id — into a JSON number. The client's tool schema then rejects the
+/// whole call. There is no schema-free way to tell those two apart from the raw text, but by
+/// finalize time the tool's schema IS known (`meta.tools` / `job.tools`), so fix it up after
+/// the fact: wherever the schema says a property is `"type": "string"`, force its value back
+/// to a JSON string. Only touches properties that exist in the schema; leaves everything else
+/// (including genuinely numeric/boolean properties) alone.
+pub fn coerce_args_to_declared_schema(name: &str, args: &str, tools: &[crate::backend::ToolDef]) -> String {
+    let Some(tool) = tools.iter().find(|t| t.name == name) else {
+        return args.to_string();
+    };
+    let Some(props) = tool.input_schema.get("properties").and_then(|p| p.as_object()) else {
+        return args.to_string();
+    };
+    let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(args) else {
+        return args.to_string();
+    };
+    let mut changed = false;
+    for (key, val) in map.iter_mut() {
+        let wants_string = props
+            .get(key)
+            .and_then(|p| p.get("type"))
+            .and_then(|t| t.as_str())
+            == Some("string");
+        if !wants_string || val.is_string() {
+            continue;
+        }
+        let coerced = match val {
+            Value::Number(n) => Some(n.to_string()),
+            Value::Bool(b) => Some(b.to_string()),
+            // Null and object/array are left alone: null likely means "omitted", and there is
+            // no sane string rendering of a nested structure to guess at.
+            _ => None,
+        };
+        if let Some(s) = coerced {
+            *val = Value::String(s);
+            changed = true;
+        }
+    }
+    if !changed {
+        return args.to_string();
+    }
+    Value::Object(map).to_string()
+}
+
 /// Fallback for models that don't emit `<tool_call>`: tool-call-shaped JSON
 /// objects anywhere in the text — bare or inside a ```json fence (the fence
 /// markers aren't braces, so the object inside is found directly). Requires the
@@ -1438,6 +1487,80 @@ mod tests {
         let (name, args) = parse_tool_call_body(body).unwrap();
         assert_eq!(name, "search");
         assert!(args.contains("cats"));
+    }
+
+    #[test]
+    fn xml_hermes_digit_looking_param_parses_as_json_number_before_schema_fixup() {
+        // The bug half of BUG-061, isolated: with no schema in the picture, a digit-looking
+        // parameter value (e.g. a task id) is a JSON number, not the string it usually needs
+        // to be — this is exactly why `coerce_args_to_declared_schema` has to exist below.
+        let body = "<function=TaskUpdate><parameter=taskId>\n1\n</parameter>\
+            <parameter=status>\nin_progress\n</parameter></function>";
+        let (name, args) = parse_tool_call_body(body).unwrap();
+        assert_eq!(name, "TaskUpdate");
+        let v: Value = serde_json::from_str(&args).unwrap();
+        assert_eq!(v["taskId"], serde_json::json!(1), "sanity: parser guesses a bare number here");
+    }
+
+    #[test]
+    fn schema_fixup_retypes_a_numeric_looking_string_param_back_to_a_string() {
+        // BUG-061: a model emits `<parameter=taskId>1</parameter>` (Hermes/XML form) for a tool
+        // whose schema declares `taskId` as a string. The XML reader has no schema and guesses
+        // JSON number, which the client then rejects wholesale as "Invalid tool parameters" —
+        // reproduced live via `ROZUM_RAW_DUMP` against a real `rozum launch claude --dedicated`
+        // session on Qwen3.5-4B. Once the schema is known (finalize time), fix the type back.
+        let tools = vec![crate::backend::ToolDef {
+            name: "TaskUpdate".into(),
+            description: "".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+            }),
+        }];
+        let fixed = coerce_args_to_declared_schema(
+            "TaskUpdate",
+            r#"{"taskId":1,"status":"in_progress"}"#,
+            &tools,
+        );
+        let v: Value = serde_json::from_str(&fixed).unwrap();
+        assert_eq!(v["taskId"], serde_json::json!("1"), "numeric-looking id must become a string");
+        assert_eq!(v["status"], serde_json::json!("in_progress"), "already-correct string untouched");
+    }
+
+    #[test]
+    fn schema_fixup_leaves_a_genuinely_numeric_param_alone() {
+        // The other half of the same fix: a real numeric parameter (Bash's `timeout_ms`) must
+        // NOT get stringified — only properties the schema calls `"type": "string"` are touched.
+        let tools = vec![crate::backend::ToolDef {
+            name: "Bash".into(),
+            description: "".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "timeout_ms": {"type": "number"},
+                },
+            }),
+        }];
+        let unchanged = coerce_args_to_declared_schema(
+            "Bash",
+            r#"{"command":"ls","timeout_ms":10000}"#,
+            &tools,
+        );
+        let v: Value = serde_json::from_str(&unchanged).unwrap();
+        assert_eq!(v["timeout_ms"], serde_json::json!(10000), "numeric schema field stays a number");
+    }
+
+    #[test]
+    fn schema_fixup_is_a_noop_for_an_unknown_tool_or_missing_property() {
+        // No tool named this, or the property isn't in the schema: pass the args through
+        // byte-for-byte rather than guessing.
+        let tools: Vec<crate::backend::ToolDef> = vec![];
+        let args = r#"{"taskId":1}"#;
+        assert_eq!(coerce_args_to_declared_schema("TaskUpdate", args, &tools), args);
     }
 
     #[test]

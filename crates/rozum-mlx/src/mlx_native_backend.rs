@@ -3051,7 +3051,7 @@ mod inner {
                     self.stop, self.output_tokens, self.full_text
                 );
             }
-            let tool_calls = if matches!(self.stop, StopReason::Cancelled) {
+            let mut tool_calls = if matches!(self.stop, StopReason::Cancelled) {
                 Vec::new()
             } else if self.harmony {
                 // gpt-oss: the markers are intact in `full_text` → parse the harmony channels.
@@ -3071,6 +3071,14 @@ mod inner {
                 }
                 calls
             };
+            // BUG-061: retype a bare digit/bool-looking XML parameter (e.g. a task id) back to
+            // a string wherever the tool's own schema declares it a string — the XML/Hermes
+            // reader guesses JSON-vs-string per value with no schema, and a wrong guess makes
+            // the client reject the whole call ("Invalid tool parameters"). See engine.rs's
+            // single-request seam for the non-batched twin of this fix.
+            for c in tool_calls.iter_mut() {
+                c.1 = crate::serving::coerce_args_to_declared_schema(&c.0, &c.1, &self.job.tools);
+            }
             // Observability (gw-toolcall-parse-observability): the model emitted tool-call markup but
             // NOTHING parsed — the exact signature of a driver/model tool-DELIVERY mismatch (a
             // malformed apply_patch form, an unknown XML dialect, escaped-JSON code). Log the miss to
