@@ -1,6 +1,25 @@
 # Changelog
 
-## launch-connect-to-a-named-gateway — a run can now be pointed at the build it means to measure
+## participant-model-autodiscover — the resident model is now typed in exactly one place
+Completed: 2026-08-28
+
+`com.rozum.gateway`, `com.rozum.assistant`, and `com.rozum.assistant-groups` each carried their own
+`--model mlx-community:...` argument — three copies of one fact, and only the first one ever did
+anything: a `meetings participant`'s `model` field is purely a label on its outgoing chat request
+(logs + the default handle when `--as` is omitted) — the gateway ignores it for routing and always
+answers with whatever is actually resident. Operator-reported: raised while asking how to try a 9B
+model, having noticed `gateway switch` alone was already enough to change what Telegram answers with.
+
+`meetings participant` / `meetings participant-pool`'s `--model` is now optional. Omitted (the new
+default for the two services above), it is asked once from `--gateway-url`'s `/models` at startup —
+retried for up to a minute, since a participant is a boot-time daemon that can race the gateway
+job's own startup, unlike `rozum launch --gateway-url`'s five-second check (same JSON extraction,
+factored into `first_model_display_name`, unit-tested). A future `gateway switch` to a different
+model changes what a NEWLY (re)spawned participant announces itself as too, with no plist edit.
+
+`com.rozum.assistant.plist` / `com.rozum.assistant-groups.plist` had their `--model` argument
+dropped; `com.rozum.gateway.plist` is now the only place a model spec is written down.
+ — a run can now be pointed at the build it means to measure
 Completed: 2026-08-16
 
 `rozum launch --gateway-url http://127.0.0.1:PORT` connects to a gateway instead of resolving one

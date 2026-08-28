@@ -914,9 +914,14 @@ enum MeetingsAction {
     /// no turn-taking. Run one per model (e.g. gpt-oss, qwen3.6) for a demo conference.
     /// Spec: `docs/specs/demo-conference.md`.
     Participant {
-        /// Model spec the gateway serves (e.g. `mlx-community:gpt-oss-20b-MXFP4-Q4`).
+        /// Model label sent with each turn's chat request and used to derive the default handle
+        /// (e.g. `gpt-oss` from `mlx-community:gpt-oss-20b-MXFP4-Q4`) when `--as` is omitted. The
+        /// gateway ignores this field for routing — it always answers with whatever is actually
+        /// resident — so it only has to be correct for logs/handle, never has to MATCH the
+        /// gateway. Omitted (recommended) → asked from `--gateway-url`'s `/models` at startup, so
+        /// it can never drift from what the gateway serves.
         #[arg(long)]
-        model: String,
+        model: Option<String>,
         /// Room to join (created if absent).
         #[arg(long)]
         room: String,
@@ -1016,8 +1021,11 @@ enum MeetingsAction {
     /// group registry, each with its OWN per-room ACL. Reconciles as groups are connected/
     /// disconnected from the bot (`/addgroup` / `/removegroup`) and respawns crashed children.
     ParticipantPool {
+        /// Same as `meetings participant`'s `--model`: a label, not a routing decision. Omitted
+        /// (recommended) → asked from `--gateway-url`'s `/models` once at pool startup and
+        /// forwarded to every child `meetings participant` it spawns.
         #[arg(long)]
-        model: String,
+        model: Option<String>,
         /// The primary room (e.g. the private-chat room `assistant`); groups add more.
         #[arg(long)]
         room: String,
@@ -3799,7 +3807,20 @@ async fn connect_named_gateway(url: &str) -> Option<(u16, String)> {
             return None;
         }
     };
-    let model = serde_json::from_str::<serde_json::Value>(&body)
+    let Some(model) = first_model_display_name(&body) else {
+        eprintln!("rozum launch: {base}/v1/models named no model — refusing rather than guessing one");
+        return None;
+    };
+    eprintln!("rozum launch: using the gateway at {base} (model {model}); not managing it");
+    Some((port, model))
+}
+
+/// The `display_name` of the first model an `/v1/models` response names, or `None` for a body
+/// that isn't that shape (unreachable gateway, empty catalog, a non-gateway server on the port).
+/// Factored out so every caller that asks a gateway "what are you actually serving" — this
+/// function's own caller and [`resolve_participant_model`] — reads the response the same way.
+fn first_model_display_name(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| {
             v.get("data")?
@@ -3808,18 +3829,57 @@ async fn connect_named_gateway(url: &str) -> Option<(u16, String)> {
                 .get("display_name")?
                 .as_str()
                 .map(str::to_string)
-        });
-    let Some(model) = model else {
-        eprintln!("rozum launch: {base}/v1/models named no model — refusing rather than guessing one");
-        return None;
-    };
-    eprintln!("rozum launch: using the gateway at {base} (model {model}); not managing it");
-    Some((port, model))
+        })
+}
+
+/// Ask the gateway what it is actually serving, instead of taking a `--model` that has to be kept
+/// in sync with the gateway's own by hand (BUG-062: the model ended up typed in three places — the
+/// gateway service AND both `meetings participant-pool` services — and only the first one ever
+/// mattered, since a participant's `model` field is purely a label in its outgoing chat request;
+/// the gateway ignores it and answers with whatever is actually resident). A participant is a
+/// long-running daemon started at boot, so this retries for up to a minute rather than giving up
+/// in five seconds like [`connect_named_gateway`] (a one-shot `rozum launch` where the operator is
+/// watching) — `com.rozum.gateway` and this participant's job can race at RunAtLoad.
+async fn resolve_participant_model(gateway_url: &str) -> Option<String> {
+    let base = gateway_url.trim_end_matches('/');
+    for attempt in 0..30u32 {
+        if attempt == 1 {
+            eprintln!("meetings participant: waiting for a model at {base}/models…");
+        }
+        match reqwest::Client::new()
+            .get(format!("{base}/models"))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => {
+                if let Some(model) = first_model_display_name(&r.text().await.unwrap_or_default()) {
+                    return Some(model);
+                }
+            }
+            _ => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    None
 }
 
 #[cfg(test)]
 mod gateway_url_tests {
-    use super::loopback_port;
+    use super::{first_model_display_name, loopback_port};
+
+    #[test]
+    fn first_model_display_name_reads_the_first_catalog_entry() {
+        let body = r#"{"object":"list","data":[{"id":"x","display_name":"Qwen3.5-9B"},{"id":"y","display_name":"other"}]}"#;
+        assert_eq!(first_model_display_name(body), Some("Qwen3.5-9B".to_string()));
+    }
+
+    #[test]
+    fn first_model_display_name_is_none_for_an_empty_catalog_or_garbage() {
+        assert_eq!(first_model_display_name(r#"{"object":"list","data":[]}"#), None);
+        assert_eq!(first_model_display_name("not json"), None);
+        assert_eq!(first_model_display_name(r#"{"data":[{"id":"x"}]}"#), None, "no display_name");
+    }
 
     #[test]
     fn only_a_loopback_url_with_a_port_is_accepted() {
@@ -5044,7 +5104,7 @@ async fn run_meetings_who(long: bool) {
 /// `rozum meetings participant` — run a local model as a live room participant.
 #[allow(clippy::too_many_arguments)]
 async fn run_meetings_participant(
-    model: String,
+    model: Option<String>,
     room: String,
     as_handle: Option<String>,
     reply_policy: String,
@@ -5066,6 +5126,19 @@ async fn run_meetings_participant(
             eprintln!("meetings participant: {e}");
             std::process::exit(1);
         }
+    };
+    let model = match model {
+        Some(m) => m,
+        None => match resolve_participant_model(&gateway_url).await {
+            Some(m) => m,
+            None => {
+                eprintln!(
+                    "meetings participant: no model at {gateway_url}/models after 60s — pass \
+                     --model explicitly, or check the gateway is up"
+                );
+                std::process::exit(1);
+            }
+        },
     };
     let handle = as_handle
         .filter(|s| !s.trim().is_empty())
@@ -5147,7 +5220,7 @@ async fn run_meetings_agent_participant(
 /// from inside the bot, and respawns any that crash.
 #[allow(clippy::too_many_arguments)]
 async fn run_meetings_participant_pool(
-    model: String,
+    model: Option<String>,
     primary_room: String,
     as_handle: Option<String>,
     gateway_url: String,
@@ -5175,6 +5248,19 @@ async fn run_meetings_participant_pool(
             }
         },
         None => persona,
+    };
+    let model = match model {
+        Some(m) => m,
+        None => match resolve_participant_model(&gateway_url).await {
+            Some(m) => m,
+            None => {
+                eprintln!(
+                    "participant-pool: no model at {gateway_url}/models after 60s — pass \
+                     --model explicitly, or check the gateway is up"
+                );
+                std::process::exit(1);
+            }
+        },
     };
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rozum-gateway"));
     let registry_path = Registry::path(&registry);
