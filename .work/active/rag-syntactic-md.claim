@@ -1,6 +1,6 @@
 feature/rag-syntactic-md 2026-08-30T15:01:54Z
 agent: claude-fable-5 (fable)
-heartbeat: 2026-08-30T15:10:43Z
+heartbeat: 2026-08-30T15:27:11Z
 status: in-progress
-done-so-far: uniml-md crate vendored+pushed (88c77c5), regen byte-identity verified
-next: rag_chunk module
+done-so-far: crate vendored (88c77c5), spec-update, rag_chunk+CLI written, first test build running
+next: tests green, then CLI smoke + spec-verify
