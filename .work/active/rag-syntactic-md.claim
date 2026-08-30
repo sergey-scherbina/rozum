@@ -1,0 +1,6 @@
+feature/rag-syntactic-md 2026-08-30T15:01:54Z
+agent: claude-fable-5 (fable)
+heartbeat: 2026-08-30T15:01:54Z
+status: not-started
+done-so-far:
+next: write docs/specs/syntactic-rag.md in the worktree, commit spec before code
