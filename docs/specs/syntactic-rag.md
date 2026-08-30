@@ -45,34 +45,41 @@ BACKLOG items, out of scope here.
     offsets.)
   - `index_project(root: &Path, index: &mut LexicalIndex) -> IndexStats` — walk `root`
     honoring `.gitignore`-style basics (skip `.git`, `target`, `node_modules`,
-    `.worktrees`, binaries by extension + a UTF-8 sniff), route `.md` →
-    `chunk_markdown`, other text files → `chunk_text`, `LexicalIndex::add` each chunk.
+    `.worktrees`, `.rozum`, `.vendor`, symlinks, binaries by extension + a UTF-8 sniff,
+    files over 4 MB), route `.md` → `chunk_markdown`, other text files → `chunk_text`,
+    `LexicalIndex::add` each chunk. A `.md` file over `MAX_MARKDOWN_TREE_BYTES` (16 KB)
+    takes the `chunk_text` path instead and is counted in `IndexStats::degraded` — see
+    Out of scope → `rag-uniml-parser-quadratic` for why that cap exists.
+    `project_chunks_with_progress` / `index_and_save_with_progress` take a per-file
+    callback, because a real repo takes minutes and a silent command reads as a hung one.
 - **CLI**: `rozum rag index [--root <dir>]` builds/refreshes the index for a project
-  directory (default: cwd) and persists it under the project's state dir;
+  directory (default: cwd), printing per-file progress on stderr, and persists it at
+  `<root>/.rozum/rag-index.json` — the same per-project state directory the meeting rooms
+  use;
   `rozum rag search <query> [-k N]` queries it (thin wrapper over `Retriever::search`,
   same output the tool sees). The existing `search_documents` agent tool gains the
   persisted project index as its default backing when present.
 
 ## Behavior
 
-- [ ] `crates/uniml-md` builds with plain `cargo build` — no ssc, no JVM, no network.
-- [ ] `chunk_markdown` on a doc with `#`/`##` headings yields one chunk per section,
+- [x] `crates/uniml-md` builds with plain `cargo build` — no ssc, no JVM, no network.
+- [x] `chunk_markdown` on a doc with `#`/`##` headings yields one chunk per section,
       each chunk's text containing its heading line and its body, none of the next
       section's; a headingless doc yields exactly one chunk.
-- [ ] Fenced code blocks stay INSIDE their section's chunk (never split mid-fence), and
+- [x] Fenced code blocks stay INSIDE their section's chunk (never split mid-fence), and
       a `#` inside a fence is not a section boundary — this is precisely what the
       syntactic tree buys over regex splitting.
-- [ ] `chunk_text` splits on blank-line runs; CRLF input does not produce empty chunks.
-- [ ] `index_project` over rozum's own repo indexes `*.md` + `*.rs` + plain text, skips
+- [x] `chunk_text` splits on blank-line runs; CRLF input does not produce empty chunks.
+- [x] `index_project` over rozum's own repo indexes `*.md` + `*.rs` + plain text, skips
       `.git`/`target`/binaries, and reports counts (files, chunks) in `IndexStats`.
-- [ ] `rozum rag index && rozum rag search "residency admission"` (in this repo) returns
+- [x] `rozum rag index && rozum rag search "residency admission"` (in this repo) returns
       a chunk from the residency/admission docs among its top 3 hits — an end-to-end smoke
       that ranking sees section-sized chunks. (Top-3, not top-1: docs/specs shares this
       vocabulary widely — elastic-context/concurrency/cascade all discuss admission — and a
       top-1 assertion pins BM25 tie-breaking on the corpus, not correctness of the chunks.)
-- [ ] A malformed/hostile markdown file (uniML `diagnostics` non-empty or `document:
+- [x] A malformed/hostile markdown file (uniML `diagnostics` non-empty or `document:
       None`) falls back to `chunk_text` for that file — indexing never fails the run.
-- [ ] `regen-uniml-md.sh` run against the scalascript checkout reproduces the vendored
+- [x] `regen-uniml-md.sh` run against the scalascript checkout reproduces the vendored
       crate byte-identically (modulo the recorded source SHA header) and `cargo build`s.
 
 ## Out of scope
@@ -130,5 +137,39 @@ context, file-level defeats the purpose. `Chunk.id` doubles as a human-usable ci
 
 ## Results
 
-(to fill at verify: chunk/file counts on rozum's own repo, index size, search smoke
-output, regen byte-identity confirmation)
+**Vendored crate.** `crates/uniml-md`, generated from scalascript `a3bb56687` (content
+identical to its `origin/main` after the 2026-08-30 uniML merge): 4,599 lines across
+`generated/ssc_program.rs` (3,462), `runtime/mod.rs` (713) and `value.rs` (424). Builds
+standalone with plain `cargo build -p uniml-md`, no deps beyond std. Re-running
+`regen-uniml-md.sh` against the same checkout reproduces it **byte-identically**
+(`git status --porcelain crates/uniml-md` empty afterwards).
+
+**End-to-end, `docs/specs` (147 files, 1.3 MB):**
+
+```
+$ rozum rag index
+  [   1] specs/agent-meeting-coordination.md (12 KB)
+  …
+indexed 147 files into 2365 chunks (0 skipped, 17 large .md on the text path)
+  → ./.rozum/rag-index.json
+611.68s user  10:30.84 total
+
+$ rozum rag search "residency admission" -k 3
+   8.835  specs/safe-multi-model-residency.md#p3
+   8.697  specs/residency-admission-queue.md#spec-residency-admission-queue-…
+   8.235  specs/elastic-context-on-demand.md#p2
+```
+
+2,365 chunks from 147 files — ~16 per file, i.e. sections, not documents. 130 of the 147
+took the syntactic path; the 17 over the 16 KB cap are indexed by paragraph (visible above:
+`#p3` is a degraded chunk, `#spec-residency-…` a syntactic one). The residency/admission
+docs land in the top 3 for their own vocabulary, which is the smoke this phase promised.
+
+**The one number that shaped the design.** Indexing 1.3 MB takes 10.5 minutes, essentially
+all of it inside `Markdown_parse` (99.2% of chunking cost; O(bytes²), ~4× per doubling).
+That is why the 16 KB cap exists and why `rag-uniml-parser-quadratic` (Out of scope) is a
+blocker for phase 2 rather than a nicety — see that entry for the measurements and the
+suspected cause.
+
+**Tests.** 11 in `rag_chunk`, one per Behavior item plus the persistence round-trip, the
+oversized-file degradation, and the end-to-end smoke over this repo's own `docs/specs`.
