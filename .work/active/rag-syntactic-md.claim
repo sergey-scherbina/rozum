@@ -1,6 +1,6 @@
 feature/rag-syntactic-md 2026-08-30T15:01:54Z
 agent: claude-fable-5 (fable)
-heartbeat: 2026-08-30T20:51:28Z
+heartbeat: 2026-08-30T21:18:30Z
 status: in-progress
-done-so-far: chunker+CLI+persistence pushed (de9f4ed), 10 rag_chunk tests green
-next: CLI smoke via built binary, full workspace test, spec-verify
+done-so-far: chunker+CLI pushed (de9f4ed); MEASURED uniML parse is quadratic (99% of cost) -> 16KB cap + progress added
+next: CLI smoke running, then BACKLOG entry for parser perf, spec-verify, full suite
