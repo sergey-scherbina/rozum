@@ -225,14 +225,39 @@ impl crate::value::SscInt for SscChar { fn ssc_int(self) -> i64 { self.0 } }
 // Code units rather than characters, measured rather than assumed: `"a😀b".length` is 4 on
 // both reference lanes, not 3. `chars().count()` is the intuitive fix and would have put this
 // lane wrong again on exactly the inputs nobody tests.
+// ASCII FAST PATH, and it is a COMPLEXITY problem rather than a micro-optimisation.
+// For an all-ASCII string a UTF-8 byte index IS the UTF-16 code-unit index, so both answers
+// come straight out of the byte slice. `<[u8]>::is_ascii` is vectorised; `encode_utf16()`
+// walks the string one `char` at a time through iterator machinery, so the general path
+// below costs orders of magnitude more per byte examined.
+//
+// Why it matters: a scanner written the ordinary way — `while i < s.length do s.charAt(i)` —
+// makes BOTH of these O(n) per iteration (the length recomputed in the loop CONDITION, the
+// index walked from the start), i.e. O(n²) over the string, entirely inside the runtime.
+// Measured on `uniml/markdown` parsing plain paragraphs: `codePointCount` + `_str_code_at`
+// were 40% of a profile whose whole shape was quadratic (2 KB 0.014 s → 256 KB 173 s).
+// This keeps the quadratic SHAPE (see `rag-uniml-parser-quadratic` in rozum's backlog for
+// the asymptotic fix, which needs a representation decision) and removes the constant that
+// made it hurt at kilobyte scale.
 #[allow(dead_code)]
-pub fn _str_length(s: &str) -> i64 { s.encode_utf16().count() as i64 }
+pub fn _str_length(s: &str) -> i64 {
+    if s.is_ascii() { s.len() as i64 } else { s.encode_utf16().count() as i64 }
+}
 
 #[allow(dead_code)]
 pub fn _str_char_at(s: &str, i: i64) -> SscChar { SscChar(_str_code_at(s, i)) }
 
 #[allow(dead_code)]
 pub fn _str_code_at(s: &str, i: i64) -> i64 {
+    // Only the PREFIX has to be ASCII for byte index `i` to be code-unit index `i`: a
+    // multi-byte character anywhere at or before `i` shifts the mapping, one after it
+    // cannot. Checking the prefix rather than the whole string also keeps the fast path
+    // available for a mostly-ASCII document with one accented word near the end.
+    let b = s.as_bytes();
+    let idx = i as usize;
+    if i >= 0 && idx < b.len() && b[..=idx].is_ascii() {
+        return b[idx] as i64;
+    }
     s.encode_utf16()
         .nth(i as usize)
         .unwrap_or_else(|| panic!("charAt({}): index out of range for a string of {} code units", i, s.encode_utf16().count()))

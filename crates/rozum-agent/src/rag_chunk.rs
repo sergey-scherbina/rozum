@@ -241,13 +241,29 @@ const SKIP_DIRS: &[&str] =
 /// Cost tracks BYTES, not block count — 16 KB as 682 sections (25.5 s) and as 8 sections
 /// (22.8 s) cost the same — so nothing about how a document is structured avoids it.
 ///
-/// 16 KB bounds a single file at ~25 s while keeping the syntactic path for 88% of this repo's
-/// `docs/specs` (146 files, median 6.5 KB, p90 17.5 KB) and 85% of all its markdown. Without
-/// the cap, indexing this repo does not finish: SPRINT.md alone is 505 KB.
+/// **Kept at 16 KB on 2026-08-31, and the attempt to raise it is the useful part.** Two fixes
+/// in scalascript's Rust backend (`f4e2cd38e`) made this parser 2.8× faster at every size —
+/// a self-append (`xs = xs :+ x`) now lowers to `xs.push(x)` instead of copying and cloning the
+/// whole vector per append, and the runtime's UTF-16 index helpers got an ASCII fast path
+/// (32 KB 2.768 s → 0.997 s; 256 KB 173.4 s → 61.8 s). The obvious next move was to spend that
+/// speedup on a bigger cap. It was tried at 64 KB, then at 32 KB, and MEASURED on this repo's
+/// actual `docs/specs` rather than on the synthetic benchmark:
 ///
-/// Raising this is not a config question, it is the follow-up task: fix the parser
-/// (`rag-uniml-parser-quadratic` in BACKLOG.md). Phase 2 (chunking CODE, where files are
-/// routinely larger than any doc) is blocked on that fix.
+///     125 files <= 16 KB    41.5 s of parse   (both caps pay this)
+///      15 files 16-32 KB    49.5 s of parse   (only a 32 KB cap pays this)
+///
+/// Raising the cap to 32 KB MORE THAN DOUBLES total reindex parse work for 15 files out of 147,
+/// i.e. it spends the entire 2.8× and more, to move coverage 88% → 98.6%. A synthetic
+/// paragraph benchmark had suggested "+10-15 s"; real specs in that band are much heavier,
+/// which is exactly why the number here comes from the corpus. So the speedup is taken as a
+/// 2.8× cheaper reindex at the SAME coverage, not as a wider cap.
+///
+/// The cap exists only because the parser is O(bytes²) — 2.8× is a constant, not a shape, and
+/// this repo's own 505 KB `SPRINT.md` merely went from ~7 h to ~2.5 h. Removing the cap needs
+/// the asymptotic fix: `docs/specs/ssc-rust-string-representation.md` (`ssc-rust-string-repr`
+/// in BACKLOG.md) — emulating JVM UTF-16 indexing over a Rust UTF-8 `String` costs O(i) per
+/// `charAt` even on the fast path. Phase 2 (chunking CODE, where files are routinely larger
+/// than any doc) stays blocked on that.
 pub const MAX_MARKDOWN_TREE_BYTES: usize = 16 * 1024;
 
 /// Files larger than this are skipped outright — a multi-megabyte blob is generated output or
