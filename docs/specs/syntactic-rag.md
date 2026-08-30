@@ -30,10 +30,15 @@ BACKLOG items, out of scope here.
   an explicit dev action; rozum's own build never invokes ssc or a JVM.
 - **`rozum_agent::rag_chunk` (new module)**:
   - `chunk_markdown(path: &str, text: &str) -> Vec<Chunk>` — parse with the Gfm profile,
-    walk `MarkdownDocument.blocks`, emit one `Chunk` per heading-bounded section (the
-    heading plus everything until the next heading of the same-or-higher level); a
-    document with no headings is one chunk. `Chunk { id, text }` where `id` is
-    `"<path>#<heading-slug-or-ordinal>"`.
+    take section boundaries from the LOSSLESS tree's top-level `markdown.heading` branches
+    (their spans give exact source offsets, so chunk text is a byte-exact source slice),
+    emit one `Chunk` per heading-bounded section: the heading plus its body up to the NEXT
+    top-level heading of ANY level — sections are DISJOINT. (First spec draft said
+    "same-or-higher level", which for nested headings would nest `##` text inside the `#`
+    chunk too — contradicting the Behavior box's "none of the next section's" and skewing
+    BM25 document frequencies with duplicated text.) A document with no headings is one
+    chunk; text before the first heading is its own preamble chunk. `Chunk { id, text }`
+    where `id` is `"<path>#<heading-slug-or-ordinal>"`.
   - `chunk_text(path: &str, text: &str) -> Vec<Chunk>` — the fallback for any non-`.md`
     file: paragraph-split (blank-line runs), same `Chunk` shape. (True uniML `Literal`
     lossless trees add nothing over this for retrieval; revisit only if a consumer needs
