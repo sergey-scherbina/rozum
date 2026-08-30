@@ -13,6 +13,9 @@ license = "Apache-2.0"
 [dependencies]
 rozum-core = { path = "../rozum-core" }
 rozum-models = { path = "../rozum-models" }
+# The vendored uniML markdown parser (generated Rust, scripts/regen-uniml-md.sh) —
+# the syntactic chunker for rag_chunk (docs/specs/syntactic-rag.md). Dependency-free.
+uniml-md = { path = "../uniml-md" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 tokio-util = "0.7"

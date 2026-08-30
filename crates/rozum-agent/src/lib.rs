@@ -11,6 +11,7 @@ pub mod builtin_tools;
 pub mod cascade;
 pub mod mcp_tool_source;
 pub mod memory_store;
+pub mod rag_chunk;
 pub mod rag_lite;
 pub mod router;
 pub mod verify;

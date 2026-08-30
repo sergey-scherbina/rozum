@@ -66,8 +66,10 @@ BACKLOG items, out of scope here.
 - [ ] `index_project` over rozum's own repo indexes `*.md` + `*.rs` + plain text, skips
       `.git`/`target`/binaries, and reports counts (files, chunks) in `IndexStats`.
 - [ ] `rozum rag index && rozum rag search "residency admission"` (in this repo) returns
-      hits whose top result is a chunk from the residency/admission docs — an end-to-end
-      smoke that ranking sees section-sized chunks.
+      a chunk from the residency/admission docs among its top 3 hits — an end-to-end smoke
+      that ranking sees section-sized chunks. (Top-3, not top-1: docs/specs shares this
+      vocabulary widely — elastic-context/concurrency/cascade all discuss admission — and a
+      top-1 assertion pins BM25 tie-breaking on the corpus, not correctness of the chunks.)
 - [ ] A malformed/hostile markdown file (uniML `diagnostics` non-empty or `document:
       None`) falls back to `chunk_text` for that file — indexing never fails the run.
 - [ ] `regen-uniml-md.sh` run against the scalascript checkout reproduces the vendored
@@ -103,6 +105,17 @@ context, file-level defeats the purpose. `Chunk.id` doubles as a human-usable ci
   boundary cheap; fences and nested structures stay intact by construction.
 - **Persisted per-project index over in-memory-only** — `search_documents` must serve an
   agent session that did not just run the indexer; BM25 index serializes trivially.
+- **Fallback triggers on `status != Complete` OR a Fatal/Error diagnostic OR an empty tree**
+  — measured, not assumed. Of uniML's six markdown limits, `maxNodes`, `maxDepth`,
+  `maxSourceCodePoints` and `maxTokenCodePoints` all halt the parse (`status: Halted` plus a
+  `Fatal` diagnostic, sometimes a truncated tree); **`maxBlocks` and `maxLineCodePoints` are
+  accepted and then silently NOT enforced** — a document exceeding either comes back
+  `Complete` with a full tree and no diagnostic. So a limit hit is detectable only for the
+  first group, and `status` is the load-bearing half of the check: a halt can truncate the
+  tree WITHOUT an Error-severity diagnostic, and sectioning a truncated tree would silently
+  drop the file's tail, where `chunk_text` keeps every byte. The two unenforced limits are a
+  finding about uniML's limit semantics (worth an upstream entry), not a defect this phase
+  fixes: nothing here depends on them, and the detectable signals cover the real failure.
 
 ## Results
 

@@ -5244,6 +5244,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uniml-md",
 ]
 
 [[package]]

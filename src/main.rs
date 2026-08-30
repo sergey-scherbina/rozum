@@ -386,6 +386,15 @@ enum Command {
         action: MeetingsAction,
     },
 
+    /// Build or query a project's syntactic RAG index (docs/specs/syntactic-rag.md):
+    /// markdown chunked along its uniML parse tree (heading-bounded sections, fences
+    /// opaque), everything else by paragraphs, ranked by BM25. The index persists at
+    /// `<root>/.rozum/rag-index.json`, where the `search_documents` agent tool finds it.
+    Rag {
+        #[command(subcommand)]
+        action: RagAction,
+    },
+
     /// Generate a git commit message for the staged diff with a local model.
     ///
     /// Reads `git diff --cached` and prints a commit message. With a single
@@ -470,6 +479,27 @@ enum Command {
     Messenger {
         #[command(subcommand)]
         action: MessengerAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum RagAction {
+    /// Index a project directory into `<root>/.rozum/rag-index.json`.
+    Index {
+        /// Project root to index (default: current directory).
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+    },
+    /// Query the persisted index — the same hits the `search_documents` tool sees.
+    Search {
+        /// Query text.
+        query: String,
+        /// Number of hits to return.
+        #[arg(short, default_value_t = 5)]
+        k: usize,
+        /// Project root whose index to query (default: current directory).
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
     },
 }
 
@@ -1611,6 +1641,9 @@ async fn main() {
         }
         Some(Command::Service { action }) => {
             run_service(action);
+        }
+        Some(Command::Rag { action }) => {
+            run_rag(action);
         }
         Some(Command::Meetings { action }) => match action {
             MeetingsAction::Start { foreground } => run_meetings_start(foreground).await,
@@ -8631,6 +8664,54 @@ async fn run_info(spec: &str) {
 /// `rozum service {install,uninstall,status}` — install the gateway as an always-warm user service.
 /// The plist/unit *generation* is the library's tested `rozum::service`; here we write the file and
 /// drive `launchctl` / `systemctl`. Spec: `docs/specs/shared-gateway-service.md`.
+/// `rozum rag index|search` — the CLI face of docs/specs/syntactic-rag.md phase 1. Thin over
+/// `rozum::rag_chunk`: index = chunk the tree + persist; search = load + BM25. Sync on purpose —
+/// no engine, no daemon, no tokio needed for either path.
+fn run_rag(action: RagAction) {
+    use rozum::rag_chunk;
+    use rozum::rag_lite::Retriever;
+    match action {
+        RagAction::Index { root } => {
+            let root = root.unwrap_or_else(|| std::path::PathBuf::from("."));
+            match rag_chunk::index_and_save(&root) {
+                Ok((stats, file)) => {
+                    println!(
+                        "indexed {} files into {} chunks ({} skipped) → {}",
+                        stats.files,
+                        stats.chunks,
+                        stats.skipped,
+                        file.display()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("rag index failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        RagAction::Search { query, k, root } => {
+            let root = root.unwrap_or_else(|| std::path::PathBuf::from("."));
+            let Some(index) = rag_chunk::load_project_index(&root) else {
+                eprintln!(
+                    "no index at {} — run `rozum rag index` first",
+                    rag_chunk::index_path(&root).display()
+                );
+                std::process::exit(1);
+            };
+            let hits = index.search(&query, k);
+            if hits.is_empty() {
+                println!("no hits");
+                return;
+            }
+            for hit in hits {
+                let preview: String = hit.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let preview: String = preview.chars().take(160).collect();
+                println!("{:8.3}  {}\n          {}", hit.score, hit.id, preview);
+            }
+        }
+    }
+}
+
 fn run_service(action: ServiceAction) {
     match action {
         ServiceAction::Install {
