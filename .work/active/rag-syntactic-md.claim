@@ -1,6 +1,6 @@
 feature/rag-syntactic-md 2026-08-30T15:01:54Z
 agent: claude-fable-5 (fable)
-heartbeat: 2026-08-30T19:59:33Z
+heartbeat: 2026-08-30T20:51:28Z
 status: in-progress
-done-so-far: chunker 8-10 green after first full run; 2 test-expectation fixes in; rerun in background
-next: commit chunker+CLI, portable-bins build, spec-verify
+done-so-far: chunker+CLI+persistence pushed (de9f4ed), 10 rag_chunk tests green
+next: CLI smoke via built binary, full workspace test, spec-verify
