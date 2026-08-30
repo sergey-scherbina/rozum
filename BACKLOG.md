@@ -17,6 +17,24 @@ committed while fixing the other two.
 
 # LIVE
 
+## Syntactic RAG (phases 2–3; phase 1 is on SPRINT as `rag-syntactic-md`)
+
+Operator's design (2026-08, in-session, binding): RAG over project sources with a SYNTACTIC
+chunker built on **uniML compiled via ssc→Rust** (path A — no JVM anywhere; `syn` proposed and
+REJECTED — uniML's one tree covers code and English/Russian prose alike). The prerequisite
+campaign — every uniML module emitting clean Rust (core 64→0, yaml 184→0, markdown 155→0 real
+cargo errors) — landed in scalascript `main` 2026-08-30. Integration seam on the rozum side
+already exists: `src/rag_lite.rs` (BM25 `LexicalIndex`, `Retriever` trait, `search_documents`
+tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
+
+- [ ] **rag-syntactic-rust-dialect** — a "Rust-ish" uniML dialect for chunking CODE: structural,
+  not a grammar — `fn`/`impl`/`struct`/`mod` keywords + brace matching, string/comment aware;
+  `dialect/Literal.scala` is the lossless-fallback template, `uniml/markdown` the worked example
+  of a real dialect. Lives in scalascript's `uniml/`, then regen-vendored into rozum like phase 1.
+- [ ] **rag-embeddings-backend** — swap BM25 for embeddings behind the EXISTING `Retriever` trait
+  (rag-lite's own comment names this as the planned follow-up). Local-only, must fit alongside the
+  frozen 4B under the residency-admission rules; BM25 stays as the zero-model fallback.
+
 ## Rescued from the parked bucket (triage 2026-08-08)
 
 Both were moved into *Deprioritised — the model is frozen* on 2026-08-04, and neither carries a
