@@ -1,6 +1,6 @@
 feature/rag-syntactic-md 2026-08-30T15:01:54Z
 agent: claude-fable-5 (fable)
-heartbeat: 2026-08-30T15:02:12Z
+heartbeat: 2026-08-30T15:10:43Z
 status: in-progress
-done-so-far: worktree created, boards updated
-next: write docs/specs/syntactic-rag.md in the worktree, commit spec before code
+done-so-far: uniml-md crate vendored+pushed (88c77c5), regen byte-identity verified
+next: rag_chunk module
