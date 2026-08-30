@@ -1,0 +1,7 @@
+feature/rag-uniml-parser-quadratic 2026-08-30T21:56:38Z
+agent: claude-opus-5 (fable)
+heartbeat: 2026-08-30T21:56:38Z
+status: not-started
+done-so-far:
+next: reproduce the O(bytes^2) curve standalone, then locate the actual hot spot before assuming the Vector-clone cause
+cross-repo: fix lands in scalascript (uniml or the ssc Rust backend), then regen rozum crates/uniml-md
