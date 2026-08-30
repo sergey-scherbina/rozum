@@ -35,6 +35,32 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   (rag-lite's own comment names this as the planned follow-up). Local-only, must fit alongside the
   frozen 4B under the residency-admission rules; BM25 stays as the zero-model fallback.
 
+## LoRA self-teaching (teach mode) — spec: `docs/specs/lora-self-teaching.md`
+
+Operator idea 2026-08-30: the model learns from its operator ON REQUEST — collect
+(prompt, answer, rating, correction) pairs, train a LoRA adapter locally, gate it on the
+bench matrix, serve with instant rollback. Binding constraints (recorded in the spec):
+**pure Rust/MLX trainer, no Python anywhere** (operator's explicit choice — makes phase 1
+a real mlx-rs porting effort, priced in below); **opt-in teach mode only**; collection on
+**all three surfaces** (Telegram first, UCC chat, CLI/TUI). What it buys the frozen 4B:
+personalization is the one lever that makes a small local model act bigger, in a
+revertible, versioned adapter that never mutates the base snapshot.
+
+- [ ] **teach-collect** — phase 0, independently shippable and FIRST (SFT under ~100
+  quality pairs overfits — the dataset must accumulate ahead of any trainer): teach-mode
+  toggles, 👍/👎/correction affordances on Telegram (`/teach on|off`) + UCC + CLI/TUI, one
+  shared JSONL dataset (`~/.rozum/teach/`, 0600), `rozum teach export|stats`.
+- [ ] **teach-train-rust** — phase 1: LoRA training in the vendored mlx-rs stack. Hard
+  prerequisite, named: mlx-c `value_and_grad` bindings + AdamW + gradient flow through
+  LoRA branches over the frozen 4-bit qwen3_5 forward. Then `rozum teach train` →
+  versioned adapters with manifests. Training obeys the residency-admission ledger.
+- [ ] **teach-serve-adapters** — phase 2: load-time weight folding of an adapter into the
+  resident model (zero hot-path cost), `rozum teach apply|rollback|list`, adapter carried
+  on the model spec so panels show what serves, eval gate (`teach eval`) wired to the
+  bench matrix — `apply` refuses on regression past threshold.
+- [ ] **teach-dpo** — phase 3: when corrected pairs accumulate, preference training
+  (correction ≻ original) over plain SFT; same trainer plumbing, different loss.
+
 ## Rescued from the parked bucket (triage 2026-08-08)
 
 Both were moved into *Deprioritised — the model is frozen* on 2026-08-04, and neither carries a
