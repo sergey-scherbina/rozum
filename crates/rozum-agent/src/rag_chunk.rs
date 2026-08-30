@@ -36,6 +36,9 @@ pub struct IndexStats {
     pub skipped: usize,
     /// Total chunks added.
     pub chunks: usize,
+    /// Markdown files that took the paragraph path instead of the tree, because they exceed
+    /// [`MAX_MARKDOWN_TREE_BYTES`] — indexed, but without heading-bounded sections.
+    pub degraded: usize,
 }
 
 /// The default limits the uniML markdown dialect itself uses (`MarkdownLimits_default` in the
@@ -220,6 +223,33 @@ const BINARY_EXT: &[&str] = &[
 const SKIP_DIRS: &[&str] =
     &[".git", "target", "node_modules", ".worktrees", ".rozum", ".vendor", ".venv", "__pycache__"];
 
+/// The largest markdown file that takes the SYNTACTIC path. Above it, `chunk_text` — the file
+/// is still indexed, just without heading-bounded sections.
+///
+/// This is a mitigation for a MEASURED defect in the vendored parser, not a taste call:
+/// `Markdown_parse` is **quadratic in input bytes**, and it is 99.2% of chunking cost (measured
+/// 7.42 s of 7.48 s on a 10 KB document; the chunker's own tree walk is the other 0.8%). The
+/// curve is clean — every doubling of input costs ~4x:
+///
+/// ```text
+///    1 KB  →   0.10 s        16 KB  →  20.9 s
+///    2 KB  →   0.35 s        32 KB  →  85.5 s
+///    4 KB  →   1.30 s       505 KB  →  ~6.9 h   (extrapolated: this repo's own SPRINT.md)
+///    8 KB  →   5.29 s
+/// ```
+///
+/// Cost tracks BYTES, not block count — 16 KB as 682 sections (25.5 s) and as 8 sections
+/// (22.8 s) cost the same — so nothing about how a document is structured avoids it.
+///
+/// 16 KB bounds a single file at ~25 s while keeping the syntactic path for 88% of this repo's
+/// `docs/specs` (146 files, median 6.5 KB, p90 17.5 KB) and 85% of all its markdown. Without
+/// the cap, indexing this repo does not finish: SPRINT.md alone is 505 KB.
+///
+/// Raising this is not a config question, it is the follow-up task: fix the parser
+/// (`rag-uniml-parser-quadratic` in BACKLOG.md). Phase 2 (chunking CODE, where files are
+/// routinely larger than any doc) is blocked on that fix.
+pub const MAX_MARKDOWN_TREE_BYTES: usize = 16 * 1024;
+
 /// Files larger than this are skipped outright — a multi-megabyte blob is generated output or
 /// data, and one such file would dominate BM25's length statistics.
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -229,7 +259,7 @@ const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 pub fn index_project(root: &Path, index: &mut LexicalIndex) -> IndexStats {
     let mut stats = IndexStats::default();
     let mut chunks: Vec<Chunk> = Vec::new();
-    collect_project_chunks(root, root, &mut chunks, &mut stats);
+    collect_project_chunks(root, root, &mut chunks, &mut stats, &mut |_, _, _| {});
     for c in &chunks {
         index.add(c.id.clone(), c.text.clone());
     }
@@ -241,14 +271,30 @@ pub fn index_project(root: &Path, index: &mut LexicalIndex) -> IndexStats {
 /// indexed (the index itself is rebuilt from chunks on load — BM25 construction is cheap and
 /// this keeps the on-disk format independent of `LexicalIndex` internals).
 pub fn project_chunks(root: &Path) -> (Vec<Chunk>, IndexStats) {
+    project_chunks_with_progress(root, &mut |_, _, _| {})
+}
+
+/// [`project_chunks`] reporting each file as it is read: `(relative path, bytes, took the
+/// syntactic path)`. Exists because indexing a real repo takes minutes — see
+/// [`MAX_MARKDOWN_TREE_BYTES`] — and a CLI that prints nothing for that long looks hung.
+pub fn project_chunks_with_progress(
+    root: &Path,
+    progress: &mut dyn FnMut(&str, usize, bool),
+) -> (Vec<Chunk>, IndexStats) {
     let mut stats = IndexStats::default();
     let mut chunks: Vec<Chunk> = Vec::new();
-    collect_project_chunks(root, root, &mut chunks, &mut stats);
+    collect_project_chunks(root, root, &mut chunks, &mut stats, progress);
     stats.chunks = chunks.len();
     (chunks, stats)
 }
 
-fn collect_project_chunks(root: &Path, dir: &Path, out: &mut Vec<Chunk>, stats: &mut IndexStats) {
+fn collect_project_chunks(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<Chunk>,
+    stats: &mut IndexStats,
+    progress: &mut dyn FnMut(&str, usize, bool),
+) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => {
@@ -270,7 +316,7 @@ fn collect_project_chunks(root: &Path, dir: &Path, out: &mut Vec<Chunk>, stats: 
         }
         if meta.is_dir() {
             if !SKIP_DIRS.contains(&name) {
-                collect_project_chunks(root, &path, out, stats);
+                collect_project_chunks(root, &path, out, stats, progress);
             }
             continue;
         }
@@ -294,8 +340,13 @@ fn collect_project_chunks(root: &Path, dir: &Path, out: &mut Vec<Chunk>, stats: 
             }
         };
         let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+        let tree_path = ext == "md" && text.len() <= MAX_MARKDOWN_TREE_BYTES;
+        progress(&rel, text.len(), tree_path);
         let file_chunks =
-            if ext == "md" { chunk_markdown(&rel, &text) } else { chunk_text(&rel, &text) };
+            if tree_path { chunk_markdown(&rel, &text) } else { chunk_text(&rel, &text) };
+        if ext == "md" && !tree_path {
+            stats.degraded += 1;
+        }
         if !file_chunks.is_empty() {
             stats.files += 1;
             out.extend(file_chunks);
@@ -323,7 +374,16 @@ pub fn index_path(root: &Path) -> PathBuf {
 
 /// Index `root` and persist the result. Returns the stats and the file written.
 pub fn index_and_save(root: &Path) -> std::io::Result<(IndexStats, PathBuf)> {
-    let (chunks, stats) = project_chunks(root);
+    index_and_save_with_progress(root, &mut |_, _, _| {})
+}
+
+/// [`index_and_save`] with the per-file progress callback of
+/// [`project_chunks_with_progress`].
+pub fn index_and_save_with_progress(
+    root: &Path,
+    progress: &mut dyn FnMut(&str, usize, bool),
+) -> std::io::Result<(IndexStats, PathBuf)> {
+    let (chunks, stats) = project_chunks_with_progress(root, progress);
     let file = index_path(root);
     if let Some(dir) = file.parent() {
         fs::create_dir_all(dir)?;
@@ -465,6 +525,29 @@ mod tests {
         assert_eq!(hits[0].id, "docs/a.md#alpha");
     }
 
+    // Behavior: a markdown file past the size cap is still INDEXED, just via the paragraph
+    // path — the quadratic parser (see MAX_MARKDOWN_TREE_BYTES) must never make a big file
+    // simply vanish from the index.
+    #[test]
+    fn oversized_markdown_degrades_to_text_but_is_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let big = format!("# Huge\n\n{}\n", "lorem ipsum dolor ".repeat(2000));
+        assert!(big.len() > MAX_MARKDOWN_TREE_BYTES);
+        fs::write(root.join("big.md"), &big).unwrap();
+        fs::write(root.join("small.md"), "# Small\n\nbody\n").unwrap();
+        let mut index = LexicalIndex::new();
+        let stats = index_project(root, &mut index);
+        assert_eq!(stats.files, 2, "{stats:?}");
+        assert_eq!(stats.degraded, 1, "only the oversized file degrades: {stats:?}");
+        let hits = index.search("lorem ipsum", 3);
+        assert!(
+            hits.iter().any(|h| h.id.starts_with("big.md#p")),
+            "oversized file must still be searchable, via paragraph ids: {:?}",
+            hits.iter().map(|h| &h.id).collect::<Vec<_>>()
+        );
+    }
+
     // Persistence round-trip + the search_documents backing.
     #[test]
     fn persisted_index_round_trips() {
@@ -490,7 +573,9 @@ mod tests {
             return; // packaged builds without the docs tree
         }
         let mut index = LexicalIndex::new();
+        let t0 = std::time::Instant::now();
         let stats = index_project(&specs, &mut index);
+        eprintln!("e2e: {stats:?} in {:?}", t0.elapsed());
         assert!(stats.files > 50, "{stats:?}");
         assert!(stats.chunks > stats.files, "sections, not whole files: {stats:?}");
         let hits = index.search("residency admission queue", 5);

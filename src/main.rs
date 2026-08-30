@@ -8673,13 +8673,27 @@ fn run_rag(action: RagAction) {
     match action {
         RagAction::Index { root } => {
             let root = root.unwrap_or_else(|| std::path::PathBuf::from("."));
-            match rag_chunk::index_and_save(&root) {
+            // Per-file progress on stderr, because this genuinely takes minutes on a real
+            // repo: the vendored markdown parser is quadratic in file size (see
+            // rag_chunk::MAX_MARKDOWN_TREE_BYTES), and a command that prints nothing for
+            // ten minutes is indistinguishable from a hung one.
+            let mut n = 0usize;
+            let mut progress = |rel: &str, bytes: usize, tree: bool| {
+                n += 1;
+                eprintln!(
+                    "  [{n:4}] {}{rel} ({} KB)",
+                    if tree { "" } else { "text " },
+                    bytes / 1024
+                );
+            };
+            match rag_chunk::index_and_save_with_progress(&root, &mut progress) {
                 Ok((stats, file)) => {
                     println!(
-                        "indexed {} files into {} chunks ({} skipped) → {}",
+                        "indexed {} files into {} chunks ({} skipped, {} large .md on the text path) → {}",
                         stats.files,
                         stats.chunks,
                         stats.skipped,
+                        stats.degraded,
                         file.display()
                     );
                 }

@@ -81,6 +81,17 @@ BACKLOG items, out of scope here.
 - Embeddings/semantic ranking — phase 3 (`rag-embeddings-backend`); `Retriever` is the seam.
 - Incremental/watch reindexing; index persistence format stability guarantees.
 - xml/json/yaml dialect chunkers (compile clean already; wire when a consumer exists).
+- **Fixing the quadratic markdown parse** — `rag-uniml-parser-quadratic`, the one follow-up
+  this phase actually blocks on. Measured here, not suspected: `Markdown_parse` is O(bytes²)
+  and 99.2% of chunking cost (7.42 s of 7.48 s on 10 KB; every doubling costs ~4×; cost
+  tracks bytes, not block count). Phase 1 ships a 16 KB cap over it
+  (`rag_chunk::MAX_MARKDOWN_TREE_BYTES`) so 88% of `docs/specs` still gets the syntactic
+  path and the rest is still indexed by paragraph — but this repo's own 505 KB SPRINT.md
+  would take ~7 hours, so nothing above the cap can ever use the tree until the parser is
+  fixed. **Phase 2 (chunking code, where files are routinely larger than any doc) is blocked
+  on it.** The fix is in scalascript — either the uniML algorithm or, more likely, the
+  ssc→Rust lowering of Scala's persistent `Vector` to `Vec<T>` with eager `.clone()`, which
+  turns structurally-shared O(1) appends into O(n) copies inside a single-pass parser.
 
 ## Design
 
