@@ -1,5 +1,36 @@
 # Changelog
 
+## rag-syntactic-md — syntactic RAG phase 1: uniML chunks the docs, BM25 ranks the sections
+Completed: 2026-08-30
+
+Path A landed physically inside rozum: `crates/uniml-md` is uniML's core+markup+markdown compiled
+by `ssc-tools emit-rust` and COMMITTED as generated Rust — it builds with plain cargo, so rozum's
+own build touches no ssc and no JVM, ever. `scripts/regen-uniml-md.sh` regenerates it from a
+scalascript checkout and reproduces the vendored crate byte-identically. The prerequisite for all
+of this — every uniML module emitting clean Rust — landed in scalascript `main` the same day
+(core 64→0, yaml 184→0, markdown 155→0 real `cargo build` errors).
+
+`rozum_agent::rag_chunk` turns a project into retrievable chunks: `.md` files are parsed into
+uniML's lossless tree and cut at top-level heading branches (byte-exact source slices, sections
+DISJOINT so a `##` body is never duplicated into its `#` parent's chunk and BM25's document
+frequencies stay honest); everything else splits on blank-line runs. `rozum rag index` walks a
+project and persists a BM25 index; `rozum rag search` queries it; `search_documents` picks the
+persisted index up automatically. Measured on this repo's `docs/specs`: 147 files → 2365 chunks
+(~16 per file — sections, not documents), and `rag search "residency admission"` puts the
+residency/admission docs in the top 3.
+
+Two uniML findings came out of running it for real, both recorded rather than assumed. **The
+parser is O(bytes²)** — 99.2% of chunking cost, ~4× per doubling, tracking bytes and not block
+count — so this repo's own 505 KB `SPRINT.md` extrapolates to ~7 hours and an uncapped index would
+never finish; mitigated by `MAX_MARKDOWN_TREE_BYTES = 16 KB` (oversized `.md` is still indexed, by
+paragraph, and counted in `IndexStats::degraded`), which keeps the syntactic path for 88% of
+`docs/specs` and is filed as `rag-uniml-parser-quadratic` — **phase 2 is blocked on it**, since code
+files are routinely larger than docs. And `maxBlocks`/`maxLineCodePoints` are ACCEPTED but silently
+not enforced, while the other limits halt the parse with a truncated tree and no Error-severity
+diagnostic — which is why the fallback triggers on `status != Complete` as well as on diagnostics.
+146/146 `rozum-agent` lib tests green (11 in `rag_chunk`), all 8 spec Behavior boxes covered.
+Spec: `docs/specs/syntactic-rag.md`.
+
 ## participant-model-autodiscover — the resident model is now typed in exactly one place
 Completed: 2026-08-28
 

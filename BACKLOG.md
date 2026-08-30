@@ -27,6 +27,23 @@ cargo errors) — landed in scalascript `main` 2026-08-30. Integration seam on t
 already exists: `src/rag_lite.rs` (BM25 `LexicalIndex`, `Retriever` trait, `search_documents`
 tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
 
+- [ ] **rag-uniml-parser-quadratic** — **BLOCKS phase 2.** Measured while shipping phase 1:
+  uniML's `Markdown_parse` is **O(bytes²)** and is **99.2% of chunking cost** (7.42 s of 7.48 s on
+  10 KB; ~4× per doubling; cost tracks BYTES, not block count — 16 KB as 682 sections costs the
+  same as 8 sections). This repo's own 505 KB `SPRINT.md` extrapolates to ~7 hours, so an uncapped
+  `rozum rag index` never finishes. Phase 1 works around it with `MAX_MARKDOWN_TREE_BYTES = 16 KB`
+  (oversized `.md` still indexed by paragraph, counted in `IndexStats::degraded`) — that keeps 88%
+  of `docs/specs` on the syntactic path, but CODE files are routinely larger than docs, so phase 2
+  cannot ship on a 16 KB cap. **Suspected cause, check first in scalascript:** ssc→Rust lowers
+  Scala's persistent `Vector` to `Vec<T>` with eager `.clone()`, turning structurally-shared O(1)
+  appends into O(n) copies inside a single-pass parser — consistent with the hardening campaign's
+  own finding that the Rust backend inserts clones liberally (`cloneIfMoved`). Fix belongs in
+  scalascript's Rust backend (or in uniML's use of `Vector`), then regen `crates/uniml-md`.
+- [ ] **rag-uniml-unenforced-limits** — smaller uniML finding from the same run: `maxBlocks` and
+  `maxLineCodePoints` are ACCEPTED by `MarkdownLimits` and then silently not enforced (a document
+  exceeding either parses `Complete` with a full tree), while `maxNodes`/`maxDepth`/
+  `maxSourceCodePoints`/`maxTokenCodePoints` do halt. A limit that cannot be relied on is worse
+  than one that is absent. Fix in scalascript's uniml/markdown, or drop the two fields.
 - [ ] **rag-syntactic-rust-dialect** — a "Rust-ish" uniML dialect for chunking CODE: structural,
   not a grammar — `fn`/`impl`/`struct`/`mod` keywords + brace matching, string/comment aware;
   `dialect/Literal.scala` is the lossless-fallback template, `uniml/markdown` the worked example

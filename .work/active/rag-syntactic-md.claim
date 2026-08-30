@@ -1,6 +1,0 @@
-feature/rag-syntactic-md 2026-08-30T15:01:54Z
-agent: claude-fable-5 (fable)
-heartbeat: 2026-08-30T21:40:51Z
-status: in-progress
-done-so-far: 5 commits pushed (spec, crate, chunker+CLI, 16KB cap, spec-verify); portable workspace build green
-next: full rozum-agent suite result, then report

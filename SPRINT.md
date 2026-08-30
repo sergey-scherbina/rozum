@@ -9,22 +9,6 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
-### ▶ Syntactic RAG — phase 1: uniML markdown chunker → rag-lite (operator 2026-08-30: "запиши план и начинай")
-
-What it buys the frozen 4B model: retrieval over project sources/docs shrinks what has to sit in a
-small model's context — the highest-leverage lever this tier has. Design decisions are the
-OPERATOR'S, made in-session and binding: the chunker is **uniML compiled via ssc→Rust** (path A —
-no JVM anywhere, `syn` was proposed and REJECTED; uniML trees cover code AND English/Russian docs);
-the prerequisite — all uniML modules emitting clean Rust — landed in scalascript `main` 2026-08-30
-(core 64→0, yaml 184→0, markdown 155→0 real cargo errors). Phases 2–3 (Rust-ish dialect for code,
-embeddings behind the existing `Retriever` trait) are in `BACKLOG.md` under LIVE → Syntactic RAG.
-
-- [ ] **rag-syntactic-md** — vendor the uniML markdown+literal chunker (generated Rust, committed,
-  with a regen script — no ssc/JVM at rozum build time) into rozum; chunk docs by tree nodes
-  (heading-bounded sections, literal fallback for any text); index into `src/rag_lite.rs`'s BM25
-  `LexicalIndex` behind the `Retriever` trait; add reindex over a project directory; the existing
-  `search_documents` tool starts returning syntactic chunks. Spec first: `docs/specs/syntactic-rag.md`.
-
 **Two defects the first live runs found, both in the check itself:** `mcp-http` was probed with a
 GET that the MCP proxy answers 404 to — a red on a healthy service, so the probe now speaks MCP and
 reports `speaks MCP (rozum-mcp-proxy)`. And the transition line quoted the WRONG check's detail,
