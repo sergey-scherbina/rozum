@@ -1,5 +1,42 @@
 # Changelog
 
+## rag-uniml-parser-quadratic — the parser is 2.8× faster, and the hypothesis it was filed on was 11% of the problem
+Completed: 2026-08-31
+
+Filed with a suspected cause: ssc→Rust lowering Scala's persistent `Vector` to `Vec<T>` with
+eager clones. That was REAL — `xs = xs :+ x` emitted `[&(xs)[..], &[x][..]].concat()`, a
+whole-vector copy cloning every accumulated element on EVERY append, O(n) per token and O(n²)
+per file, at 96 of the emitted crate's 117 concat sites — and fixing it bought ~11%.
+
+The dominant cost was found by PROFILING instead: the runtime emulates JVM UTF-16 code-unit
+indexing over a Rust UTF-8 `String` by walking `encode_utf16()`, so `_str_length` is O(n) and
+`_str_code_at` is O(i). A scanner written the ordinary way — `while i < s.length do s.charAt(i)`,
+exactly what uniML's `codePointCount` and block scanner do — therefore pays O(n) per iteration in
+BOTH, entirely inside the runtime; those two were 40% of the profile. Given an ASCII fast path
+(vectorised `is_ascii`, prefix-only, so a mostly-ASCII document with one accented word near the
+end keeps it). Both fixes landed in scalascript `main` (`f4e2cd38e`) with a regression test that
+asserts the push AND both of its guards; `crates/uniml-md` was regenerated onto them.
+
+Measured, same benchmark: 32 KB 2.768 s → **0.997 s**, 256 KB 173.4 s → **61.8 s** — 2.8× at
+every size.
+
+**The speedup was not spent on a wider chunker cap, and that is the part worth remembering.**
+Raising `MAX_MARKDOWN_TREE_BYTES` was tried at 64 KB, then 32 KB, and finally measured against
+this repo's actual `docs/specs` rather than the synthetic benchmark: 125 files ≤16 KB cost 41.5 s
+of parse, while the 15 files in the 16–32 KB band cost 49.5 s on their own. A 32 KB cap therefore
+more than doubles reindex parse work for 15 files out of 147 — the whole 2.8× and more, to move
+coverage 88% → 98.6%. The synthetic estimate had said "+10–15 s". The cap stays 16 KB, the win is
+a 2.8× cheaper reindex at the same coverage, and the numbers now sit next to the constant.
+
+Still O(bytes²) in SHAPE — 2.8× is a constant, and 505 KB `SPRINT.md` merely went ~7 h → ~2.5 h.
+Removing the cap outright needs `docs/specs/ssc-rust-string-representation.md`
+(`ssc-rust-string-repr`): an `SscStr` newtype carrying a cached ASCII flag, so code-unit indexing
+is O(1) per value instead of O(i) per call. Recorded there, with the reason a `(ptr, len)`-keyed
+cache must NOT be used (allocation reuse serves the wrong string, and there is no drop hook).
+RAG phase 2 — chunking CODE, where files are routinely larger than any doc — stays blocked on it.
+146/146 `rozum-agent` lib tests green; scalascript `backendRust/test` 503 → 504; all four uniML
+corpora still emit and build clean.
+
 ## rag-syntactic-md — syntactic RAG phase 1: uniML chunks the docs, BM25 ranks the sections
 Completed: 2026-08-30
 

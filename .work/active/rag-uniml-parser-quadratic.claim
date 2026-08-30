@@ -1,7 +1,0 @@
-feature/rag-uniml-parser-quadratic 2026-08-30T21:56:38Z
-agent: claude-opus-5 (fable)
-heartbeat: 2026-08-30T23:03:31Z
-status: in-progress
-done-so-far: root cause found by profiling (NOT the original hypothesis): UTF-16 index emulation is O(i) per charAt. Two fixes merged to scalascript main f4e2cd38e (self-append->push, ASCII fast path) = 2.8x; crates/uniml-md regenerated; cap 16->64 KB = 100% of docs/specs syntactic
-next: rag_chunk tests green, then bookkeeping (CHANGELOG + backlog rewrite with the real cause + the hoist-length follow-up)
-cross-repo: fix lands in scalascript (uniml or the ssc Rust backend), then regen rozum crates/uniml-md

@@ -27,18 +27,60 @@ cargo errors) — landed in scalascript `main` 2026-08-30. Integration seam on t
 already exists: `src/rag_lite.rs` (BM25 `LexicalIndex`, `Retriever` trait, `search_documents`
 tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
 
-- [ ] **rag-uniml-parser-quadratic** — **BLOCKS phase 2.** Measured while shipping phase 1:
-  uniML's `Markdown_parse` is **O(bytes²)** and is **99.2% of chunking cost** (7.42 s of 7.48 s on
-  10 KB; ~4× per doubling; cost tracks BYTES, not block count — 16 KB as 682 sections costs the
-  same as 8 sections). This repo's own 505 KB `SPRINT.md` extrapolates to ~7 hours, so an uncapped
-  `rozum rag index` never finishes. Phase 1 works around it with `MAX_MARKDOWN_TREE_BYTES = 16 KB`
-  (oversized `.md` still indexed by paragraph, counted in `IndexStats::degraded`) — that keeps 88%
-  of `docs/specs` on the syntactic path, but CODE files are routinely larger than docs, so phase 2
-  cannot ship on a 16 KB cap. **Suspected cause, check first in scalascript:** ssc→Rust lowers
-  Scala's persistent `Vector` to `Vec<T>` with eager `.clone()`, turning structurally-shared O(1)
-  appends into O(n) copies inside a single-pass parser — consistent with the hardening campaign's
-  own finding that the Rust backend inserts clones liberally (`cloneIfMoved`). Fix belongs in
-  scalascript's Rust backend (or in uniML's use of `Vector`), then regen `crates/uniml-md`.
+- [ ] **rag-uniml-parser-quadratic** — **STILL BLOCKS phase 2, but 2.8× cheaper as of 2026-08-31.**
+  uniML's `Markdown_parse` is O(bytes²). Two fixes landed in scalascript (`f4e2cd38e`), each
+  measured, and `crates/uniml-md` regenerated onto them:
+  1. **Self-append.** `xs = xs :+ x` lowered to `[&(xs)[..], &[x][..]].concat()` — a whole-vector
+     copy cloning every accumulated element on EVERY append. Now `xs.push(x)` (96 of the emitted
+     crate's 117 concat sites). This was the ORIGINAL hypothesis in this entry and it was real —
+     but it turned out to be worth only ~11%.
+  2. **The actual dominant cost, found by profiling rather than by guessing:** the runtime
+     emulates JVM UTF-16 code-unit indexing over a Rust UTF-8 `String` by WALKING
+     `encode_utf16()` — O(n) for `_str_length`, O(i) for `_str_code_at`. A scanner written the
+     ordinary way (`while i < s.length do s.charAt(i)`, exactly what `codePointCount` and the
+     block scanner do) therefore pays O(n) per iteration in BOTH, entirely inside the runtime;
+     `codePointCount` + `_str_code_at` were 40% of the profile. Given an ASCII fast path
+     (vectorised `is_ascii`, prefix-only so a mostly-ASCII doc keeps it).
+
+  Measured end to end, same benchmark: 32 KB 2.768 s → **0.997 s**; 256 KB 173.4 s → **61.8 s**.
+
+  **The speedup was NOT spent on a bigger cap, and that decision is measured.** Raising
+  `MAX_MARKDOWN_TREE_BYTES` was tried at 64 KB, then at 32 KB, and finally checked against this
+  repo's ACTUAL `docs/specs` instead of the synthetic benchmark: 125 files ≤16 KB cost 41.5 s of
+  parse, while the 15 files in the 16–32 KB band cost **49.5 s** on their own. A 32 KB cap
+  therefore MORE THAN DOUBLES total reindex parse work for 15 files out of 147 — it spends the
+  whole 2.8× and more to move coverage 88% → 98.6%. (The synthetic estimate had said "+10–15 s";
+  real specs in that band are much heavier. Twice now the cap arithmetic looked fine and the
+  corpus said otherwise — take the number from the corpus.) The cap stays 16 KB and the win is
+  taken as a 2.8× cheaper reindex at the same coverage.
+
+  **What is left, and why it is a design decision rather than another patch:** the SHAPE is still
+  O(n²) — the ASCII fast path's prefix check is itself O(i). 505 KB `SPRINT.md` went ~7 h → ~2.5 h,
+  which is still not usable, and CODE files are routinely larger than docs. Three candidate fixes,
+  in increasing order of cost:
+  - **Hoist `_str_length` out of loop CONDITIONS** (`while i < s.length`) — it is pure and the
+    string does not change, yet it is recomputed every iteration. A sound lowering optimisation,
+    kills one of the two O(n)-per-iteration terms. Cheapest real next step.
+  - **Cache the UTF-16 expansion per string.** Keying on `(ptr, len)` is NOT sound — allocation
+    reuse (ABA) would serve another string's data — so this needs a real answer, not a hash.
+  - **Change the representation** so code-unit indexing is O(1) (e.g. carry a UTF-16 buffer, or
+    make the backend prove ASCII once at construction). Largest, and the only one that removes
+    the quadratic outright.
+- [ ] **ssc-rust-string-repr** — the ASYMPTOTIC fix for the item above, and the one that removes
+  `MAX_MARKDOWN_TREE_BYTES` entirely. Spec: `docs/specs/ssc-rust-string-representation.md`.
+  ScalaScript's string semantics (UTF-16 code units, per JVM/JS — uniML's surrogate handling
+  depends on them) stay; the REPRESENTATION gains metadata so `length`/`charAt` are O(1) instead
+  of O(n)/O(i). Phase 1 = an `SscStr` newtype carrying a cached ASCII flag (`Deref<Target = str>`
+  keeps `format!`/`&str` sites unchanged; `SscChar` is the established precedent in the same
+  runtime); phase 2 = a lazy UTF-16 table for non-ASCII, gated on a workload that needs it.
+  Acceptance test: `uniml/markdown` parse becomes LINEAR on ASCII input. **Recorded so nobody
+  retries it:** a thread-local cache keyed by `(ptr, len)` is UNSOUND — allocation reuse (ABA)
+  would serve one string's data for another, and there is no drop hook to invalidate it.
+- [ ] **rag-uniml-hoist-pure-length** — the cheapest concrete step of the item above, split out so
+  it can be picked up on its own: in the ssc Rust backend, hoist a pure `_str_length(s)` out of a
+  `while` CONDITION when `s` is not reassigned in the loop. Sound (pure function, unchanging
+  argument), no representation question, and it removes one of the two O(n)-per-iteration terms in
+  every string scanner uniML has.
 - [ ] **rag-uniml-unenforced-limits** — smaller uniML finding from the same run: `maxBlocks` and
   `maxLineCodePoints` are ACCEPTED by `MarkdownLimits` and then silently not enforced (a document
   exceeding either parses `Complete` with a full tree), while `maxNodes`/`maxDepth`/
