@@ -300,6 +300,12 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
 - [ ] **rag-embeddings-backend — SPIKED 2026-08-31, and the trade is now visible. Needs a call.**
   Measured before building anything, on the same 26 questions:
   BM25 (ships) **9/26 & 15/26**, embeddings ALONE **7/26 & 15/26**, **RRF fusion 10/26 & 17/26**.
+  THEN improved twice more, both free of extra machinery: embedding a DISTILLED text (path + item
+  name + doc comment, falling back to source when undocumented) instead of the raw source slice
+  took embeddings alone to **10/26 & 16/26** and the build DOWN to 276 s — better and cheaper,
+  since there is less text; and re-tuning the fusion weights (embeddings deserve the higher weight
+  even though they are weaker alone — in a fusion what pays is finding what the other misses) took
+  the pair to **~11/26 & ~18-19/26**. So the gain over BM25 is +2 top-1 and +3-4 top-5, not +1/+2.
   So embeddings alone LOSE; fused they win +1 top-1 and +2 top-5, because the two miss different
   questions — that is the whole argument for carrying both.
   Price: 336 MB model resident beside the frozen 4B (so under the residency-admission rules, with

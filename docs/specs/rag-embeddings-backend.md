@@ -20,6 +20,8 @@ head.
   BM25 (what ships, w/ slots)  9/26      15/26
   embeddings alone             7/26      15/26
   RRF fusion of the two       10/26      17/26
+  ...after distilling what is embedded and re-tuning fusion:
+  best fusion                 11/26      18/26   (or 10/26 & 19/26, see below)
 ```
 
 **Embeddings alone LOSE to BM25.** Fused by reciprocal rank they win by +1 top-1 and +2 top-5,
@@ -51,12 +53,55 @@ confident, wrong "embeddings do not work here".
 - Every search needs the query embedded, so the model must be loadable at query time or the search
   falls back.
 
-**For +1 top-1 and +2 top-5 out of 26.** A real gain and a real price, close enough that this is a
+**For +2 top-1 and +3–4 top-5 out of 26.** A real gain and a real price, close enough that this is a
 judgement call rather than an obvious yes — which is why the spike stops at the measurement rather
 than proceeding into the plumbing. The build cost was the loudest argument against and batching
 halved it (718 s -> 330 s), with incremental refresh making it a once-per-project cost rather than
 a recurring one; what remains against is the resident model itself, under admission rules, for a
 gain of one and two questions out of twenty-six.
+
+## The biggest lever was WHAT gets embedded, not how
+
+The first version embedded the raw source slice. But the question is natural language and a code
+chunk is mostly syntax — `detect_project` is 55 words of which one line was written for a reader
+and the rest is `unwrap_or`, `to_string_lossy` and a comment rule of box-drawing characters.
+
+Embedding a DISTILLED text instead — path, item kind and name, and the doc comment, falling back
+to the source where there is no doc (very common, and without the fallback an undocumented chunk
+would become a bare name and be lost):
+
+```text
+                              top-1     top-5     build
+  raw source slice             7/26      15/26     330 s
+  distilled                   10/26      16/26     276 s
+```
+
+Better AND cheaper — there is less text to embed. This is the first configuration in which
+embeddings ALONE beat BM25 alone (10/26 against 9/26).
+
+Worth contrasting with the doc-comment field that FAILED for BM25 (top-1 9 -> 7). That failed
+because the doc's words were already in the chunk and boosting merely scaled existing signal for
+every chunk equally. Here the text the model sees is REPLACED, so the syntax is not competing at
+all — a different bet, not a retry of a losing one.
+
+### Fusion weights
+
+With the distilled vectors, re-tuned (free — the rankings are already computed):
+
+```text
+  k=60  BM25 1 : emb 1     10/26   18/26
+  k=60  BM25 1 : emb 2     10/26   19/26
+  k=10  BM25 1 : emb 3     11/26   18/26
+  k=60  BM25 2 : emb 1      9/26   17/26
+```
+
+Embeddings deserve the HIGHER weight even though they were the weaker source alone, because in a
+fusion what pays is not average quality but finding something the other misses. Boosting BM25
+instead makes it worse — it already dominates.
+
+The spread between 11/18 and 10/19 is one question on a 26-question set, which this set cannot
+resolve; the stable part is the direction. **Take the headline as ~11/26 top-1 and ~18–19/26 top-5**,
+against BM25's 9/26 and 15/26, and treat the exact `k` as unsettled.
 
 ## Batching needs TWO limits, and neither works alone
 

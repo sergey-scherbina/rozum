@@ -97,8 +97,42 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // not an optimisation, it is a jetsam waiting for a bigger corpus.
     let budget: usize =
         std::env::var("EMB_TOKENS").ok().and_then(|v| v.parse().ok()).unwrap_or(4096);
+    // WHAT gets embedded, not just how. The default is the raw source slice — but the question is
+    // natural language and the chunk is syntax, so `distilled` tries the part written FOR a
+    // reader: the path, the item's kind and name, and its doc comment.
+    let distilled = std::env::var("EMB_TEXT").as_deref() == Ok("distilled");
+    let doc_of = |id: &str, text: &str| -> String {
+        let (path, frag) = id.split_once('#').unwrap_or((id, ""));
+        let mut doc = String::new();
+        for line in text.lines() {
+            let t = line.trim_start();
+            if t.is_empty() || (t.starts_with("//") && !t.starts_with("///") && !t.starts_with("//!")) {
+                continue;
+            }
+            if let Some(rest) = t.strip_prefix("///").or_else(|| t.strip_prefix("//!")) {
+                doc.push_str(rest);
+                doc.push(' ');
+                continue;
+            }
+            break;
+        }
+        // No doc comment (very common) -> fall back to the source, or the chunk would be a bare
+        // name and lose every chunk that simply is not documented.
+        if doc.trim().is_empty() {
+            format!("{path} {frag}\n{text}")
+        } else {
+            format!("{path} {frag}\n{doc}")
+        }
+    };
     let mut toks: Vec<(usize, Vec<i32>)> = Vec::with_capacity(chunks.len());
-    for (i, (_, text)) in chunks.iter().enumerate() {
+    for (i, (id, raw)) in chunks.iter().enumerate() {
+        let owned;
+        let text: &String = if distilled {
+            owned = doc_of(id, raw);
+            &owned
+        } else {
+            raw
+        };
         let mut ids: Vec<i32> =
             tok.encode(text.as_str(), false)?.get_ids().iter().map(|&i| i as i32).collect();
         ids.truncate(511);
