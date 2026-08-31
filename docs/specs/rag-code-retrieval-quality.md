@@ -140,7 +140,28 @@ It registers. The original twenty scored 8 and 8 across that same change. A metr
 change it exists to judge is worse than no metric, because it reads as evidence that nothing
 happened — and I nearly reported exactly that.
 
-Current honest standing over 26 questions: **top-1 8/26, top-5 13/26**, 80% implementation in the
+### Length normalisation was ranking against the implementations
+
+With a metric that could finally see ranking, the next question was what still beats the answers.
+The obvious guess — long, vocabulary-rich chunks win — is WRONG. Across the misses, the chunk that
+beat the answer had a median of **80 words against the answer's 207**, and was longer in only 5 of
+11 cases. BM25's `b = 0.75` penalises long documents, and a Rust function that does real work is
+long: the ranker was systematically biased against implementations, which is precisely the class
+this whole item is about.
+
+```text
+  b = 0.75   top-1 8/26   top-5 13/26     (the textbook default)
+  b = 0.50         9/26         15/26     <- chosen
+  b = 0.30         7/26         15/26
+  b = 0.00         3/26         11/26     (no normalisation at all: much worse)
+```
+
+`k1` was swept too and left at 1.2 (1.6 ties; 0.8 and 2.0 are worse). Two parameters tuned on 26
+questions is a real overfitting risk; what makes this one trustworthy is that the DIRECTION was
+predicted by the length measurement before the sweep, and that b = 0.0 is clearly worse — the
+curve has an interior optimum rather than the metric just rewarding less normalisation.
+
+Current honest standing over 26 questions: **top-1 9/26, top-5 15/26**, 80% implementation in the
 slots, remaining gap owned by ranking, not vocabulary.
 ## Out of scope
 

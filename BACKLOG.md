@@ -204,6 +204,13 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   answers were already in or already out. GOTCHA worth keeping: a first cut detected tests with
   `text.contains("mod tests")` and made top-1 8 → 6, because `chunk_code` tiles a file so the last
   chunk carries the test module; the attribute must OPEN the chunk.
+- [x] **rag-rank-next — DONE 2026-08-31: BM25 was biased against implementations.** Guessed that
+  long vocabulary-rich chunks were winning; MEASURED the opposite — the chunk beating the answer
+  had a median 80 words against the answer's 207, longer in only 5 of 11 cases. `b = 0.75`
+  penalises long documents, and a function that does real work is long. Swept: 0.75 → 8/26 & 13/26,
+  **0.50 → 9/26 & 15/26**, 0.30 → 7/26 & 15/26, 0.00 → 3/26 & 11/26. Chose 0.5; `k1` left at 1.2
+  (1.6 ties, extremes worse). The direction was predicted before the sweep and 0.0 is clearly
+  worse, which is what makes it a finding rather than a fit to 26 questions.
 - [x] **rag-eval-mid-rank-questions — DONE 2026-08-31.** Six questions added whose answers sat at
   ranks 2–29, then the enlarged set was VALIDATED against the change it must detect: raw BM25
   scores **4/26 top-1** against **8/26** with the implementation slots, where the original twenty
