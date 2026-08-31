@@ -382,6 +382,52 @@ impl From<MarkdownInstructionProcessor> for crate::value::Value {
     }
 }
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RustLexToken {
+    pub kind: String,
+    pub lexeme: String,
+}
+impl From<RustLexToken> for crate::value::Value {
+    fn from(x: RustLexToken) -> crate::value::Value {
+        crate::value::Value::Obj("RustLexToken", vec![crate::value::Value::from(x.kind), crate::value::Value::from(x.lexeme)])
+    }
+}
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowLex {
+    pub tokens: Vec<RustLexToken>,
+    pub consumed: i64,
+}
+impl From<WindowLex> for crate::value::Value {
+    fn from(x: WindowLex) -> crate::value::Value {
+        crate::value::Value::Obj("WindowLex", vec![crate::value::Value::from(x.tokens), crate::value::Value::from(x.consumed)])
+    }
+}
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemSpan {
+    pub start: i64,
+    pub end: i64,
+    pub kind: String,
+    pub name: String,
+    pub bodyOpen: i64,
+}
+impl From<ItemSpan> for crate::value::Value {
+    fn from(x: ItemSpan) -> crate::value::Value {
+        crate::value::Value::Obj("ItemSpan", vec![crate::value::Value::from(x.start), crate::value::Value::from(x.end), crate::value::Value::from(x.kind), crate::value::Value::from(x.name), crate::value::Value::from(x.bodyOpen)])
+    }
+}
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RustProcessor {
+    pub source: SourceId,
+}
+impl From<RustProcessor> for crate::value::Value {
+    fn from(x: RustProcessor) -> crate::value::Value {
+        crate::value::Value::Obj("RustProcessor", vec![crate::value::Value::from(x.source)])
+    }
+}
+#[allow(dead_code)]
 pub struct MarkdownBlocks {
     pub source: SourceId,
     pub profile: MarkdownProfile,
@@ -1678,6 +1724,61 @@ impl RefDef {
         format!("{}{}{}{}{}{}{}{}", indent, labelLex, colon, afterColon, destLex, betweenDestTitle, titleLex, trailing)
     }
 }
+impl RustProcessor {
+    pub fn start(&self) -> String {
+        "".to_string()
+    }
+
+    pub fn step(&self, state: String, input: SourceChunk) -> Stepped<String, VmToken> {
+        let empty = DialectRegistry { byName: std::collections::HashMap::new() };
+        Stepped { state: format!("{}{}", state, input.text), batch: ProcessBatch_empty() }
+    }
+
+    pub fn stop(&self, text: String) -> ProcessBatch<VmToken> {
+        let source = self.source.clone();
+        let Start = SourcePosition { offset: 0i64, line: 1i64, column: 1i64 };
+        let empty = DialectRegistry { byName: std::collections::HashMap::new() };
+        let lexed = lex(text);
+        let items = collect(lexed.clone(), 0i64, (lexed.len() as i64), 0i64);
+        let mut out: Vec<VmToken> = Vec::new();
+        let mut position = Start.clone();
+        let mut nextTokenId = 0i64;
+        let mut nextItem = 0i64;
+        let mut open: Vec<i64> = Vec::new();
+        let mut openBody: Vec<i64> = Vec::new();
+        let mut i = 0i64;
+        while (i < (lexed.len() as i64)) {
+            let mut lexeme = lexed[(i) as usize].clone().lexeme;
+            let mut kind = lexed[(i) as usize].clone().kind;
+            let mut instruction: VmInstruction = VmInstruction::Emit { role: None };
+            if ((nextItem < (items.len() as i64)) && (items[(nextItem) as usize].clone().start == i)) { instruction = VmInstruction::Open { kind: items[(nextItem) as usize].clone().kind, role: None };
+            open.push(items[(nextItem) as usize].clone().end);
+            openBody.push(items[(nextItem) as usize].clone().bodyOpen);
+            (nextItem += 1i64);
+            (i += 1i64); } else { if (!open.is_empty() && (open[open.len() - 1].clone() == i)) { instruction = VmInstruction::Close { expectedKind: None, role: None };
+            open = { let __v = (open).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() };
+            openBody = { let __v = (openBody).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() };
+            (i += 1i64); } else { if ((!open.is_empty() && (openBody[openBody.len() - 1].clone() >= 0i64)) && (i <= openBody[openBody.len() - 1].clone())) { (i += 1i64); } else { let mut limit = (lexed.len() as i64);
+            if ((nextItem < (items.len() as i64)) && (items[(nextItem) as usize].clone().start < limit)) { limit = items[(nextItem) as usize].clone().start; } else { (); }
+            if (!open.is_empty() && (open[open.len() - 1].clone() < limit)) { limit = open[open.len() - 1].clone(); } else { (); }
+            if (limit <= i) { (i += 1i64); } else { let mut pieces: Vec<String> = Vec::new();
+            while (i < limit) {
+                pieces.push(lexed[(i) as usize].clone().lexeme);
+                (i += 1i64);
+            };
+            kind = "rust.span".to_string();
+            lexeme = (pieces).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(""); } } } }
+            let start = position.clone();
+            let end = advance(start.clone(), lexeme.clone());
+            position = end.clone();
+            let channel = if (kind == "rust.ws".to_string()) { TokenChannel::Trivia.clone() } else { if ((kind == "rust.line-comment".to_string()) || (kind == "rust.block-comment".to_string())) { TokenChannel::Comment.clone() } else { TokenChannel::Syntax.clone() } };
+            let token = SourceToken { id: nextTokenId, kind: kind.clone(), lexeme: lexeme.clone(), span: SourceSpan { source: source.clone(), start: start.clone(), end: end.clone() }, channel: channel.clone() };
+            (nextTokenId += 1i64);
+            out.push(VmToken { token: token, instruction: instruction.clone() });
+        };
+        ProcessBatch { values: out.clone(), diagnostics: Vec::new() }
+    }
+}
 impl TreeVm {
     pub fn start(&self) -> VmState {
         let initial = VmState { stack: Vec::new(), nodeCount: 0i64, lastTokenId: None, diagnosticCount: 0i64, diagnosticLimitReported: false, finished: false, halted: false };
@@ -1866,6 +1967,11 @@ impl Processor<String, SourceChunk, VmToken> for MarkdownInstructionProcessor {
     fn step(&self, state: String, input: SourceChunk) -> Stepped<String, VmToken> { self.step(state, input) }
     fn stop(&self, state: String) -> ProcessBatch<VmToken> { self.stop(state) }
 }
+impl Processor<String, SourceChunk, VmToken> for RustProcessor {
+    fn start(&self) -> String { self.start() }
+    fn step(&self, state: String, input: SourceChunk) -> Stepped<String, VmToken> { self.step(state, input) }
+    fn stop(&self, state: String) -> ProcessBatch<VmToken> { self.stop(state) }
+}
 #[derive(Clone, Copy)]
 pub struct Literal;
 impl DialectAdapter for Literal {
@@ -1893,6 +1999,13 @@ impl DialectAdapter for ScalaScriptMarkdownDialect {
     fn id(&self) -> String { "markdown.scalascript".to_string() }
     fn aliases(&self) -> Vec<String> { vec!["ssc-markdown".to_string()] }
     fn instructions(&self, source: SourceInput) -> std::rc::Rc<dyn Processor<String, SourceChunk, VmToken>> { ScalaScriptMarkdownDialect_instructions(source) }
+}
+#[derive(Clone, Copy)]
+pub struct RustDialect;
+impl DialectAdapter for RustDialect {
+    fn id(&self) -> String { "uniml.rust".to_string() }
+    fn aliases(&self) -> Vec<String> { vec!["rust".to_string(), "rs".to_string()] }
+    fn instructions(&self, source: SourceInput) -> std::rc::Rc<dyn Processor<String, SourceChunk, VmToken>> { RustDialect_instructions(source) }
 }
 impl Container {
     pub fn frame(&self) -> String {
@@ -2220,7 +2333,7 @@ pub fn tokenize(content: String, refs: std::collections::HashMap<String, LinkRef
                     AngleKind::Autolink => (Autolink.clone(), Some("autolink".to_string()), TokenChannel::Syntax.clone()),
                     AngleKind::Html => (Html.clone(), Some("html".to_string()), TokenChannel::Embedded.clone()),
                 };
-                nodes.push(WNode::WFixed { pieces: vec![InlinePiece::Tok { kind: mdKind, lexeme: lex, role: role, channel: channel }] });
+                nodes.push(WNode::WFixed { pieces: vec![InlinePiece::Tok { kind: mdKind.clone(), lexeme: lex, role: role.clone(), channel: channel.clone() }] });
                 i = endEx.clone(); },
                 None => { pending.push("<".to_string());
                 (i += 1i64); },
@@ -2267,7 +2380,7 @@ pub fn tokenize(content: String, refs: std::collections::HashMap<String, LinkRef
             nodes.push(delimiterRun(content.clone(), i, (c.clone()).0));
             (i += runLength(content.clone(), i, (c.clone()).0)); },
             _ if (gfm && isExtendedAutolinkStart(content.clone(), i, pending.clone())) => { let (dropNodes, keepText, localPart) = if (crate::runtime::_str_char_at(&content, i) == 64i64) { emailLocalBackscan(nodes.clone(), pending.clone()) } else { (0i64, "".to_string(), "".to_string()) };
-            match (extendedAutolink(content.clone(), i, localPart)).clone() {
+            match (extendedAutolink(content.clone(), i, localPart.clone())).clone() {
                 Some((backtrack, lexeme, _)) => { if (backtrack > 0i64) { if (dropNodes > 0i64) { nodes = { let __v = (nodes).clone(); let __k = (dropNodes) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() }; } else { (); }
                 pending = if keepText.is_empty() { Vec::new() } else { vec![keepText.clone()] }; } else { (); }
                 flushText(&mut nodes, &mut pending);
@@ -3463,4 +3576,275 @@ pub fn Markdown_parse(source: SourceInput, profile: MarkdownProfile, limits: Mar
 
 pub fn Markdown_project(result: ParseResult, profile: MarkdownProfile) -> MarkdownProjectionResult {
     MarkdownProjection_project(result, profile)
+}
+
+pub fn isIdentStart(c: i64) -> bool {
+    ((((c >= 97i64) && (c <= 122i64)) || ((c >= 65i64) && (c <= 90i64))) || (c == 95i64))
+}
+
+pub fn RustLexer_isDigit(c: i64) -> bool {
+    ((c >= 48i64) && (c <= 57i64))
+}
+
+pub fn isIdentPart(c: i64) -> bool {
+    (isIdentStart(c) || RustLexer_isDigit(c))
+}
+
+pub fn isSpace(c: i64) -> bool {
+    ((((c == 32i64) || (c == 9i64)) || (c == 10i64)) || (c == 13i64))
+}
+
+pub fn plainStringEnd(chars: Vec<i64>, from: i64, n: i64) -> i64 {
+    let mut i = (from + 1i64);
+    let mut closed = false;
+    while ((i < n) && !(closed)) {
+        let c = chars[(i) as usize].clone();
+        if (c == 92i64) { (i += 2i64); } else { if (c == 34i64) { (i += 1i64);
+        closed = true; } else { (i += 1i64); } }
+    };
+    if (i > n) { n } else { i }
+}
+
+pub fn charLiteralEnd(chars: Vec<i64>, from: i64, n: i64) -> i64 {
+    let mut i = (from + 1i64);
+    let mut closed = false;
+    while ((i < n) && !(closed)) {
+        let c = chars[(i) as usize].clone();
+        if (c == 92i64) { (i += 2i64); } else { if (c == 39i64) { (i += 1i64);
+        closed = true; } else { (i += 1i64); } }
+    };
+    if (i > n) { n } else { i }
+}
+
+pub fn rawStringHashes(chars: Vec<i64>, from: i64, n: i64) -> i64 {
+    let mut i = from;
+    if ((i < n) && (chars[(i.clone()) as usize].clone() == 98i64)) { (i += 1i64); } else { (); }
+    if ((i >= n) || (chars[(i.clone()) as usize].clone() != 114i64)) { -1i64 } else { { (i += 1i64);
+    let mut hashes = 0i64;
+    while ((i < n) && (chars[(i.clone()) as usize].clone() == 35i64)) {
+        (hashes += 1i64);
+        (i += 1i64);
+    };
+    if ((i < n) && (chars[(i.clone()) as usize].clone() == 34i64)) { hashes } else { -1i64 } } }
+}
+
+pub fn rawStringEnd(chars: Vec<i64>, from: i64, n: i64, hashes: i64) -> i64 {
+    let mut i = from;
+    if ((i < n) && (chars[(i.clone()) as usize].clone() == 98i64)) { (i += 1i64); } else { (); }
+    (i += 1i64);
+    (i += hashes);
+    (i += 1i64);
+    let mut closed = false;
+    while ((i < n) && !(closed)) {
+        if (chars[(i.clone()) as usize].clone() == 34i64) { let mut k = (i + 1i64);
+        let mut matched = 0i64;
+        while (((matched < hashes) && (k < n)) && (chars[(k) as usize].clone() == 35i64)) {
+            (matched += 1i64);
+            (k += 1i64);
+        };
+        if (matched == hashes) { i = k;
+        closed = true; } else { (i += 1i64); } } else { (i += 1i64); }
+    };
+    if (i > n) { n } else { i.clone() }
+}
+
+pub fn blockCommentEnd(chars: Vec<i64>, from: i64, n: i64) -> i64 {
+    let mut i = (from + 2i64);
+    let mut depth = 1i64;
+    while ((i < n) && (depth > 0i64)) {
+        if ((((i + 1i64) < n) && (chars[(i) as usize].clone() == 47i64)) && (chars[((i + 1i64)) as usize].clone() == 42i64)) { (depth += 1i64);
+        (i += 2i64); } else { if ((((i + 1i64) < n) && (chars[(i) as usize].clone() == 42i64)) && (chars[((i + 1i64)) as usize].clone() == 47i64)) { (depth -= 1i64);
+        (i += 2i64); } else { (i += 1i64); } }
+    };
+    if (i > n) { n } else { i }
+}
+
+pub fn isLifetime(chars: Vec<i64>, from: i64, n: i64) -> bool {
+    if ((from + 1i64) >= n) { false } else { if !(isIdentStart(chars[((from + 1i64)) as usize].clone())) { false } else { if ((from + 2i64) >= n) { true } else { (chars[((from + 2i64)) as usize].clone() != 39i64) } } }
+}
+
+pub fn lex(text: String) -> Vec<RustLexToken> {
+    let empty = DialectRegistry { byName: std::collections::HashMap::new() };
+    let WindowCodeUnits = 1024i64;
+    let total = crate::runtime::_str_length(&text);
+    let mut out: Vec<RustLexToken> = Vec::new();
+    let mut pos = 0i64;
+    while (pos < total) {
+        let mut span = WindowCodeUnits.clone();
+        let mut placed = false;
+        while !(placed) {
+            let atEof = ((pos + span) >= total);
+            let end = if atEof { total.clone() } else { (pos + span) };
+            let window = lexWindow(crate::runtime::_str_substring(&text, pos, end), atEof);
+            if (window.consumed > 0i64) { out.extend((window.tokens).iter().cloned());
+            (pos += window.consumed);
+            placed = true; } else { if atEof { pos = total.clone();
+            placed = true; } else { span = (span * 2i64); } }
+        };
+    };
+    out
+}
+
+pub fn lexWindow(text: String, atEof: bool) -> WindowLex {
+    let empty = DialectRegistry { byName: std::collections::HashMap::new() };
+    let chars = text.encode_utf16().map(|__u| __u as i64).collect::<Vec<i64>>();
+    let n = (chars.len() as i64);
+    let mut out: Vec<RustLexToken> = Vec::new();
+    let mut consumed = 0i64;
+    let mut i = 0i64;
+    let mut stop = false;
+    while ((i < n) && !(stop)) {
+        let start = i;
+        let c = chars[(i) as usize].clone();
+        let mut kind = "rust.punct".to_string();
+        let hashes = if ((c == 114i64) || (c == 98i64)) { rawStringHashes(chars.clone(), i, n.clone()) } else { -1i64 };
+        if isSpace(c.clone()) { kind = "rust.ws".to_string();
+        while ((i < n) && isSpace(chars[(i) as usize].clone())) {
+            (i += 1i64);
+        }; } else { if (((c == 47i64) && ((i + 1i64) < n)) && (chars[((i + 1i64)) as usize].clone() == 47i64)) { kind = "rust.line-comment".to_string();
+        while ((i < n) && (chars[(i) as usize].clone() != 10i64)) {
+            (i += 1i64);
+        }; } else { if (((c == 47i64) && ((i + 1i64) < n)) && (chars[((i + 1i64)) as usize].clone() == 42i64)) { kind = "rust.block-comment".to_string();
+        i = blockCommentEnd(chars.clone(), i, n.clone()); } else { if (hashes >= 0i64) { kind = "rust.string".to_string();
+        i = rawStringEnd(chars.clone(), i, n.clone(), hashes.clone()); } else { if (c == 34i64) { kind = "rust.string".to_string();
+        i = plainStringEnd(chars.clone(), i, n.clone()); } else { if (((c == 98i64) && ((i + 1i64) < n)) && (chars[((i + 1i64)) as usize].clone() == 34i64)) { kind = "rust.string".to_string();
+        i = plainStringEnd(chars.clone(), (i + 1i64), n.clone()); } else { if (((c == 98i64) && ((i + 2i64) < n)) && (chars[((i + 1i64)) as usize].clone() == 39i64)) { kind = "rust.char".to_string();
+        i = charLiteralEnd(chars.clone(), (i + 1i64), n.clone()); } else { if ((c == 39i64) && isLifetime(chars.clone(), i, n.clone())) { kind = "rust.lifetime".to_string();
+        (i += 1i64);
+        while ((i < n) && isIdentPart(chars[(i) as usize].clone())) {
+            (i += 1i64);
+        }; } else { if (c == 39i64) { kind = "rust.char".to_string();
+        i = charLiteralEnd(chars.clone(), i, n.clone()); } else { if RustLexer_isDigit(c.clone()) { kind = "rust.number".to_string();
+        (i += 1i64);
+        let mut going = true;
+        while ((i < n) && going) {
+            let d = chars[(i) as usize].clone();
+            if isIdentPart(d.clone()) { (i += 1i64); } else { if (((d == 46i64) && ((i + 1i64) < n)) && RustLexer_isDigit(chars[((i + 1i64)) as usize].clone())) { (i += 1i64); } else { going = false; } }
+        }; } else { if isIdentStart(c.clone()) { kind = "rust.ident".to_string();
+        while ((i < n) && isIdentPart(chars[(i) as usize].clone())) {
+            (i += 1i64);
+        }; } else { (i += 1i64); } } } } } } } } } } }
+        if (!(atEof) && (i >= n)) { stop = true; } else { out.push(RustLexToken { kind: kind.clone(), lexeme: crate::runtime::_str_substring(&text, start, i) });
+        consumed = i; }
+    };
+    WindowLex { tokens: out.clone(), consumed: consumed }
+}
+
+pub fn isModifier(w: String) -> bool {
+    ((((((w == "pub".to_string()) || (w == "async".to_string())) || (w == "unsafe".to_string())) || (w == "extern".to_string())) || (w == "default".to_string())) || (w == "move".to_string()))
+}
+
+pub fn itemKind(w: String) -> String {
+    if (w == "fn".to_string()) { "rust.fn".to_string() } else { if (w == "struct".to_string()) { "rust.struct".to_string() } else { if (w == "enum".to_string()) { "rust.enum".to_string() } else { if (w == "trait".to_string()) { "rust.trait".to_string() } else { if (w == "impl".to_string()) { "rust.impl".to_string() } else { if (w == "mod".to_string()) { "rust.mod".to_string() } else { if (w == "use".to_string()) { "rust.use".to_string() } else { if (w == "const".to_string()) { "rust.const".to_string() } else { if (w == "static".to_string()) { "rust.const".to_string() } else { if (w == "type".to_string()) { "rust.type".to_string() } else { if (w == "union".to_string()) { "rust.struct".to_string() } else { if (w == "macro_rules".to_string()) { "rust.macro".to_string() } else { "".to_string() } } } } } } } } } } } }
+}
+
+pub fn isTrivia(kind: String) -> bool {
+    (((kind == "rust.ws".to_string()) || (kind == "rust.line-comment".to_string())) || (kind == "rust.block-comment".to_string()))
+}
+
+pub fn isPunct(t: RustLexToken, s: String) -> bool {
+    ((t.kind == "rust.punct".to_string()) && (t.lexeme == s))
+}
+
+pub fn nextSignificant(tokens: Vec<RustLexToken>, from: i64, until: i64) -> i64 {
+    let mut i = from;
+    while ((i < until) && isTrivia(tokens[(i.clone()) as usize].clone().kind)) {
+        (i += 1i64);
+    };
+    i
+}
+
+pub fn headStartIndex(tokens: Vec<RustLexToken>, from: i64, until: i64, atRangeStart: bool) -> i64 {
+    let mut i = from;
+    let mut crossed = atRangeStart;
+    let mut result = -1i64;
+    while ((result < 0i64) && (i < until)) {
+        let k = tokens[(i.clone()) as usize].clone().kind;
+        if (k == "rust.ws".to_string()) { if tokens[(i.clone()) as usize].clone().lexeme.contains("\n") { crossed = true; } else { (); }
+        (i += 1i64); } else { if ((k == "rust.line-comment".to_string()) || (k == "rust.block-comment".to_string())) { if crossed { result = i.clone(); } else { (i += 1i64); } } else { result = i.clone(); } }
+    };
+    if (result < 0i64) { until } else { result }
+}
+
+pub fn skipBalanced(tokens: Vec<RustLexToken>, from: i64, until: i64, open: String, close: String) -> i64 {
+    let mut i = from;
+    let mut depth = 0i64;
+    let mut done = false;
+    while ((i < until) && !(done)) {
+        if isPunct(tokens[(i.clone()) as usize].clone(), open.clone()) { (depth += 1i64); } else { if isPunct(tokens[(i.clone()) as usize].clone(), close.clone()) { (depth -= 1i64);
+        if (depth == 0i64) { done = true; } else { (); } } else { (); } }
+        (i += 1i64);
+    };
+    i
+}
+
+pub fn skipHead(tokens: Vec<RustLexToken>, from: i64, until: i64) -> i64 {
+    let mut i = nextSignificant(tokens.clone(), from, until);
+    let mut going = true;
+    while (going && (i < until)) {
+        let t = tokens[(i.clone()) as usize].clone();
+        if isPunct(t.clone(), "#".to_string()) { let br = nextSignificant(tokens.clone(), (i + 1i64), until.clone());
+        let br2 = if ((br < until) && isPunct(tokens[(br.clone()) as usize].clone(), "!".to_string())) { nextSignificant(tokens.clone(), (br + 1i64), until.clone()) } else { br.clone() };
+        if ((br2 < until) && isPunct(tokens[(br2.clone()) as usize].clone(), "[".to_string())) { i = nextSignificant(tokens.clone(), skipBalanced(tokens.clone(), br2.clone(), until.clone(), "[".to_string(), "]".to_string()), until.clone()); } else { going = false; } } else { if ((t.kind == "rust.ident".to_string()) && isModifier(t.lexeme.clone())) { let after = nextSignificant(tokens.clone(), (i + 1i64), until.clone());
+        if ((after < until) && isPunct(tokens[(after.clone()) as usize].clone(), "(".to_string())) { i = nextSignificant(tokens.clone(), skipBalanced(tokens.clone(), after.clone(), until.clone(), "(".to_string(), ")".to_string()), until.clone()); } else { if ((after < until) && (tokens[(after.clone()) as usize].clone().kind == "rust.string".to_string())) { i = nextSignificant(tokens.clone(), (after + 1i64), until.clone()); } else { i = after.clone(); } } } else { going = false; } }
+    };
+    i
+}
+
+pub fn resolveKeyword(tokens: Vec<RustLexToken>, kw: i64, until: i64) -> i64 {
+    let w = tokens[(kw) as usize].clone().lexeme;
+    if ((w == "const".to_string()) || (w == "static".to_string())) { { let after = nextSignificant(tokens.clone(), (kw + 1i64), until);
+    if (((after < until) && (tokens[(after.clone()) as usize].clone().kind == "rust.ident".to_string())) && (tokens[(after.clone()) as usize].clone().lexeme == "fn".to_string())) { after.clone() } else { kw } } } else { kw }
+}
+
+pub fn itemName(tokens: Vec<RustLexToken>, kw: i64, until: i64) -> String {
+    let mut i = nextSignificant(tokens.clone(), (kw + 1i64), until);
+    if ((i < until) && isPunct(tokens[(i.clone()) as usize].clone(), "<".to_string())) { i = nextSignificant(tokens.clone(), skipBalanced(tokens.clone(), i.clone(), until, "<".to_string(), ">".to_string()), until); } else { (); }
+    if ((i < until) && (tokens[(i.clone()) as usize].clone().kind == "rust.ident".to_string())) { tokens[(i.clone()) as usize].clone().lexeme } else { "".to_string() }
+}
+
+pub fn itemEnd(tokens: Vec<RustLexToken>, kw: i64, until: i64) -> i64 {
+    let mut i = kw;
+    let mut depth = 0i64;
+    let mut end = -1i64;
+    while ((i < until) && (end < 0i64)) {
+        let t = tokens[(i.clone()) as usize].clone();
+        if isPunct(t.clone(), "{".to_string()) { (depth += 1i64); } else { if isPunct(t.clone(), "}".to_string()) { (depth -= 1i64);
+        if (depth <= 0i64) { end = i.clone(); } else { (); } } else { if (isPunct(t.clone(), ";".to_string()) && (depth == 0i64)) { end = i.clone(); } else { (); } } }
+        (i += 1i64);
+    };
+    if (end < 0i64) { (until - 1i64) } else { end }
+}
+
+pub fn bodyStart(tokens: Vec<RustLexToken>, kw: i64, endIdx: i64) -> i64 {
+    let mut i = kw;
+    let mut found = -1i64;
+    while ((i <= endIdx) && (found < 0i64)) {
+        if isPunct(tokens[(i.clone()) as usize].clone(), "{".to_string()) { found = (i + 1i64); } else { (); }
+        (i += 1i64);
+    };
+    found
+}
+
+pub fn collect(tokens: Vec<RustLexToken>, from: i64, until: i64, depth: i64) -> Vec<ItemSpan> {
+    let empty = DialectRegistry { byName: std::collections::HashMap::new() };
+    let mut out: Vec<ItemSpan> = Vec::new();
+    let mut i = from;
+    while (i < until) {
+        let headStart = headStartIndex(tokens.clone(), i.clone(), until.clone(), (i == from));
+        if (headStart >= until) { i = until.clone(); } else { let kwRaw = skipHead(tokens.clone(), headStart.clone(), until.clone());
+        let kw = if (kwRaw < until) { resolveKeyword(tokens.clone(), kwRaw.clone(), until.clone()) } else { kwRaw.clone() };
+        let kind = if ((kw < until) && (tokens[(kw.clone()) as usize].clone().kind == "rust.ident".to_string())) { itemKind(tokens[(kw.clone()) as usize].clone().lexeme) } else { "".to_string() };
+        if (kind == "".to_string()) { let skipTo = itemEnd(tokens.clone(), headStart.clone(), until.clone());
+        i = if (skipTo >= headStart) { (skipTo + 1i64) } else { (headStart + 1i64) }; } else { let end = itemEnd(tokens.clone(), kw.clone(), until.clone());
+        let bs = bodyStart(tokens.clone(), kw.clone(), end.clone());
+        out.push(ItemSpan { start: headStart.clone(), end: end.clone(), kind: kind.clone(), name: itemName(tokens.clone(), kw.clone(), until.clone()), bodyOpen: if (bs < 0i64) { -1i64 } else { (bs - 1i64) } });
+        if ((depth == 0i64) && ((kind == "rust.impl".to_string()) || (kind == "rust.mod".to_string()))) { if ((bs >= 0i64) && (bs < end)) { out.extend((collect(tokens.clone(), bs.clone(), end.clone(), (depth + 1i64))).iter().cloned()); } else { (); } } else { (); }
+        i = (end + 1i64); } }
+    };
+    out
+}
+
+pub fn RustDialect_instructions(source: SourceInput) -> std::rc::Rc<dyn Processor<String, SourceChunk, VmToken>> {
+    std::rc::Rc::new(RustProcessor { source: source.source.clone() })
 }
