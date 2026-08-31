@@ -303,8 +303,9 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   So embeddings alone LOSE; fused they win +1 top-1 and +2 top-5, because the two miss different
   questions — that is the whole argument for carrying both.
   Price: 336 MB model resident beside the frozen 4B (so under the residency-admission rules, with
-  a BM25 fallback when admission is refused), 41 MB of vectors on top of the 9.3 MB index, minutes
-  of background embedding per full build, and a query-time forward pass per search.
+  a BM25 fallback when admission is refused), 41 MB of vectors on top of the 9.3 MB index,
+  **718 s — twelve minutes — to embed this repo's 10,551 chunks** (32x the 22 s BM25 build, on the
+  GPU the resident 4B is using), and a query-time forward pass per search.
   **+1 and +2 out of 26 for that is close enough to be a judgement call, not an obvious yes** —
   which is why the spike stopped at the measurement. Spec: `docs/specs/rag-embeddings-backend.md`;
   spike kept at `crates/rozum-mlx/examples/embed_spike.rs`.
