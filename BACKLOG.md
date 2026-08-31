@@ -289,22 +289,18 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   `RustDialect`, structural: keyword + brace-depth item finder, string/comment aware) and
   `rag_chunk::chunk_code` parses `.rs` through it, so code is chunked by item rather than by
   paragraph. Phase 2 of `docs/specs/syntactic-rag.md` is shipped.
-- [ ] **rag-embeddings-backend** — now has a MEASURE: `crates/rozum-agent/tests/rag-eval.json` says
-  BM25 leaves 11 of 20 answers unreachable at any k. Swap BM25 for embeddings behind the EXISTING `Retriever` trait
-  (rag-lite's own comment names this as the planned follow-up). Local-only, must fit alongside the
-  frozen 4B under the residency-admission rules; BM25 stays as the zero-model fallback.
-
-## LoRA self-teaching (teach mode) — spec: `docs/specs/lora-self-teaching.md`
-
-Operator idea 2026-08-30: the model learns from its operator ON REQUEST — collect
-(prompt, answer, rating, correction) pairs, train a LoRA adapter locally, gate it on the
-bench matrix, serve with instant rollback. Binding constraints (recorded in the spec):
-**pure Rust/MLX trainer, no Python anywhere** (operator's explicit choice — makes phase 1
-a real mlx-rs porting effort, priced in below); **opt-in teach mode only**; collection on
-**all three surfaces** (Telegram first, UCC chat, CLI/TUI). What it buys the frozen 4B:
-personalization is the one lever that makes a small local model act bigger, in a
-revertible, versioned adapter that never mutates the base snapshot.
-
+- [ ] **rag-embeddings-backend — now justified by EVIDENCE, not by a guess.** Measured at k=300
+  after the lexical work: of the eleven answers still outside top-5, **five sit at ranks 13–31**
+  (ordinary ranking, may still yield to a lexical lever) and **six sit at 58, 59, 189 or score
+  zero outright**. The zero-scoring three are the case in one line each — the doc comment says the
+  same thing in different words: `"transcript … written to disk"` vs `fn append`'s *"Append one
+  message"*; `"record a room"` vs `register_room`'s *"Upsert a room"*; `"tell the room it is
+  leaving"` vs `announce_left`'s *"`left:` presence line"*. BM25 matches words and these share
+  none. Land behind the existing `Retriever` seam; judge on `crates/rozum-agent/tests/rag-eval.json`
+  (26 questions, currently 9/26 top-1 and 15/26 top-5). Cost is a resident model beside the frozen
+  4B, so it lands UNDER the residency-admission rules, not beside them.
+  NB the earlier version of this entry claimed all eleven scored zero; that was wrong and pointed
+  here for the wrong reason. The real ceiling was ranking, most of which has since been taken.
 - [ ] **teach-collect** — phase 0, independently shippable and FIRST (SFT under ~100
   quality pairs overfits — the dataset must accumulate ahead of any trainer): teach-mode
   toggles, 👍/👎/correction affordances on Telegram (`/teach on|off`) + UCC + CLI/TUI, one

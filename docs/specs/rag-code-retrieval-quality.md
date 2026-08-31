@@ -161,6 +161,36 @@ questions is a real overfitting risk; what makes this one trustworthy is that th
 predicted by the length measurement before the sweep, and that b = 0.0 is clearly worse — the
 curve has an interior optimum rather than the metric just rewarding less normalisation.
 
+### Where the remaining eleven actually sit — half ranking, half vocabulary
+
+Re-measured at `k=300` after the slot policy and `b = 0.5`, so the answer is data rather than
+another inference from a truncated view:
+
+```text
+  rank 13, 15, 17, 20, 31        five answers  — still reachable, still ranking
+  rank 58, 59, 189               three         — deep
+  absent (score zero)            three         — no shared vocabulary at all
+```
+
+The deep and absent six are a DIFFERENT problem from everything fixed so far, and the three
+absent ones show it plainly — the doc comment says the same thing in other words:
+
+```text
+  "how does a room's transcript get written to disk"
+      store.rs#fn append        "Append one message, assigning (date, n) from ts's local date"
+  "where does the daemon record a room so it can be found again later"
+      store.rs#fn register_room "Upsert a room (keyed by root) into <state_dir>/rooms.json"
+  "how does an agent tell the room it is leaving"
+      daemon_proxy.rs#fn announce_left  "Best-effort `left:` presence line, posted after the
+                                         agent's stdio session ends"
+```
+
+`transcript`/`message`, `written to disk`/`append`, `record`/`upsert`, `leaving`/`left`. BM25
+matches words; these pairs share none. **This is the measured case for embeddings** — and it is a
+much better one than the version this spec carried at first, which claimed all eleven scored zero
+and was wrong. Five of the eleven are still ordinary ranking and may yet yield to a lexical lever;
+six will not.
+
 Current honest standing over 26 questions: **top-1 9/26, top-5 15/26**, 80% implementation in the
 slots, remaining gap owned by ranking, not vocabulary.
 ## Out of scope
