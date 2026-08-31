@@ -304,8 +304,14 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   questions — that is the whole argument for carrying both.
   Price: 336 MB model resident beside the frozen 4B (so under the residency-admission rules, with
   a BM25 fallback when admission is refused), 41 MB of vectors on top of the 9.3 MB index,
-  **718 s — twelve minutes — to embed this repo's 10,551 chunks** (32x the 22 s BM25 build, on the
-  GPU the resident 4B is using), and a query-time forward pass per search.
+  **330 s to embed this repo's 10,551 chunks** (15x the 22 s BM25 build, on the GPU the resident 4B
+  is using; 718 s before batching), once per project since incremental refresh carries vectors
+  forward, and a query-time forward pass per search.
+  BATCHING NEEDS TWO LIMITS, neither sufficient alone: a TOKEN budget (rows are the wrong unit —
+  cost is rows x width, and a fixed 16 rows was SIGKILLed at chunk 3008) and an MLX CACHE limit
+  (a 4096-token budget alone was still SIGKILLed at 6009, with ~16 GB free — the cache was growing
+  across batches, and it is the only bounded term). Quality is identical batched, which is the
+  check that right-padding with last-real-token pooling is numerically sound.
   **+1 and +2 out of 26 for that is close enough to be a judgement call, not an obvious yes** —
   which is why the spike stopped at the measurement. Spec: `docs/specs/rag-embeddings-backend.md`;
   spike kept at `crates/rozum-mlx/examples/embed_spike.rs`.

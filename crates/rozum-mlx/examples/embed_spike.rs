@@ -14,6 +14,13 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let (dir, index_path, eval_path) = (&a[0], &a[1], &a[2]);
 
+    // Bound the MLX CACHE before the first op. Without it the spike was SIGKILLed twice — at
+    // chunk 3008 with fixed 16-row batches and at 6009 with a 4096-token budget — while ~16 GB of
+    // system memory was free. That is the signature of MLX's cache growing unboundedly across
+    // batches, not of the activations themselves being too large: `set_cache_limit` bounds the
+    // CACHE, which is what accumulates here, while active memory (weights + activations) is
+    // bounded by the token budget above. Both levers are needed; either alone kills the run.
+    mlx_rs::memory::set_cache_limit(512 * 1024 * 1024);
     let mut model = mlx_lm::models::qwen3::load_qwen3_model(dir)?;
     let tok = mlx_lm_utils::tokenizer::Tokenizer::from_file(format!("{dir}/tokenizer.json"))?;
     eprintln!("model + tokenizer loaded");
@@ -24,7 +31,13 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // appended, and queries wrapped in an instruction. Mean pooling was tried first and is off
     // -recipe — it is how the first version of this spike concluded, wrongly, that embeddings lose.
     let eos: i32 = tok.encode("<|endoftext|>", false)?.get_ids()[0] as i32;
-    let mut embed = |text: &str, is_query: bool| -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+    fn embed_one(
+        model: &mut mlx_lm::models::qwen3::Model,
+        tok: &mlx_lm_utils::tokenizer::Tokenizer,
+        eos: i32,
+        text: &str,
+        is_query: bool,
+    ) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
         let text = if is_query {
             format!("Instruct: Given a question about a codebase, retrieve the code or document that answers it\nQuery: {text}")
         } else {
@@ -53,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let v: Vec<f32> = pooled.as_slice::<f32>().to_vec();
         let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
         Ok(v.iter().map(|x| x / n).collect())
-    };
+    }
 
     let index: serde_json::Value = serde_json::from_slice(&std::fs::read(index_path)?)?;
     let mut chunks: Vec<(String, String)> = Vec::new();
@@ -67,22 +80,94 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     eprintln!("chunks: {}", chunks.len());
 
-    let t0 = std::time::Instant::now();
-    let mut vecs: Vec<Vec<f32>> = Vec::with_capacity(chunks.len());
+    // BATCHED corpus pass. The one-at-a-time version measured 718 s for this repo — batch size 1
+    // on a GPU, which is the wrong shape of work, not an inherent cost of embedding.
+    //
+    // Right-padding is SAFE here specifically because pooling takes the last REAL token and the
+    // attention is causal: a real token never attends to a pad that follows it, so its hidden
+    // state is identical to the unpadded run. No mask is needed, and that is a property of this
+    // pooling choice rather than a general licence to pad.
+    //
+    // Sorted by length so a batch pads to nearly its own longest row instead of the corpus's.
+    // Batched by TOKEN BUDGET, not by row count. A fixed 16 rows was tried and the process was
+    // SIGKILLed, deterministically, at chunk 3008 of 10551: the rows are sorted by length, so by
+    // then a batch of 16 was 16 x ~400 tokens and the activations no longer fit. Rows are the
+    // wrong unit — cost scales with rows x width, so the budget has to be on the product. On a
+    // machine whose hard invariant is no-OOM, a batching scheme that grows without a ceiling is
+    // not an optimisation, it is a jetsam waiting for a bigger corpus.
+    let budget: usize =
+        std::env::var("EMB_TOKENS").ok().and_then(|v| v.parse().ok()).unwrap_or(4096);
+    let mut toks: Vec<(usize, Vec<i32>)> = Vec::with_capacity(chunks.len());
     for (i, (_, text)) in chunks.iter().enumerate() {
-        vecs.push(embed(text, false)?);
-        if i % 500 == 0 {
-            eprint!("\r  embedded {i}/{}", chunks.len());
+        let mut ids: Vec<i32> =
+            tok.encode(text.as_str(), false)?.get_ids().iter().map(|&i| i as i32).collect();
+        ids.truncate(511);
+        ids.push(eos);
+        toks.push((i, ids));
+    }
+    toks.sort_by_key(|(_, ids)| ids.len());
+
+    let t0 = std::time::Instant::now();
+    let mut vecs: Vec<Vec<f32>> = vec![Vec::new(); chunks.len()];
+    let mut done = 0usize;
+    let mut start = 0usize;
+    while start < toks.len() {
+        // Sorted ascending, so the last row in the window is the widest; grow the window while
+        // rows x width stays inside the budget.
+        let mut end = start + 1;
+        while end < toks.len() {
+            let width = toks[end].1.len();
+            if (end + 1 - start) * width > budget {
+                break;
+            }
+            end += 1;
+        }
+        let group = &toks[start..end];
+        start = end;
+        let width = group.iter().map(|(_, v)| v.len()).max().unwrap_or(1);
+        let mut flat: Vec<i32> = Vec::with_capacity(group.len() * width);
+        for (_, ids) in group {
+            flat.extend_from_slice(ids);
+            flat.extend(std::iter::repeat_n(eos, width - ids.len()));
+        }
+        let arr = mlx_rs::Array::from_slice(&flat, &[group.len() as i32, width as i32]);
+        let mut cache: Vec<Option<mlx_lm::cache::ConcatKeyValueCache>> = Vec::new();
+        let h = {
+            use mlx_rs::module::Module as _;
+            model.model.forward(mlx_lm::models::qwen3::ModelInput {
+                inputs: &arr,
+                mask: None,
+                cache: &mut cache,
+            })?
+        };
+        let h = h.as_dtype(mlx_rs::Dtype::Float32)?;
+        h.eval()?;
+        let all: Vec<f32> = h.as_slice::<f32>().to_vec();
+        let dim = all.len() / (group.len() * width);
+        for (row, (idx, ids)) in group.iter().enumerate() {
+            let last = ids.len() - 1;
+            let off = (row * width + last) * dim;
+            let v = &all[off..off + dim];
+            let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+            vecs[*idx] = v.iter().map(|x| x / n).collect();
+        }
+        // No `clear_cache` in this binding version — re-asserting the limit is the available
+        // lever, and it is what evicts down to the bound (`set_cache_limit` is documented as
+        // affecting eviction, not just future growth).
+        mlx_rs::memory::set_cache_limit(512 * 1024 * 1024);
+        done += group.len();
+        if done % 1000 < group.len().max(1) {
+            eprint!("\r  embedded {done}/{}", chunks.len());
             let _ = std::io::stderr().flush();
         }
     }
-    eprintln!("\rembedded {} chunks in {:?}", chunks.len(), t0.elapsed());
+    eprintln!("\rembedded {} chunks in {:?} (token budget {budget})", chunks.len(), t0.elapsed());
 
     let eval: serde_json::Value = serde_json::from_slice(&std::fs::read(eval_path)?)?;
     let (mut top1, mut top5, mut n) = (0, 0, 0);
     for q in eval["questions"].as_array().into_iter().flatten() {
         let (text, answer) = (q["q"].as_str().unwrap(), q["answer"].as_str().unwrap());
-        let qv = embed(text, true)?;
+        let qv = embed_one(&mut model, &tok, eos, text, true)?;
         let mut scored: Vec<(f32, &str)> = chunks
             .iter()
             .zip(&vecs)

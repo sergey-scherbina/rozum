@@ -43,20 +43,52 @@ confident, wrong "embeddings do not work here".
 - **336 MB** model on disk, and a resident model beside the frozen 4B — so it lands UNDER the
   residency-admission rules, not beside them, and must degrade to BM25 when admission is refused.
 - **41 MB** of vectors for this repo's 10,551 chunks (1024 dims x f32), on top of the 9.3 MB index.
-- Embedding the corpus is a per-chunk forward pass: **718 s — twelve minutes — for this repo's
-  10,551 chunks**, measured, on the same GPU the resident 4B is using. That is 32x the 22 s full
-  BM25 build, and it is the number that most changes the trade: the first build of any project is
-  a twelve-minute background job competing with the model the operator is actually talking to.
-  It belongs in the warmup that already exists, and incremental refresh MUST carry vectors forward
+- Embedding the corpus, **330 s** for this repo's 10,551 chunks — see the batching section below;
+  the naive one-at-a-time version is 718 s. Still 15x the 22 s BM25 build, so the first build of a
+  project is a five-and-a-half-minute background job sharing the GPU with the resident 4B. It
+  belongs in the warmup that already exists, and incremental refresh MUST carry vectors forward
   for unchanged files exactly as it carries chunks — otherwise every refresh pays it again.
 - Every search needs the query embedded, so the model must be loadable at query time or the search
   falls back.
 
 **For +1 top-1 and +2 top-5 out of 26.** A real gain and a real price, close enough that this is a
-judgement call rather than an obvious yes — which is why the spike stops here rather than
-proceeding into the plumbing. The twelve-minute first build is the part that argues loudest
-against, and it was measured after the quality numbers, so it is worth re-reading the trade with
-it in hand rather than the "minutes" this section first said.
+judgement call rather than an obvious yes — which is why the spike stops at the measurement rather
+than proceeding into the plumbing. The build cost was the loudest argument against and batching
+halved it (718 s -> 330 s), with incremental refresh making it a once-per-project cost rather than
+a recurring one; what remains against is the resident model itself, under admission rules, for a
+gain of one and two questions out of twenty-six.
+
+## Batching needs TWO limits, and neither works alone
+
+The first measurement embedded one chunk per forward pass — batch size 1 on a GPU, the wrong
+shape of work. Fixing it turned out to be a memory problem rather than a throughput one:
+
+```text
+  one chunk per pass                        718 s   completes
+  fixed batch of 16 rows                      —     SIGKILL at chunk 3008 of 10551
+  token budget 4096                           —     SIGKILL at chunk 6009
+  token budget 4096 + MLX cache limit       330 s   completes      <- 2.2x
+  token budget 16384 + MLX cache limit      363 s   completes      (worse: padding waste)
+```
+
+Both kills were deterministic, and both happened with **~16 GB of system memory free** — so the
+activations themselves fit, and the naive reading ("embedding needs too much memory") is wrong.
+
+- **Rows are the wrong unit.** Cost scales with rows x width, and chunks are sorted by length to
+  minimise padding, so a fixed row count necessarily walks into the ceiling as the rows get
+  longer. The budget has to be on the product.
+- **The remainder was MLX's CACHE growing across batches**, which is exactly what
+  `set_cache_limit` bounds and what `rozum-core`'s memory notes already say is the only bounded
+  term (active memory — weights plus activations — has no cap at all). Bounding it is what made
+  the run finish.
+
+Quality is IDENTICAL batched and unbatched (7/26 and 15/26), which is the check that the padding
+scheme is numerically sound: right padding with causal attention cannot reach a real token, so
+pooling the last REAL token gives the unpadded answer. That is a property of this pooling choice,
+not a general licence to pad.
+
+On a machine whose hard invariant is no-OOM, this is not tuning. A background indexer that grows
+without a ceiling beside a resident model is a jetsam waiting for a larger corpus.
 
 ## If it is built
 
