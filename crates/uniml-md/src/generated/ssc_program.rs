@@ -853,7 +853,7 @@ impl MarkdownBlocks {
         fn close(branch: String, kind: String, lexeme: String, role: Option<String>, channel: TokenChannel, frames: &mut Vec<String>, nextId: &mut i64, out: &mut Vec<VmToken>, pos: &mut SourcePosition, source: SourceId) {
             emit(kind.clone(), lexeme.clone(), VmInstruction::Close { expectedKind: Some(branch.clone()), role: role.clone() }, channel.clone(), frames, nextId, out, pos, source.clone());
         }
-        fn processLine(lines: Vec<MdLine>, index: i64, containers: &mut Vec<Container>, frames: &mut Vec<String>, gfm: bool, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> i64 {
+        fn processLine(lines: &Vec<MdLine>, index: i64, containers: &mut Vec<Container>, frames: &mut Vec<String>, gfm: bool, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> i64 {
             let line = lines[(index) as usize].clone();
             match (*open) {
                 OpenLeaf::FencedCode { char: fchar, len: flen } => { let fenceContent = matchContainers(line.clone(), containers, frames, indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
@@ -862,10 +862,10 @@ impl MarkdownBlocks {
                 _ => { let content = matchContainers(line.clone(), containers, frames, indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
                 let indentWidth = indentWidth(content.clone());
                 if content.chars().all(|__ch| { let c = (__ch as u32) as i64; ((c == 32i64) || (c == 9i64)) }) { { handleBlank(line.clone(), content.clone(), frames, indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
-                (index + 1i64) } } else { dispatchLeaf(lines.clone(), index, line.clone(), content.clone(), indentWidth.clone(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self) } },
+                (index + 1i64) } } else { dispatchLeaf(lines, index, line.clone(), content.clone(), indentWidth.clone(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self) } },
             }
         }
-        fn dispatchLeaf(lines: Vec<MdLine>, index: i64, line: MdLine, content: String, indentWidth: i64, containers: &mut Vec<Container>, frames: &mut Vec<String>, gfm: bool, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> i64 {
+        fn dispatchLeaf(lines: &Vec<MdLine>, index: i64, line: MdLine, content: String, indentWidth: i64, containers: &mut Vec<Container>, frames: &mut Vec<String>, gfm: bool, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> i64 {
             let trimmed = crate::runtime::_str_substring_from(&content, indentPrefixLength(content.clone()));
             let isIndentedCode = (((indentWidth >= 4i64) && ((*open) != OpenLeaf::Paragraph)) && !(__self.startsListOrQuote(trimmed.clone())));
             if isIndentedCode { releaseInteriorBlanks(frames, indentedCodeBlanks, nextId, out, pos, source.clone()); } else { finishIndentedCode(frames, indentedCodeBlanks, nextId, open, out, pendingClose, pos, source.clone()); }
@@ -878,9 +878,9 @@ impl MarkdownBlocks {
             emitAtxHeading(line.clone(), content.clone(), frames, nextId, open, out, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
             (index + 1i64) } } else { if __self.startsFence(trimmed.clone()).is_some() { { finishParagraph(frames, indentedCodeBlanks, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
             startFence(line.clone(), content.clone(), __self.startsFence(trimmed.clone()).clone().unwrap(), frames, nextId, open, out, pendingClose, pos, source.clone());
-            (index + 1i64) } } else { if __self.startsBlockquote(trimmed.clone()) { openBlockquoteAndReprocess(lines.clone(), index, line.clone(), content.clone(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self) } else { if __self.startsListItem(trimmed.clone()).is_some() { openListItemAndReprocess(lines.clone(), index, line.clone(), content.clone(), __self.startsListItem(trimmed.clone()).clone().unwrap(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self) } else { if ((indentWidth < 4i64) && __self.htmlBlockType(trimmed.clone(), ((*open) == OpenLeaf::Paragraph)).is_some()) { { let ht = __self.htmlBlockType(trimmed.clone(), ((*open) == OpenLeaf::Paragraph)).clone().unwrap();
+            (index + 1i64) } } else { if __self.startsBlockquote(trimmed.clone()) { openBlockquoteAndReprocess(lines, index, line.clone(), content.clone(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self) } else { if __self.startsListItem(trimmed.clone()).is_some() { openListItemAndReprocess(lines, index, line.clone(), content.clone(), __self.startsListItem(trimmed.clone()).clone().unwrap(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self) } else { if ((indentWidth < 4i64) && __self.htmlBlockType(trimmed.clone(), ((*open) == OpenLeaf::Paragraph)).is_some()) { { let ht = __self.htmlBlockType(trimmed.clone(), ((*open) == OpenLeaf::Paragraph)).clone().unwrap();
             finishParagraph(frames, indentedCodeBlanks, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
-            handleHtmlBlock(lines.clone(), index, ht, frames, nextId, open, out, pendingClose, pos, source.clone()) } } else { if __self.refDefAt(lines.clone(), index, line.clone(), content.clone(), (*containers).clone(), (*open).clone()).is_some() { (index + emitDefinition(__self.refDefAt(lines.clone(), index, line.clone(), content.clone(), (*containers).clone(), (*open).clone()).clone().unwrap(), frames, nextId, open, out, pendingClose, pos, source.clone())) } else { if ((gfm && ((*open) != OpenLeaf::Paragraph)) && __self.isTableStart(lines.clone(), index, content.clone())) { emitTable(lines.clone(), index, frames, nextId, open, out, pendingClose, pos, source.clone()) } else { { appendParagraph(line.clone(), content.clone(), open, paragraphPendingPrefix, paragraphSegs);
+            handleHtmlBlock(lines, index, ht, frames, nextId, open, out, pendingClose, pos, source.clone()) } } else { if __self.refDefAt(lines, index, line.clone(), content.clone(), containers, (*open).clone()).is_some() { (index + emitDefinition(__self.refDefAt(lines, index, line.clone(), content.clone(), containers, (*open).clone()).clone().unwrap(), frames, nextId, open, out, pendingClose, pos, source.clone())) } else { if ((gfm && ((*open) != OpenLeaf::Paragraph)) && __self.isTableStart(lines, index, content.clone())) { emitTable(lines, index, frames, nextId, open, out, pendingClose, pos, source.clone()) } else { { appendParagraph(line.clone(), content.clone(), open, paragraphPendingPrefix, paragraphSegs);
             (index + 1i64) } } } } } } } } } } }
         }
         fn matchContainers(line: MdLine, containers: &mut Vec<Container>, frames: &mut Vec<String>, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> String {
@@ -910,7 +910,7 @@ impl MarkdownBlocks {
                 (i += 1i64);
             };
             if (matched >= ((*containers).len() as i64)) { if ((*open) == OpenLeaf::IndentedCode) { (*indentedCodePendingPrefix) = (prefix).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(""); } else { if buffering { (*paragraphPendingPrefix) = (prefix).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(""); } else { (); } } } else { if ((buffering && ((*open) == OpenLeaf::Paragraph)) && __self.isLazyContinuation(rest.clone())) { (*paragraphPendingPrefix) = (prefix).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(""); } else { finishParagraph(frames, indentedCodeBlanks, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
-            if !prefix.is_empty() { flushPending("markdown.indent".to_string(), (prefix).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(""), Vec::new(), Some("continuation".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { (); }
+            if !prefix.is_empty() { flushPending("markdown.indent".to_string(), (prefix).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(""), &Vec::new(), Some("continuation".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { (); }
             scheduleContainerClose(listAwareKeep(matched, rest.clone(), containers, __self), containers, frames, indentedCodeBlanks, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self); } }
             rest
         }
@@ -933,16 +933,16 @@ impl MarkdownBlocks {
             };
         }
         fn emitContainerMarker(kind: String, lexeme: String, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) {
-            flushPending(kind.clone(), lexeme.clone(), Vec::new(), Some("marker".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            flushPending(kind.clone(), lexeme.clone(), &Vec::new(), Some("marker".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
         }
         fn emitContainerIndent(lexeme: String, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) {
-            flushPending("markdown.indent".to_string(), lexeme.clone(), Vec::new(), Some("continuation".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            flushPending("markdown.indent".to_string(), lexeme.clone(), &Vec::new(), Some("continuation".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
         }
         fn handleBlank(line: MdLine, content: String, frames: &mut Vec<String>, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) {
             if ((*open) == OpenLeaf::IndentedCode) { (*indentedCodeBlanks).push((format!("{}{}", (*indentedCodePendingPrefix), content), line.ending.clone()));
             (*indentedCodePendingPrefix) = "".to_string(); } else { finishParagraph(frames, indentedCodeBlanks, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
             let lexeme = format!("{}{}", content, line.ending);
-            if !lexeme.is_empty() { flushPending("markdown.blank".to_string(), lexeme.clone(), Vec::new(), Some("blank".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { (); } }
+            if !lexeme.is_empty() { flushPending("markdown.blank".to_string(), lexeme.clone(), &Vec::new(), Some("blank".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { (); } }
         }
         fn appendParagraph(line: MdLine, content: String, open: &mut OpenLeaf, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>) {
             if ((*open) != OpenLeaf::Paragraph) { (*open) = OpenLeaf::Paragraph.clone();
@@ -956,35 +956,35 @@ impl MarkdownBlocks {
             (*paragraphSegs) = Vec::new();
             let content = (segs.iter().cloned().map(|s| { format!("{}{}", s.content, s.ending) }).collect::<Vec<_>>()).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join("");
             let pieces = MarkdownInlines_parse(content.clone(), (*refs).clone(), profile.clone());
-            emitParagraphWithSegments(pieces.clone(), segs.clone(), frames, nextId, open, out, pendingClose, pos, source.clone(), __self); } else { (); }
-            if !(*paragraphPendingPrefix).is_empty() { flushPending("markdown.indent".to_string(), (*paragraphPendingPrefix).clone(), Vec::new(), Some("continuation".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            emitParagraphWithSegments(&pieces, &segs, frames, nextId, open, out, pendingClose, pos, source.clone(), __self); } else { (); }
+            if !(*paragraphPendingPrefix).is_empty() { flushPending("markdown.indent".to_string(), (*paragraphPendingPrefix).clone(), &Vec::new(), Some("continuation".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
             (*paragraphPendingPrefix) = "".to_string(); } else { (); }
         }
-        fn emitParagraphWithSegments(pieces: Vec<InlinePiece>, segs: Vec<ParaSeg>, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId, __self: &MarkdownBlocks) {
-            if !pieces.is_empty() { let n = (pieces.len() as i64);
+        fn emitParagraphWithSegments(pieces: &Vec<InlinePiece>, segs: &Vec<ParaSeg>, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId, __self: &MarkdownBlocks) {
+            if !(*pieces).is_empty() { let n = ((*pieces).len() as i64);
             let mut i = 0i64;
             let mut breakCount = 0i64;
             while (i < n) {
-                let piece = match __self.spliceSwallowedBreaks(pieces[(i) as usize].clone(), segs.clone(), breakCount) {
+                let piece = match __self.spliceSwallowedBreaks(pieces[(i) as usize].clone(), segs, breakCount) {
                     (rewritten, consumed) => { breakCount = consumed;
                     rewritten },
                 };
                 if (n == 1i64) { emitFirstLast("markdown.paragraph".to_string(), piece.clone(), Some("content".to_string()), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { if (i == 0i64) { emitFirst("markdown.paragraph".to_string(), piece.clone(), Some("content".to_string()), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { if (i == (n - 1i64)) { emitLast("markdown.paragraph".to_string(), piece.clone(), frames, nextId, open, out, pos, source.clone()); } else { replay(piece.clone(), frames, nextId, out, pos, source.clone()); } } }
                 if __self.isBreakPiece(piece.clone()) { (breakCount += 1i64);
-                if ((breakCount < (segs.len() as i64)) && !segs[(breakCount) as usize].clone().prefix.is_empty()) { leaf("markdown.indent".to_string(), segs[(breakCount) as usize].clone().prefix, Some("continuation".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); } } else { (); }
+                if ((breakCount < ((*segs).len() as i64)) && !segs[(breakCount) as usize].clone().prefix.is_empty()) { leaf("markdown.indent".to_string(), segs[(breakCount) as usize].clone().prefix, Some("continuation".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); } } else { (); }
                 (i += 1i64);
             }; } else { (); }
         }
         fn emitAtxHeading(line: MdLine, content: String, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) {
             let lead = indentPrefixLength(content.clone());
-            if (lead > 0i64) { flushPending("markdown.indent".to_string(), crate::runtime::_str_substring(&content, 0i64, lead), Vec::new(), Some("indent".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { (); }
+            if (lead > 0i64) { flushPending("markdown.indent".to_string(), crate::runtime::_str_substring(&content, 0i64, lead), &Vec::new(), Some("indent".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { (); }
             let body = crate::runtime::_str_substring_from(&content, lead);
             let mut h = 0i64;
             while ((h < crate::runtime::_str_length(&body)) && (crate::runtime::_str_char_at(&body, h) == 35i64)) {
                 (h += 1i64);
             };
             let marker = crate::runtime::_str_substring(&body, 0i64, h);
-            flushPending("markdown.atx-marker".to_string(), marker.clone(), vec![FrameSpec { kind: "markdown.heading".to_string(), role: None }], Some("marker".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            flushPending("markdown.atx-marker".to_string(), marker.clone(), &vec![FrameSpec { kind: "markdown.heading".to_string(), role: None }], Some("marker".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
             let mut rest = crate::runtime::_str_substring_from(&body, h);
             let restLead = rest.chars().take_while(|__ch| { let c = ((*__ch) as u32) as i64; ((c == 32i64) || (c == 9i64)) }).collect::<String>();
             if !restLead.is_empty() { leaf("markdown.indent".to_string(), restLead.clone(), Some("space".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
@@ -1011,23 +1011,23 @@ impl MarkdownBlocks {
             format!("{}{}{}", pfx, s.content, end) }).collect::<Vec<_>>()).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join("");
             let interior = segs.last().cloned().map(|__p0| { __p0.ending }).unwrap_or("".to_string());
             let pieces = MarkdownInlines_parse(content.clone(), (*refs).clone(), profile.clone());
-            if pieces.is_empty() { flushPending("markdown.setext-underline".to_string(), line.content.clone(), vec![FrameSpec { kind: "markdown.heading".to_string(), role: None }], Some("underline".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
-            if !line.ending.is_empty() { close("markdown.heading".to_string(), "markdown.line-break".to_string(), line.ending.clone(), Some("trailing".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); } } else { emitInlineOpenOnly("markdown.heading".to_string(), pieces.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            if pieces.is_empty() { flushPending("markdown.setext-underline".to_string(), line.content.clone(), &vec![FrameSpec { kind: "markdown.heading".to_string(), role: None }], Some("underline".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            if !line.ending.is_empty() { close("markdown.heading".to_string(), "markdown.line-break".to_string(), line.ending.clone(), Some("trailing".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); } } else { emitInlineOpenOnly("markdown.heading".to_string(), &pieces, frames, nextId, open, out, pendingClose, pos, source.clone());
             if !interior.is_empty() { leaf("markdown.soft-break".to_string(), interior.clone(), Some("space".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
             if !line.ending.is_empty() { leaf("markdown.setext-underline".to_string(), line.content.clone(), Some("underline".to_string()), TokenChannel::Syntax.clone(), frames, nextId, out, pos, source.clone());
             close("markdown.heading".to_string(), "markdown.line-break".to_string(), line.ending.clone(), Some("trailing".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { close("markdown.heading".to_string(), "markdown.setext-underline".to_string(), line.content.clone(), Some("underline".to_string()), TokenChannel::Syntax.clone(), frames, nextId, out, pos, source.clone()); } }
         }
         fn emitThematicBreak(line: MdLine, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) {
-            flushPending("markdown.thematic-marker".to_string(), line.content.clone(), vec![FrameSpec { kind: "markdown.thematic-break".to_string(), role: None }], Some("marker".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            flushPending("markdown.thematic-marker".to_string(), line.content.clone(), &vec![FrameSpec { kind: "markdown.thematic-break".to_string(), role: None }], Some("marker".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
             if !line.ending.is_empty() { close("markdown.thematic-break".to_string(), "markdown.line-break".to_string(), line.ending.clone(), Some("trailing".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (*pendingClose).push("markdown.thematic-break".to_string()); }
         }
         fn startFence(line: MdLine, content: String, fence: (i64, i64), frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) {
             let lead = indentPrefixLength(content.clone());
-            if (lead > 0i64) { flushPending("markdown.indent".to_string(), crate::runtime::_str_substring(&content, 0i64, lead), Vec::new(), Some("indent".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { (); }
+            if (lead > 0i64) { flushPending("markdown.indent".to_string(), crate::runtime::_str_substring(&content, 0i64, lead), &Vec::new(), Some("indent".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { (); }
             let body = crate::runtime::_str_substring_from(&content, lead);
             let flen = fence.1.clone();
             let fenceLex = crate::runtime::_str_substring(&body, 0i64, flen);
-            flushPending("markdown.fence-open".to_string(), fenceLex, vec![FrameSpec { kind: "markdown.code-block".to_string(), role: None }], Some("fence.open".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            flushPending("markdown.fence-open".to_string(), fenceLex, &vec![FrameSpec { kind: "markdown.code-block".to_string(), role: None }], Some("fence.open".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
             let info = crate::runtime::_str_substring_from(&body, flen);
             if !info.is_empty() { leaf("markdown.info".to_string(), info.clone(), Some("info".to_string()), TokenChannel::Embedded.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
             if !line.ending.is_empty() { leaf("markdown.line-break".to_string(), line.ending.clone(), Some("trailing".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
@@ -1049,12 +1049,12 @@ impl MarkdownBlocks {
             let code = crate::runtime::_str_substring_from(&content, crate::runtime::_str_length(&indent));
             if ((*open) != OpenLeaf::IndentedCode) { finishParagraph(frames, indentedCodeBlanks, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
             (*open) = OpenLeaf::IndentedCode.clone();
-            flushPending("markdown.indent".to_string(), indent.clone(), vec![FrameSpec { kind: "markdown.code-block".to_string(), role: None }], Some("indent".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { leaf("markdown.indent".to_string(), indent.clone(), Some("indent".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); }
+            flushPending("markdown.indent".to_string(), indent.clone(), &vec![FrameSpec { kind: "markdown.code-block".to_string(), role: None }], Some("indent".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { leaf("markdown.indent".to_string(), indent.clone(), Some("indent".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); }
             leaf("markdown.code-content".to_string(), code.clone(), Some("code".to_string()), TokenChannel::Embedded.clone(), frames, nextId, out, pos, source.clone());
             if !line.ending.is_empty() { leaf("markdown.line-break".to_string(), line.ending.clone(), Some("code".to_string()), TokenChannel::Embedded.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
         }
         fn emitIndentedCodePrefix(frames: &mut Vec<String>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) {
-            if !(*indentedCodePendingPrefix).is_empty() { flushPending("markdown.indent".to_string(), (*indentedCodePendingPrefix).clone(), Vec::new(), Some("continuation".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            if !(*indentedCodePendingPrefix).is_empty() { flushPending("markdown.indent".to_string(), (*indentedCodePendingPrefix).clone(), &Vec::new(), Some("continuation".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
             (*indentedCodePendingPrefix) = "".to_string(); } else { (); }
         }
         fn releaseInteriorBlanks(frames: &mut Vec<String>, indentedCodeBlanks: &mut Vec<(String, String)>, nextId: &mut i64, out: &mut Vec<VmToken>, pos: &mut SourcePosition, source: SourceId) {
@@ -1076,10 +1076,10 @@ impl MarkdownBlocks {
             (*indentedCodeBlanks) = Vec::new();
             held.iter().cloned().for_each(|__pf| match __pf {
                 (blankContent, ending) => { let lexeme = format!("{}{}", blankContent, ending);
-                if !lexeme.is_empty() { flushPending("markdown.blank".to_string(), lexeme.clone(), Vec::new(), Some("blank".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()) } else { () } },
+                if !lexeme.is_empty() { flushPending("markdown.blank".to_string(), lexeme.clone(), &Vec::new(), Some("blank".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()) } else { () } },
             });; } else { (); }
         }
-        fn handleHtmlBlock(lines: Vec<MdLine>, index: i64, htmlType: i64, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) -> i64 {
+        fn handleHtmlBlock(lines: &Vec<MdLine>, index: i64, htmlType: i64, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) -> i64 {
             let endMarkers: Option<Vec<String>> = match htmlType {
                 1i64 => Some(vec!["</script>".to_string(), "</pre>".to_string(), "</style>".to_string(), "</textarea>".to_string()]),
                 2i64 => Some(vec!["-->".to_string()]),
@@ -1091,7 +1091,7 @@ impl MarkdownBlocks {
             let mut i = index;
             let mut first = true;
             let mut done = false;
-            while ((i < (lines.len() as i64)) && !(done)) {
+            while ((i < ((*lines).len() as i64)) && !(done)) {
                 let l = lines[(i) as usize].clone();
                 match (endMarkers).clone() {
                     None => { if l.isBlank() { done = true; } else { emitHtmlLine(l.clone(), first, frames, nextId, open, out, pendingClose, pos, source.clone());
@@ -1108,18 +1108,18 @@ impl MarkdownBlocks {
             i
         }
         fn emitHtmlLine(l: MdLine, first: bool, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) {
-            if first { flushPending("markdown.html".to_string(), l.content.clone(), vec![FrameSpec { kind: "markdown.html-block".to_string(), role: None }], Some("html".to_string()), TokenChannel::Embedded.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { if !l.content.is_empty() { leaf("markdown.html".to_string(), l.content.clone(), Some("html".to_string()), TokenChannel::Embedded.clone(), frames, nextId, out, pos, source.clone()); } else { (); } }
+            if first { flushPending("markdown.html".to_string(), l.content.clone(), &vec![FrameSpec { kind: "markdown.html-block".to_string(), role: None }], Some("html".to_string()), TokenChannel::Embedded.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { if !l.content.is_empty() { leaf("markdown.html".to_string(), l.content.clone(), Some("html".to_string()), TokenChannel::Embedded.clone(), frames, nextId, out, pos, source.clone()); } else { (); } }
             if !l.ending.is_empty() { leaf("markdown.line-break".to_string(), l.ending.clone(), Some("html".to_string()), TokenChannel::Embedded.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
         }
-        fn emitTable(lines: Vec<MdLine>, index: i64, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) -> i64 {
+        fn emitTable(lines: &Vec<MdLine>, index: i64, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) -> i64 {
             let header = lines[(index) as usize].clone();
-            flushPending("markdown.table-row".to_string(), header.content.clone(), vec![FrameSpec { kind: "markdown.table".to_string(), role: None }], Some("header".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            flushPending("markdown.table-row".to_string(), header.content.clone(), &vec![FrameSpec { kind: "markdown.table".to_string(), role: None }], Some("header".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
             if !header.ending.is_empty() { leaf("markdown.line-break".to_string(), header.ending.clone(), Some("trailing".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
             let delim = lines[((index + 1i64)) as usize].clone();
             leaf("markdown.table-delim".to_string(), delim.content.clone(), Some("delimiter".to_string()), TokenChannel::Syntax.clone(), frames, nextId, out, pos, source.clone());
             if !delim.ending.is_empty() { leaf("markdown.line-break".to_string(), delim.ending.clone(), Some("trailing".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
             let mut i = (index + 2i64);
-            while (((i < (lines.len() as i64)) && !(lines[(i) as usize].clone().isBlank())) && lines[(i) as usize].clone().content.contains(char::from_u32((124i64) as u32).unwrap_or('\u{FFFD}'))) {
+            while (((i < ((*lines).len() as i64)) && !(lines[(i) as usize].clone().isBlank())) && lines[(i) as usize].clone().content.contains(char::from_u32((124i64) as u32).unwrap_or('\u{FFFD}'))) {
                 leaf("markdown.table-row".to_string(), lines[(i) as usize].clone().content, Some("row".to_string()), TokenChannel::Syntax.clone(), frames, nextId, out, pos, source.clone());
                 if !lines[(i) as usize].clone().ending.is_empty() { leaf("markdown.line-break".to_string(), lines[(i) as usize].clone().ending, Some("trailing".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
                 (i += 1i64);
@@ -1127,17 +1127,17 @@ impl MarkdownBlocks {
             (*pendingClose).push("markdown.table".to_string());
             i
         }
-        fn openBlockquoteAndReprocess(lines: Vec<MdLine>, index: i64, line: MdLine, content: String, containers: &mut Vec<Container>, frames: &mut Vec<String>, gfm: bool, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> i64 {
+        fn openBlockquoteAndReprocess(lines: &Vec<MdLine>, index: i64, line: MdLine, content: String, containers: &mut Vec<Container>, frames: &mut Vec<String>, gfm: bool, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> i64 {
             finishParagraph(frames, indentedCodeBlanks, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
             let stripped = __self.stripBlockquoteMarker(content.clone()).clone().unwrap();
             let lead = indentPrefixLength(content.clone());
             if ((lead > 0i64) && !(stripped.0.starts_with(&(crate::runtime::_str_substring(&content, 0i64, lead))))) { (); } else { (); }
-            flushPending("markdown.blockquote-marker".to_string(), stripped.0.clone(), vec![FrameSpec { kind: "markdown.blockquote".to_string(), role: None }], Some("marker".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            flushPending("markdown.blockquote-marker".to_string(), stripped.0.clone(), &vec![FrameSpec { kind: "markdown.blockquote".to_string(), role: None }], Some("marker".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
             (*containers).push(Container::Blockquote);
             let innerLine = MdLine { content: stripped.1.clone(), ending: line.ending.clone() };
-            reprocessInner(lines.clone(), index, innerLine.clone(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self)
+            reprocessInner(lines, index, innerLine.clone(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self)
         }
-        fn openListItemAndReprocess(lines: Vec<MdLine>, index: i64, line: MdLine, content: String, item: (bool, String, i64), containers: &mut Vec<Container>, frames: &mut Vec<String>, gfm: bool, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> i64 {
+        fn openListItemAndReprocess(lines: &Vec<MdLine>, index: i64, line: MdLine, content: String, item: (bool, String, i64), containers: &mut Vec<Container>, frames: &mut Vec<String>, gfm: bool, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> i64 {
             finishParagraph(frames, indentedCodeBlanks, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
             let lead = indentPrefixLength(content.clone());
             let (ordered, marker, contentIndent) = item;
@@ -1151,33 +1151,33 @@ impl MarkdownBlocks {
                 (*pendingClose).push(lf.frame()); },
                 _ => { (); },
             } } else { (); }
-            if (lead > 0i64) { flushPending("markdown.indent".to_string(), crate::runtime::_str_substring(&content, 0i64, lead), Vec::new(), Some("indent".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { (); }
+            if (lead > 0i64) { flushPending("markdown.indent".to_string(), crate::runtime::_str_substring(&content, 0i64, lead), &Vec::new(), Some("indent".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { (); }
             if needList { opens.push(FrameSpec { kind: "markdown.list".to_string(), role: None });
             (*containers).push(Container::ListFrame { ordered: ordered.clone() }); } else { (); }
             opens.push(FrameSpec { kind: "markdown.list-item".to_string(), role: None });
             (*containers).push(Container::ListItemFrame { ordered: ordered.clone(), contentIndent: (contentIndent + lead) });
             let body = crate::runtime::_str_substring_from(&content, lead);
             let markerLex = crate::runtime::_str_substring(&body, 0i64, crate::runtime::_str_length(&marker));
-            flushPending("markdown.list-marker".to_string(), markerLex, opens.clone(), Some("marker".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            flushPending("markdown.list-marker".to_string(), markerLex, &opens, Some("marker".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
             let mut remainder = crate::runtime::_str_substring_from(&body, crate::runtime::_str_length(&marker));
             if (gfm && ((remainder.starts_with("[ ] ") || remainder.starts_with("[x] ")) || remainder.starts_with("[X] "))) { leaf("markdown.task-marker".to_string(), crate::runtime::_str_substring(&remainder, 0i64, 3i64), Some("task".to_string()), TokenChannel::Syntax.clone(), frames, nextId, out, pos, source.clone());
             remainder = crate::runtime::_str_substring_from(&remainder, 3i64); } else { (); }
             let innerLine = MdLine { content: remainder.clone(), ending: line.ending.clone() };
-            reprocessInner(lines.clone(), index, innerLine.clone(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self)
+            reprocessInner(lines, index, innerLine.clone(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self)
         }
-        fn reprocessInner(lines: Vec<MdLine>, index: i64, innerLine: MdLine, containers: &mut Vec<Container>, frames: &mut Vec<String>, gfm: bool, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> i64 {
+        fn reprocessInner(lines: &Vec<MdLine>, index: i64, innerLine: MdLine, containers: &mut Vec<Container>, frames: &mut Vec<String>, gfm: bool, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> i64 {
             let content = innerLine.content.clone();
             let indentWidth = indentWidth(content.clone());
             if innerLine.isBlank() { { finishParagraph(frames, indentedCodeBlanks, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
             if !innerLine.ending.is_empty() { leaf("markdown.line-break".to_string(), innerLine.ending.clone(), Some("blank".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
-            (index + 1i64) } } else { dispatchLeaf(lines.clone(), index, innerLine.clone(), content.clone(), indentWidth.clone(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self) }
+            (index + 1i64) } } else { dispatchLeaf(lines, index, innerLine.clone(), content.clone(), indentWidth.clone(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self) }
         }
-        fn scanFrontMatter(lines: Vec<MdLine>, index: i64, frames: &mut Vec<String>, nextId: &mut i64, out: &mut Vec<VmToken>, pos: &mut SourcePosition, source: SourceId) -> i64 {
-            if ((index < (lines.len() as i64)) && (lines[(index) as usize].clone().content == "---".to_string())) { { let mut i = (index + 1i64);
-            while (((i < (lines.len() as i64)) && (lines[(i) as usize].clone().content != "---".to_string())) && (lines[(i) as usize].clone().content != "...".to_string())) {
+        fn scanFrontMatter(lines: &Vec<MdLine>, index: i64, frames: &mut Vec<String>, nextId: &mut i64, out: &mut Vec<VmToken>, pos: &mut SourcePosition, source: SourceId) -> i64 {
+            if ((index < ((*lines).len() as i64)) && (lines[(index) as usize].clone().content == "---".to_string())) { { let mut i = (index + 1i64);
+            while (((i < ((*lines).len() as i64)) && (lines[(i) as usize].clone().content != "---".to_string())) && (lines[(i) as usize].clone().content != "...".to_string())) {
                 (i += 1i64);
             };
-            if (i < (lines.len() as i64)) { { openBranch("markdown.front-matter".to_string(), "markdown.front-matter-fence".to_string(), lines[(index) as usize].clone().content, Some("open".to_string()), TokenChannel::Syntax.clone(), frames, nextId, out, pos, source.clone());
+            if (i < ((*lines).len() as i64)) { { openBranch("markdown.front-matter".to_string(), "markdown.front-matter-fence".to_string(), lines[(index) as usize].clone().content, Some("open".to_string()), TokenChannel::Syntax.clone(), frames, nextId, out, pos, source.clone());
             if !lines[(index) as usize].clone().ending.is_empty() { leaf("markdown.line-break".to_string(), lines[(index) as usize].clone().ending, Some("open".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
             let mut j = (index + 1i64);
             while (j < i) {
@@ -1189,17 +1189,17 @@ impl MarkdownBlocks {
             if !lines[(i) as usize].clone().ending.is_empty() { leaf("markdown.line-break".to_string(), lines[(i) as usize].clone().ending, Some("close".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
             (i + 1i64) } } else { index } } } else { index }
         }
-        fn collectReferences(lines: Vec<MdLine>, limits: MarkdownLimits, refs: &mut std::collections::HashMap<String, LinkRef>, __self: &MarkdownBlocks) {
+        fn collectReferences(lines: &Vec<MdLine>, limits: MarkdownLimits, refs: &mut std::collections::HashMap<String, LinkRef>, __self: &MarkdownBlocks) {
             let mut inFence = false;
             let mut fenceChar = 32i64;
             let mut inParagraph = false;
             let mut i = 0i64;
-            while (i < (lines.len() as i64)) {
+            while (i < ((*lines).len() as i64)) {
                 let content = lines[(i) as usize].clone().content;
                 let trimmed = crate::runtime::_str_substring_from(&content, indentPrefixLength(content.clone()));
                 if inFence { if ((!trimmed.is_empty() && trimmed.chars().all(|__ch| (|__p0| { (__p0 == fenceChar) })((__ch as u32) as i64))) && (crate::runtime::_str_length(&trimmed) >= 3i64)) { inFence = false; } else { (); } } else { if (trimmed.starts_with("```") || trimmed.starts_with("~~~")) { inFence = true;
                 fenceChar = (crate::runtime::_str_char_at(&trimmed, 0i64)).0;
-                inParagraph = false; } else { if lines[(i) as usize].clone().isBlank() { inParagraph = false; } else { if ((!(inParagraph) && (indentWidth(content.clone()) < 4i64)) && trimmed.starts_with("[")) { match __self.scanRefDef(lines.clone(), i) {
+                inParagraph = false; } else { if lines[(i) as usize].clone().isBlank() { inParagraph = false; } else { if ((!(inParagraph) && (indentWidth(content.clone()) < 4i64)) && trimmed.starts_with("[")) { match __self.scanRefDef(lines, i) {
                     Some(defn) => { let norm = normalizeLabel(defn.label());
                     if (!((*refs).contains_key(&(norm))) && (((*refs).len() as i64) < limits.maxReferences)) { (*refs) = {
                         let mut m2 = (*refs).clone();
@@ -1213,8 +1213,8 @@ impl MarkdownBlocks {
             };
         }
         fn emitDefinition(defn: RefDef, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) -> i64 {
-            if !defn.indent.is_empty() { flushPending("markdown.indent".to_string(), defn.indent.clone(), Vec::new(), Some("indent".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { (); }
-            flushPending("markdown.reference-label".to_string(), defn.labelLex.clone(), vec![FrameSpec { kind: "markdown.definition".to_string(), role: None }], Some("label".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
+            if !defn.indent.is_empty() { flushPending("markdown.indent".to_string(), defn.indent.clone(), &Vec::new(), Some("indent".to_string()), TokenChannel::Trivia.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); } else { (); }
+            flushPending("markdown.reference-label".to_string(), defn.labelLex.clone(), &vec![FrameSpec { kind: "markdown.definition".to_string(), role: None }], Some("label".to_string()), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone());
             leaf("markdown.colon".to_string(), defn.colon.clone(), Some("colon".to_string()), TokenChannel::Syntax.clone(), frames, nextId, out, pos, source.clone());
             leaf("markdown.indent".to_string(), defn.afterColon.clone(), Some("space".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone());
             leaf("markdown.destination".to_string(), defn.destLex.clone(), Some("destination".to_string()), TokenChannel::Syntax.clone(), frames, nextId, out, pos, source.clone());
@@ -1223,19 +1223,19 @@ impl MarkdownBlocks {
             if !defn.trailing.is_empty() { close("markdown.definition".to_string(), "markdown.line-break".to_string(), defn.trailing.clone(), Some("trailing".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (*pendingClose).push("markdown.definition".to_string()); }
             defn.linesConsumed
         }
-        fn emitInlineOpenOnly(branch: String, pieces: Vec<InlinePiece>, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) {
-            if pieces.is_empty() { (); } else { emitFirst(branch.clone(), pieces[0].clone(), Some("content".to_string()), frames, nextId, open, out, pendingClose, pos, source.clone());
+        fn emitInlineOpenOnly(branch: String, pieces: &Vec<InlinePiece>, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) {
+            if (*pieces).is_empty() { (); } else { emitFirst(branch.clone(), (*pieces)[0].clone(), Some("content".to_string()), frames, nextId, open, out, pendingClose, pos, source.clone());
             let mut i = 1i64;
-            while (i < (pieces.len() as i64)) {
+            while (i < ((*pieces).len() as i64)) {
                 replay(pieces[(i) as usize].clone(), frames, nextId, out, pos, source.clone());
                 (i += 1i64);
             }; }
         }
         fn emitFirst(branch: String, piece: InlinePiece, role: Option<String>, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) {
             match piece {
-                InlinePiece::Tok { kind, lexeme: lex, role: r, channel: ch } => { flushPending(kind.clone(), lex.clone(), vec![FrameSpec { kind: branch.clone(), role: None }], r.or_else(|| role), ch.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); },
-                InlinePiece::Open { branch: b2, kind, lexeme: lex, role: r } => { flushPending(kind.clone(), lex.clone(), vec![FrameSpec { kind: branch.clone(), role: None }, FrameSpec { kind: b2.clone(), role: None }], r.clone(), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); },
-                InlinePiece::Close { branch: _, kind, lexeme: lex, role: r } => { flushPending(kind.clone(), lex.clone(), vec![FrameSpec { kind: branch.clone(), role: None }], r.clone(), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); },
+                InlinePiece::Tok { kind, lexeme: lex, role: r, channel: ch } => { flushPending(kind.clone(), lex.clone(), &vec![FrameSpec { kind: branch.clone(), role: None }], r.or_else(|| role), ch.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); },
+                InlinePiece::Open { branch: b2, kind, lexeme: lex, role: r } => { flushPending(kind.clone(), lex.clone(), &vec![FrameSpec { kind: branch.clone(), role: None }, FrameSpec { kind: b2.clone(), role: None }], r.clone(), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); },
+                InlinePiece::Close { branch: _, kind, lexeme: lex, role: r } => { flushPending(kind.clone(), lex.clone(), &vec![FrameSpec { kind: branch.clone(), role: None }], r.clone(), TokenChannel::Syntax.clone(), frames, nextId, open, out, pendingClose, pos, source.clone()); },
             }
         }
         fn emitLast(branch: String, piece: InlinePiece, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pos: &mut SourcePosition, source: SourceId) {
@@ -1259,8 +1259,8 @@ impl MarkdownBlocks {
                 InlinePiece::Close { branch: b2, kind, lexeme: lex, role } => { close(b2.clone(), kind.clone(), lex.clone(), role.clone(), TokenChannel::Syntax, frames, nextId, out, pos, source.clone()); },
             }
         }
-        fn flushPending(kind: String, lexeme: String, opens: Vec<FrameSpec>, role: Option<String>, channel: TokenChannel, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) {
-            if lexeme.is_empty() { (); } else { if ((*pendingClose).is_empty() && opens.is_empty()) { leaf(kind.clone(), lexeme.clone(), role.clone(), channel.clone(), frames, nextId, out, pos, source.clone()); } else { let instr = VmInstruction::Reframe { closeBefore: (*pendingClose).clone(), open: opens.clone(), closeAfter: Vec::new(), role: role.clone() };
+        fn flushPending(kind: String, lexeme: String, opens: &Vec<FrameSpec>, role: Option<String>, channel: TokenChannel, frames: &mut Vec<String>, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, source: SourceId) {
+            if lexeme.is_empty() { (); } else { if ((*pendingClose).is_empty() && (*opens).is_empty()) { leaf(kind.clone(), lexeme.clone(), role.clone(), channel.clone(), frames, nextId, out, pos, source.clone()); } else { let instr = VmInstruction::Reframe { closeBefore: (*pendingClose).clone(), open: (*opens).clone(), closeAfter: Vec::new(), role: role.clone() };
             (*pendingClose) = Vec::new();
             emit(kind.clone(), lexeme.clone(), instr, channel.clone(), frames, nextId, out, pos, source.clone()); } }
         }
@@ -1291,23 +1291,23 @@ impl MarkdownBlocks {
         let mut paragraphSegs: Vec<ParaSeg> = Vec::new();
         let mut paragraphPendingPrefix = "".to_string();
         if (codePointCount(text.clone()) > self.limits.maxSourceCodePoints) { MarkdownBlockResult { tokens: Vec::new(), diagnostics: vec![self.limitDiag("uniml.markdown.limit.source".to_string(), format!("Markdown source exceeds the {} code-point limit", self.limits.maxSourceCodePoints))] } } else { { let lines = split(text.clone());
-        collectReferences(lines.clone(), self.limits.clone(), &mut refs, self);
+        collectReferences(&lines, self.limits.clone(), &mut refs, self);
         let mut index = 0i64;
-        if self.scala { index = scanFrontMatter(lines.clone(), index, &mut frames, &mut nextId, &mut out, &mut pos, self.source.clone()); } else { (); }
+        if self.scala { index = scanFrontMatter(&lines, index, &mut frames, &mut nextId, &mut out, &mut pos, self.source.clone()); } else { (); }
         while (index < (lines.len() as i64)) {
-            index = processLine(lines.clone(), index, &mut containers, &mut frames, self.gfm.clone(), &mut indentedCodeBlanks, &mut indentedCodePendingPrefix, &mut nextId, &mut open, &mut out, &mut paragraphPendingPrefix, &mut paragraphSegs, &mut pendingClose, &mut pos, self.profile.clone(), &mut refs, self.source.clone(), self);
+            index = processLine(&lines, index, &mut containers, &mut frames, self.gfm.clone(), &mut indentedCodeBlanks, &mut indentedCodePendingPrefix, &mut nextId, &mut open, &mut out, &mut paragraphPendingPrefix, &mut paragraphSegs, &mut pendingClose, &mut pos, self.profile.clone(), &mut refs, self.source.clone(), self);
         };
         finishOpenBlocks(&mut diagnostics, &mut frames, &mut indentedCodeBlanks, &mut nextId, &mut open, &mut out, &mut paragraphPendingPrefix, &mut paragraphSegs, &mut pendingClose, &mut pos, self.profile.clone(), &mut refs, self.source.clone(), self);
         closeDangling(&mut frames, &mut open, &mut out);
         MarkdownBlockResult { tokens: out.clone(), diagnostics: diagnostics.clone() } } }
     }
 
-    pub fn refDefAt(&self, lines: Vec<MdLine>, index: i64, line: MdLine, content: String, containers: Vec<Container>, open: OpenLeaf) -> Option<RefDef> {
+    pub fn refDefAt(&self, lines: &Vec<MdLine>, index: i64, line: MdLine, content: String, containers: &Vec<Container>, open: OpenLeaf) -> Option<RefDef> {
         let Paragraph = "markdown.paragraph".to_string();
-        if (open == OpenLeaf::Paragraph) { None } else { if containers.is_empty() { self.scanRefDef(lines, index) } else { self.scanRefDef(vec![MdLine { content: content, ending: line.ending }], 0i64) } }
+        if (open == OpenLeaf::Paragraph) { None } else { if (*containers).is_empty() { self.scanRefDef(lines, index) } else { self.scanRefDef(&vec![MdLine { content: content, ending: line.ending }], 0i64) } }
     }
 
-    pub fn scanRefDef(&self, lines: Vec<MdLine>, index: i64) -> Option<RefDef> {
+    pub fn scanRefDef(&self, lines: &Vec<MdLine>, index: i64) -> Option<RefDef> {
         fn isSpace(c: i64) -> bool {
             ((c == 32i64) || (c == 9i64))
         }
@@ -1342,11 +1342,11 @@ impl MarkdownBlocks {
             ok
         }
         let mut last = index;
-        while ((last < (lines.len() as i64)) && !(lines[(last.clone()) as usize].clone().isBlank())) {
+        while ((last < ((*lines).len() as i64)) && !(lines[(last.clone()) as usize].clone().isBlank())) {
             (last += 1i64);
         };
         if (last == index) { return None; } else { (); }
-        let window = lines.clone()[(index as usize)..(last as usize)].to_vec();
+        let window = ((*lines))[(index as usize)..(last as usize)].to_vec();
         let joined = (window.iter().cloned().map(|__p0| { __p0.raw() }).collect::<Vec<_>>()).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join("");
         let n = crate::runtime::_str_length(&joined);
         if (indentWidth(joined.clone()) >= 4i64) { return None; } else { (); }
@@ -1441,7 +1441,7 @@ impl MarkdownBlocks {
         crate::runtime::_str_substring(&content, 0i64, i)
     }
 
-    pub fn spliceSwallowedBreaks(&self, piece: InlinePiece, segs: Vec<ParaSeg>, breaksSoFar: i64) -> (InlinePiece, i64) {
+    pub fn spliceSwallowedBreaks(&self, piece: InlinePiece, segs: &Vec<ParaSeg>, breaksSoFar: i64) -> (InlinePiece, i64) {
         let empty = DialectRegistry { byName: std::collections::HashMap::new() };
         let lexeme = self.pieceLexeme(piece.clone());
         if (self.isBreakPiece(piece.clone()) || ({ let __h: &str = &lexeme; let __n: &str = &char::from_u32((10i64) as u32).unwrap_or('\u{FFFD}').to_string(); __h.find(__n).map(|__b| __h[..__b].encode_utf16().count() as i64).unwrap_or(-1) } < 0i64)) { (piece.clone(), breaksSoFar) } else { { let mut out: Vec<String> = Vec::new();
@@ -1451,7 +1451,7 @@ impl MarkdownBlocks {
             let c = crate::runtime::_str_char_at(&lexeme, i);
             out.push(format!("{}", c));
             if (c == 10i64) { (k += 1i64);
-            if (k < (segs.len() as i64)) { out.push(segs[(k.clone()) as usize].clone().prefix); } else { (); } } else { (); }
+            if (k < ((*segs).len() as i64)) { out.push(segs[(k.clone()) as usize].clone().prefix); } else { (); } } else { (); }
             (i += 1i64);
         };
         (self.withLexeme(piece.clone(), (out).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join("")), k.clone()) } }
@@ -1573,8 +1573,8 @@ impl MarkdownBlocks {
         if ((!(ok) || (i >= n)) || (crate::runtime::_str_char_at(&t, i) != 62i64)) { None } else { Some((i + 1i64)) } } } } } } }
     }
 
-    pub fn isTableStart(&self, lines: Vec<MdLine>, index: i64, content: String) -> bool {
-        ((content.contains(char::from_u32((124i64) as u32).unwrap_or('\u{FFFD}')) && ((index + 1i64) < (lines.len() as i64))) && self.isTableDelimiter(lines[((index + 1i64)) as usize].clone().content))
+    pub fn isTableStart(&self, lines: &Vec<MdLine>, index: i64, content: String) -> bool {
+        ((content.contains(char::from_u32((124i64) as u32).unwrap_or('\u{FFFD}')) && ((index + 1i64) < ((*lines).len() as i64))) && self.isTableDelimiter(lines[((index + 1i64)) as usize].clone().content))
     }
 
     pub fn isTableDelimiter(&self, content: String) -> bool {
@@ -1716,10 +1716,10 @@ impl TreeVm {
         let mut halted = state.halted.clone();
         let mut roots: Vec<UniNode> = Vec::new();
         let mut diags: Vec<Diagnostic> = Vec::new();
-        match preflight(stack.clone(), nodeCount.clone(), input.clone()) {
+        match preflight(&stack.clone(), nodeCount.clone(), input.clone()) {
             Some(diagnostic) => { if (diagnostic.severity == Severity::Fatal) { halted = true; } else { (); }
             record(diagnostic.clone(), &mut diagCount, &mut diagLimitReported, &mut diags, &mut halted, limits.clone()); },
-            None => { validateToken(lastTokenId.clone(), input.token.clone()).iter().cloned().for_each(|__x| record(__x, &mut diagCount, &mut diagLimitReported, &mut diags, &mut halted, limits.clone()));;
+            None => { validateToken(lastTokenId, input.token.clone()).iter().cloned().for_each(|__x| record(__x, &mut diagCount, &mut diagLimitReported, &mut diags, &mut halted, limits.clone()));;
             lastTokenId = Some(input.token.id.clone());
             match (input.instruction).clone() {
                 VmInstruction::Open { kind, role } => { (nodeCount += 2i64);
@@ -1727,7 +1727,7 @@ impl TreeVm {
                 VmInstruction::Emit { role } => { (nodeCount += 1i64);
                 let tokenNode = UniNode::Token { value: input.token.clone() };
                 if !stack.is_empty() { addTop(UniEdge { role: role.clone(), child: tokenNode.clone() }, &mut stack); } else { roots.push(tokenNode.clone()); } },
-                ref instruction @ VmInstruction::Reframe { ref closeBefore, ref open, ref closeAfter, ref role } => { match reframeProblem(stack.clone(), (*instruction).clone()) {
+                ref instruction @ VmInstruction::Reframe { ref closeBefore, ref open, ref closeAfter, ref role } => { match reframeProblem(&stack.clone(), (*instruction).clone()) {
                     Some(problem) => { (nodeCount += 1i64);
                     record(Diagnostic { span: Some(input.token.span.clone()), ..(problem).clone() }, &mut diagCount, &mut diagLimitReported, &mut diags, &mut halted, limits.clone());
                     let tokenNode = UniNode::Token { value: input.token.clone() };
@@ -1791,30 +1791,30 @@ impl TreeVm {
         ProcessBatch { values: roots.clone(), diagnostics: diags.clone() } } }
     }
 
-    pub fn preflight(&self, stack: Vec<VmFrame>, nodeCount: i64, input: VmToken) -> Option<Diagnostic> {
+    pub fn preflight(&self, stack: &Vec<VmFrame>, nodeCount: i64, input: VmToken) -> Option<Diagnostic> {
         let limits = self.limits.clone();
         let reframeProblem = |__a0, __a1| self.reframeProblem(__a0, __a1);
         let token = input.token.clone();
         if (codePointCount(token.lexeme.clone()) > limits.maxTokenCodePoints) { Some(Diagnostic { code: "uniml.limit.token".to_string(), message: format!("token exceeds the {} code-point limit", limits.maxTokenCodePoints), severity: Severity::Fatal.clone(), span: Some(token.span.clone()), dialect: None.clone(), details: Vec::new() }) } else { { let requiredNodes: i64 = match (input.instruction).clone() {
             _ => 2i64,
-            ref r @ VmInstruction::Reframe { ref closeBefore, ref open, ref closeAfter, ref role } => match reframeProblem(stack.clone(), (*r).clone()) {
+            ref r @ VmInstruction::Reframe { ref closeBefore, ref open, ref closeAfter, ref role } => match reframeProblem(stack, (*r).clone()) {
                 None => (1i64 + ((*open).len() as i64)),
                 Some(_) => 1i64,
             },
             _ => 1i64,
         };
         let peakDepth: i64 = match (input.instruction).clone() {
-            _ => ((stack.len() as i64) + 1i64),
-            ref r @ VmInstruction::Reframe { ref closeBefore, ref open, ref closeAfter, ref role } => match reframeProblem(stack.clone(), (*r).clone()) {
-                None => (((stack.len() as i64) - ((*closeBefore).len() as i64)) + ((*open).len() as i64)),
-                Some(_) => (stack.len() as i64),
+            _ => (((*stack).len() as i64) + 1i64),
+            ref r @ VmInstruction::Reframe { ref closeBefore, ref open, ref closeAfter, ref role } => match reframeProblem(stack, (*r).clone()) {
+                None => ((((*stack).len() as i64) - ((*closeBefore).len() as i64)) + ((*open).len() as i64)),
+                Some(_) => ((*stack).len() as i64),
             },
-            _ => (stack.len() as i64),
+            _ => ((*stack).len() as i64),
         };
         if (peakDepth > limits.maxDepth) { Some(Diagnostic { code: "uniml.limit.depth".to_string(), message: format!("tree depth exceeds the {} frame limit", limits.maxDepth), severity: Severity::Fatal.clone(), span: Some(token.span.clone()), dialect: None.clone(), details: Vec::new() }) } else { if ((nodeCount + requiredNodes) > limits.maxNodes) { Some(Diagnostic { code: "uniml.limit.nodes".to_string(), message: format!("tree exceeds the {} node limit", limits.maxNodes), severity: Severity::Fatal.clone(), span: Some(token.span.clone()), dialect: None.clone(), details: Vec::new() }) } else { None } } } }
     }
 
-    pub fn reframeProblem(&self, stack: Vec<VmFrame>, instruction: VmInstruction) -> Option<Diagnostic> {
+    pub fn reframeProblem(&self, stack: &Vec<VmFrame>, instruction: VmInstruction) -> Option<Diagnostic> {
         let VmInstruction::Reframe { closeBefore: __dstruct_closeBefore, open: __dstruct_open, closeAfter: __dstruct_closeAfter, role } = instruction.clone() else { unreachable!() };
         let closeBefore = __dstruct_closeBefore.clone();
         let open = __dstruct_open.clone();
@@ -1822,7 +1822,7 @@ impl TreeVm {
         if ((closeBefore.iter().cloned().any(|__p0| { __p0.is_empty() }) || closeAfter.iter().cloned().any(|__p0| { __p0.is_empty() })) || open.iter().cloned().any(|__p0| { __p0.kind.is_empty() })) { Some(Diagnostic { code: "uniml.vm.invalid-reframe".to_string(), message: "reframe kinds must be non-empty".to_string(), severity: Severity::Error.clone(), span: None.clone(), dialect: None.clone(), details: Vec::new() }) } else { { fn close(expected: String, kinds: &mut Vec<String>, problem: &mut Option<Diagnostic>) {
             if (*problem).is_none() { if (*kinds).is_empty() { (*problem) = Some(Diagnostic { code: "uniml.vm.reframe-underflow".to_string(), message: format!("reframe cannot close '{}' because no frame is open", expected), severity: Severity::Error.clone(), span: None.clone(), dialect: None.clone(), details: Vec::new() }); } else { if ((*kinds)[(*kinds).len() - 1].clone() != expected) { (*problem) = Some(Diagnostic { code: "uniml.vm.mismatched-reframe".to_string(), message: format!("expected to reframe '{}' but current node is '{}'", expected, (*kinds)[(*kinds).len() - 1].clone()), severity: Severity::Error.clone(), span: None.clone(), dialect: None.clone(), details: vec![("expected".to_string(), expected.clone()), ("actual".to_string(), (*kinds)[(*kinds).len() - 1].clone())] }); } else { (*kinds) = { let __v = ((*kinds)).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() }; } } } else { (); }
         }
-        let mut kinds = stack.iter().cloned().map(|__p0| { __p0.kind }).collect::<Vec<_>>();
+        let mut kinds = (*stack).iter().cloned().map(|__p0| { __p0.kind }).collect::<Vec<_>>();
         let mut problem: Option<Diagnostic> = None.clone();
         closeBefore.iter().cloned().for_each(|__x| close(__x, &mut kinds, &mut problem));;
         if problem.is_none() { for spec in open.iter().cloned() {
@@ -1957,24 +1957,26 @@ pub fn isLowSurrogate(char: i64) -> bool {
 
 pub fn codePointCount(text: String) -> i64 {
     let count = 2125i64;
+    let chars = text.encode_utf16().map(|__u| __u as i64).collect::<Vec<i64>>();
     let mut index = 0i64;
     let mut count = 0i64;
-    while (index < crate::runtime::_str_length(&text)) {
-        let char = crate::runtime::_str_char_at(&text, index);
-        if ((isHighSurrogate((char).0) && ((index + 1i64) < crate::runtime::_str_length(&text))) && isLowSurrogate((crate::runtime::_str_char_at(&text, (index + 1i64))).0)) { (index += 2i64); } else { (index += 1i64); }
+    while (index < (chars.len() as i64)) {
+        let char = chars[(index) as usize].clone();
+        if ((isHighSurrogate(char) && ((index + 1i64) < (chars.len() as i64))) && isLowSurrogate(chars[((index + 1i64)) as usize].clone())) { (index += 2i64); } else { (index += 1i64); }
         (count += 1i64);
     };
     count
 }
 
 pub fn advance(position: SourcePosition, lexeme: String) -> SourcePosition {
+    let chars = lexeme.encode_utf16().map(|__u| __u as i64).collect::<Vec<i64>>();
     let mut index = 0i64;
     let mut offset = position.offset.clone();
     let mut line = position.line.clone();
     let mut column = position.column.clone();
-    while (index < crate::runtime::_str_length(&lexeme)) {
-        let char = crate::runtime::_str_char_at(&lexeme, index);
-        let width = if ((isHighSurrogate((char.clone()).0) && ((index + 1i64) < crate::runtime::_str_length(&lexeme))) && isLowSurrogate((crate::runtime::_str_char_at(&lexeme, (index + 1i64))).0)) { 2i64 } else { 1i64 };
+    while (index < (chars.len() as i64)) {
+        let char = chars[(index) as usize].clone();
+        let width = if ((isHighSurrogate(char.clone()) && ((index + 1i64) < (chars.len() as i64))) && isLowSurrogate(chars[((index + 1i64)) as usize].clone())) { 2i64 } else { 1i64 };
         if (char == 10i64) { (line += 1i64);
         column = 1i64; } else { (column += 1i64); }
         (offset += 1i64);
@@ -2095,7 +2097,7 @@ pub fn UniML_parse(source: SourceInput, dialect: std::rc::Rc<dyn DialectAdapter>
     let mut tokens: Vec<VmToken> = Vec::new();
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     for chunk in source.chunks.iter().cloned() {
-        let stepped = lexer.step(lexState.clone(), chunk);
+        let stepped = lexer.step(lexState, chunk);
         lexState = stepped.state.clone();
         tokens.extend((stepped.batch.values).iter().cloned());
         diagnostics.extend((stepped.batch.diagnostics).iter().cloned());
@@ -2107,7 +2109,7 @@ pub fn UniML_parse(source: SourceInput, dialect: std::rc::Rc<dyn DialectAdapter>
     let mut vmState = vm.start();
     let mut roots: Vec<UniNode> = Vec::new();
     for token in tokens.iter().cloned() {
-        let stepped = vm.step(vmState.clone(), token);
+        let stepped = vm.step(vmState, token);
         vmState = stepped.state.clone();
         roots.extend((stepped.batch.values).iter().cloned());
         diagnostics.extend((stepped.batch.diagnostics).iter().cloned());
@@ -2379,7 +2381,7 @@ pub fn domainAndPath(content: String, from: i64) -> Option<i64> {
     };
     let domain = crate::runtime::_str_substring(&content, from, j);
     let segments = domain.splitn(-1i64 as usize, "\\.").map(|p| p.to_string()).collect::<Vec<String>>().clone().into_iter().collect::<Vec<_>>();
-    if (((segments.len() as i64) < 2i64) || segments.clone().into_iter().take(((segments.len() as i64) - 1i64) as usize).collect::<Vec<_>>().iter().cloned().any(|__p0| { __p0.is_empty() })) { None } else { { while (((j < crate::runtime::_str_length(&content)) && !(isUnicodeWhitespace((crate::runtime::_str_char_at(&content, j)).0))) && (crate::runtime::_str_char_at(&content, j) != 60i64)) {
+    if (((segments.len() as i64) < 2i64) || (segments).iter().cloned().take(((segments.len() as i64) - 1i64) as usize).collect::<Vec<_>>().iter().cloned().any(|__p0| { __p0.is_empty() })) { None } else { { while (((j < crate::runtime::_str_length(&content)) && !(isUnicodeWhitespace((crate::runtime::_str_char_at(&content, j)).0))) && (crate::runtime::_str_char_at(&content, j) != 60i64)) {
         (j += 1i64);
     };
     Some(j.clone()) } }
@@ -2743,9 +2745,9 @@ pub fn processEmphasis(input: Vec<WNode>) -> Vec<WNode> {
             let closeLex = crate::runtime::_str_substring(&(*lexeme), 0i64, r#use);
             let newOpener = WNode::WDelim { lexeme: crate::runtime::_str_substring(&opener_lexeme, 0i64, (crate::runtime::_str_length(&opener_lexeme) - r#use)), ch: opener_ch.clone(), canOpen: opener_canOpen.clone(), canClose: opener_canClose.clone() };
             let newCloser = WNode::WDelim { lexeme: crate::runtime::_str_substring_from(&(*lexeme), r#use), ch: (*ch).clone(), canOpen: (*canOpen).clone(), canClose: (*canClose).clone() };
-            let inner = nodes.clone()[((found + 1i64) as usize)..(closerIdx as usize)].to_vec().iter().cloned().flat_map(flatten).collect::<Vec<_>>().clone().into_iter().collect::<Vec<_>>();
+            let inner = (nodes)[((found + 1i64) as usize)..(closerIdx as usize)].to_vec().iter().cloned().flat_map(flatten).collect::<Vec<_>>().clone().into_iter().collect::<Vec<_>>();
             let wrap = WNode::WFixed { pieces: [&([&[InlinePiece::Open { branch: branch.clone(), kind: kind.clone(), lexeme: openLex, role: Some("delimiter.open".to_string()) }][..], &(inner)[..]].concat())[..], &[InlinePiece::Close { branch: branch.clone(), kind: kind.clone(), lexeme: closeLex, role: Some("delimiter.close".to_string()) }][..]].concat() };
-            nodes = [&([&(nodes.clone().into_iter().take(found as usize).collect::<Vec<_>>())[..], &(vec![newOpener, wrap, newCloser])[..]].concat())[..], &(nodes.clone().into_iter().skip((closerIdx + 1i64) as usize).collect::<Vec<_>>())[..]].concat();
+            nodes = [&([&((nodes).iter().cloned().take(found as usize).collect::<Vec<_>>())[..], &(vec![newOpener, wrap, newCloser])[..]].concat())[..], &((nodes).iter().cloned().skip((closerIdx + 1i64) as usize).collect::<Vec<_>>())[..]].concat();
             closerIdx = (found + 1i64); } else { (closerIdx += 1i64); } },
             _ => { (closerIdx += 1i64); },
         }
@@ -3023,7 +3025,7 @@ pub fn listLoose(edges: Vec<UniEdge>) -> bool {
         UniEdge { role: _, child: UniNode::Token { value: t } } => (t.kind == Blank),
         _ => false,
     }).map(|__i| __i as i64).unwrap_or(-1));
-    if (blankIdx < 0i64) { false } else { if (idx < ((items.len() as i64) - 1i64)) { true } else { itemEdges.clone().into_iter().skip((blankIdx + 1i64) as usize).collect::<Vec<_>>().iter().cloned().any(|__pf| match __pf {
+    if (blankIdx < 0i64) { false } else { if (idx < ((items.len() as i64) - 1i64)) { true } else { (itemEdges).iter().cloned().skip((blankIdx + 1i64) as usize).collect::<Vec<_>>().iter().cloned().any(|__pf| match __pf {
         UniEdge { role: _, child: _ } => true,
         _ => false,
     }) } } })
@@ -3120,7 +3122,7 @@ pub fn projectTable(edges: Vec<UniEdge>) -> MarkdownBlock {
         _ => None,
     });
     let header = rows.first().cloned().map(splitCells).unwrap_or(Vec::new());
-    let body = rows.clone().into_iter().skip(1i64 as usize).collect::<Vec<_>>().iter().cloned().map(splitCells).collect::<Vec<_>>();
+    let body = (rows).iter().cloned().skip(1i64 as usize).collect::<Vec<_>>().iter().cloned().map(splitCells).collect::<Vec<_>>();
     let alignments = delim.map(parseAlignments).unwrap_or(Vec::new());
     MarkdownBlock::Table { header: header, alignments: alignments, rows: body }
 }

@@ -241,31 +241,28 @@ const SKIP_DIRS: &[&str] =
 /// Cost tracks BYTES, not block count — 16 KB as 682 sections (25.5 s) and as 8 sections
 /// (22.8 s) cost the same — so nothing about how a document is structured avoids it.
 ///
-/// **Raised 16 KB → 64 KB on 2026-08-31, and this time the corpus says yes.** The vendored
-/// parser got ~13× faster over a series of fixes in scalascript's Rust backend (self-append →
-/// `push`, self-extend → `extend`, ASCII fast paths in the string helpers, `String.toVector`,
-/// read-only `Vec` captures by reference, and uniml scanning ref-defs by index instead of
-/// copying the tail): 256 KB 173.4 s → 13.0 s.
+/// **Raised to 1 MB on 2026-08-31 — above every real document, and the cap now exists only as
+/// a guard against a pathological non-ASCII input.** The parse became LINEAR in file size over a
+/// series of fixes in scalascript's Rust backend and uniML (self-append/self-extend to `push`/
+/// `extend`, read-only `Vec` parameters and captures by reference, `take`/`drop`/`slice`
+/// borrowing instead of cloning their receiver, and the two index-based string scanners hoisting
+/// one `toVector`): 256 KB 173.4 s → 0.28 s, ~615×, at ~2× per doubling.
 ///
-/// Re-measured on this repo's actual `docs/specs`, the same way the earlier attempt to raise
-/// this constant was measured — and rejected — before the speedup:
+/// Measured on this repo's OWN largest documents, which is what the cap has to survive:
 ///
-///     cap  16 KB   125 files    7.6 s     (was 41.5 s)
-///     cap  32 KB   140 files   14.2 s     (was 91.0 s)
-///     cap  64 KB   142 files   16.7 s     ← every file, syntactically
+///     SPRINT.md      503 KB   2.1% non-ASCII   5.26 s
+///     CHANGELOG.md   443 KB   1.4% non-ASCII   2.82 s
+///     BACKLOG.md     140 KB   1.4% non-ASCII   0.75 s
 ///
-/// Full syntactic coverage now costs LESS THAN HALF what partial coverage cost before. That is
-/// what pays for the cap; the earlier 64 KB attempt was reverted precisely because the number
-/// did not, and the rule that caught it stands: against a quadratic cost, take the figure from
-/// the corpus, not from a synthetic benchmark.
+/// SPRINT.md is the file that started this: it once extrapolated to ~7 HOURS and forced a 16 KB
+/// cap that left 12% of the docs unparsed.
 ///
-/// The cap still EXISTS because the parser is still O(bytes²) — ~13× is a constant, not a shape.
-/// The remaining cost is not one bug: uniML is written in Scala's persistent-immutable idiom
-/// where append/slice/share are O(1)–O(log n), and the backend lowers `Vector` to `Vec` where
-/// each is an O(n) copy. Six profiling rounds found six instances of that one shape. The
-/// architectural fix is `ssc-rust-persistent-vector` in BACKLOG.md; phase 2 (chunking CODE,
-/// where files are routinely larger than any doc) is what needs it.
-pub const MAX_MARKDOWN_TREE_BYTES: usize = 64 * 1024;
+/// WHY A CAP AT ALL, STILL: linearity holds on ASCII. Non-ASCII is measurably NOT linear yet —
+/// ~×3.1–3.8 per doubling for Cyrillic and for emoji — because `charAt(i)` costs O(i) whenever the
+/// ASCII fast path does not apply, and only two scanners were hoisted. 1 MB bounds the worst case
+/// at roughly ten seconds for one file while covering every document anyone here writes. Removing
+/// the cap outright is `ssc-rust-string-repr`'s payoff, not this one's.
+pub const MAX_MARKDOWN_TREE_BYTES: usize = 1024 * 1024;
 
 /// Files larger than this are skipped outright — a multi-megabyte blob is generated output or
 /// data, and one such file would dominate BM25's length statistics.
@@ -549,7 +546,7 @@ mod tests {
     fn oversized_markdown_degrades_to_text_but_is_indexed() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let big = format!("# Huge\n\n{}\n", "lorem ipsum dolor ".repeat(8000));
+        let big = format!("# Huge\n\n{}\n", "lorem ipsum dolor ".repeat(70000));
         assert!(big.len() > MAX_MARKDOWN_TREE_BYTES);
         fs::write(root.join("big.md"), &big).unwrap();
         fs::write(root.join("small.md"), "# Small\n\nbody\n").unwrap();
