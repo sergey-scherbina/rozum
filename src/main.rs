@@ -485,10 +485,19 @@ enum Command {
 #[derive(Subcommand)]
 enum RagAction {
     /// Index a project directory into `<root>/.rozum/rag-index.json`.
+    ///
+    /// Incremental by default: only files whose mtime or length changed are re-parsed, and
+    /// entries for deleted files are dropped. A full build of this repo is ~33 s, which is too
+    /// slow to run after an edit — so making the cheap path the DEFAULT is what lets the index
+    /// actually stay fresh instead of being rebuilt rarely and served stale in between.
     Index {
         /// Project root to index (default: current directory).
         #[arg(long)]
         root: Option<std::path::PathBuf>,
+        /// Re-parse every file, ignoring the previous index. For when the chunker itself
+        /// changed — the mtime/length pair cannot see that, because nothing on disk moved.
+        #[arg(long)]
+        full: bool,
     },
     /// Query the persisted index — the same hits the `search_documents` tool sees.
     Search {
@@ -8681,7 +8690,7 @@ fn run_rag(action: RagAction) {
     use rozum::rag_chunk;
     use rozum::rag_lite::Retriever;
     match action {
-        RagAction::Index { root } => {
+        RagAction::Index { root, full } => {
             let root = root.unwrap_or_else(|| std::path::PathBuf::from("."));
             // Per-file progress on stderr, because this genuinely takes minutes on a real
             // repo: the vendored markdown parser is quadratic in file size (see
@@ -8696,7 +8705,12 @@ fn run_rag(action: RagAction) {
                     bytes / 1024
                 );
             };
-            match rag_chunk::index_and_save_with_progress(&root, &mut progress) {
+            let outcome = if full {
+                rag_chunk::index_and_save_with_progress(&root, &mut progress)
+            } else {
+                rag_chunk::reindex_incremental(&root, &mut progress)
+            };
+            match outcome {
                 Ok((stats, file)) => {
                     println!(
                         "indexed {} files into {} chunks ({} skipped, {} large .md on the text path) → {}",
@@ -8706,6 +8720,14 @@ fn run_rag(action: RagAction) {
                         stats.degraded,
                         file.display()
                     );
+                    // Printed only for an incremental pass, where it is the number that says
+                    // what the pass actually did — `files` counts the whole index either way.
+                    if !full {
+                        println!(
+                            "  {} reused, {} re-parsed, {} removed",
+                            stats.reused, stats.rechunked, stats.removed
+                        );
+                    }
                 }
                 Err(e) => {
                     eprintln!("rag index failed: {e}");

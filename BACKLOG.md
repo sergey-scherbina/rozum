@@ -143,16 +143,17 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   NOT via gateway-side injection into every request: `reference` tool-schema bloat is measured
   (~4.9K tokens of schema per request, which is why `--lean` exists), and a tool the client did
   not ask for is exactly that cost on every call. MCP is opt-in by construction.
-- [ ] **rag-index-freshness (P1)** — for CODE this is not hygiene, it is correctness. Docs drift
-  slowly; a working tree changes under the agent on every edit it itself makes, so a stale index
-  answers confidently out of code that no longer exists and the agent cannot tell. Today there is
-  no freshness tracking of any kind (no mtime, no digest — grep says so) and every build is from
-  scratch at 33 s, which is far too slow to run per edit. Two parts: incremental reindex keyed on
-  path+mtime+size, and a decision on WHEN it runs (on-demand when the tool notices a stale entry,
-  a post-commit hook, or a watcher — pick the cheapest that cannot silently drift). Until this
-  exists the tool should report the index's age with its results, so a stale answer is visibly
-  stale rather than quietly wrong. Lands with or immediately behind P0.
-
+- [x] **rag-index-freshness (P1) — DONE 2026-08-31.** Incremental reindex (mtime+length, chunks
+  grouped per file in an on-disk v2 manifest), a refresh before every `rag.search`, and a
+  background warmup at proxy startup so nobody waits for the first build. Measured on a 490-file
+  tree: full 23.50 s, incremental-no-change **0.02 s** (1175×), one edited file 0.51 s, with
+  byte-identical output either way. Two things the numbers forced, both wrong in the first cut:
+  a no-op pass must NOT rewrite the file (the proxy reloads on mtime, so an idempotent rewrite
+  would re-read 31 MB per search — the check costing more than the search), and auto-refresh must
+  not perform the FIRST build (23.5 s inside a tool call in every fresh checkout; caught by P0's
+  own `no_index` test, which began failing because the refresh had created the index it asserted
+  the absence of). Building moved to a background warmup, guarded by a cross-process `try_lock`
+  so N agents starting together do it once. Spec: `docs/specs/rag-index-freshness.md`.
 - [ ] **rag-index-scope (P2, cheap)** — the index carries material that can only mislead. Found
   while probing `rag.search` live: `"how does the proxy forward a tool call"` ranked
   `scripts/bench/results/_archive-…/…t5-code-easy.txt#p1` in its top 3 — archived benchmark

@@ -626,6 +626,33 @@ impl DaemonProxy {
             }));
         };
 
+        // Refresh BEFORE searching, so the answer describes the tree as it is now. Affordable
+        // only because the pass is incremental: a no-change refresh of this repo is 0.02 s (it
+        // stats the files and writes nothing), and one edited file is ~0.5 s, against 23.5 s for
+        // a full build. That is what turns freshness from something an agent has to remember to
+        // do into something it cannot fail to get — the point of `rag-index-freshness`.
+        //
+        // Best-effort: a read-only checkout, a race with a concurrent indexer or any I/O error
+        // must degrade to searching what we already have, never to failing the call. A stale
+        // answer with its age attached is worth far more than an error.
+        //
+        // Only when an index ALREADY exists. Auto-refresh keeps a built index current; it must
+        // not perform the FIRST build, which is the full 23.5 s and would land inside a tool call
+        // in every fresh checkout. Building the index stays an explicit `rozum rag index`, and
+        // the no-index answer below says so.
+        if rozum_agent::rag_chunk::index_path(&root).exists() {
+            let root_for_refresh = root.clone();
+            let refreshed = tokio::task::spawn_blocking(move || {
+                rozum_agent::rag_chunk::reindex_incremental(&root_for_refresh, &mut |_, _, _| {})
+            })
+            .await;
+            if let Ok(Err(e)) = refreshed {
+                tracing::debug!(
+                    "rag.search: incremental refresh failed, serving what is on disk: {e}"
+                );
+            }
+        }
+
         let (index, chunks, age) = {
             let mut cache = self.rag.lock().await;
             let path = rozum_agent::rag_chunk::index_path(&root);
@@ -656,14 +683,30 @@ impl DaemonProxy {
         // Not an error and not an empty result list: both read as "nothing matches your query",
         // which is a different and much more misleading answer than "nobody has built the index".
         let Some(index) = index else {
+            // Distinguish "still being built" from "will never exist". The proxy warms the index
+            // at startup, so the common case for a fresh checkout is that a build is IN FLIGHT —
+            // telling the agent to run a command it does not need would be wrong advice, and
+            // returning an empty list would read as "this project contains nothing like that".
+            let building = root.join(".rozum").join("rag-index.lock").exists()
+                && std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(root.join(".rozum").join("rag-index.lock"))
+                    .map(|f| f.try_lock().is_err())
+                    .unwrap_or(false);
             return tool_text(&json!({
                 "results": [],
                 "no_index": true,
-                "hint": format!(
-                    "no RAG index for {} yet — build it with `rozum rag index` (about 30 s for \
-                     this repo), then call again. Until then use grep/Read.",
-                    root.display()
-                ),
+                "building": building,
+                "hint": if building {
+                    "the project index is being built right now (first build of this checkout, \
+                     ~30 s) — use grep/Read for this question and try again shortly".to_string()
+                } else {
+                    format!(
+                        "no RAG index for {} — one is normally built in the background when a \
+                         session starts. Use grep/Read; `rozum rag index` builds it explicitly.",
+                        root.display()
+                    )
+                },
             }));
         };
 
@@ -738,6 +781,13 @@ pub async fn run_daemon_proxy() -> Result<(), Box<dyn std::error::Error + Send +
     // Spawn the idle watchdog BEFORE serve(): serve() blocks until the MCP `initialize`
     // handshake, so a proxy abandoned before (or after) initialize must still be reaped.
     spawn_idle_watchdog(server.clone());
+    // Build/refresh the project's RAG index AHEAD of the agent needing it, off the request path.
+    // Started here rather than on first `rag.search` for the reason the operator named: the first
+    // build is ~23.5 s, and an agent should neither wait for it inside a tool call nor be told to
+    // run a command. By the time a coding session asks its first question this is normally done;
+    // if it is not, `rag.search` says the index is still building instead of pretending it is
+    // empty. Every later start is the incremental path (0.02 s when nothing changed).
+    spawn_index_warmup();
     let service = match server.serve(stdio()).await {
         Ok(s) => s,
         Err(e) => {
@@ -1027,6 +1077,33 @@ fn current_uid() -> Option<u32> {
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+}
+
+/// Warm the project's RAG index in the background, once per proxy start.
+///
+/// Best-effort and deliberately silent: this is a convenience running beside an agent session,
+/// so a read-only checkout, a project with nothing indexable, or a sibling agent already holding
+/// the build lock must all end in doing nothing — never in a message the agent has to read or a
+/// failure it has to handle. `rag.search` is where the state becomes visible.
+///
+/// `ROZUM_RAG_WARMUP=0` turns it off, for a session that wants no background CPU at all.
+fn spawn_index_warmup() {
+    if std::env::var("ROZUM_RAG_WARMUP").is_ok_and(|v| v == "0") {
+        return;
+    }
+    let Some(root) = detect_project().map(PathBuf::from) else {
+        return;
+    };
+    tokio::task::spawn_blocking(move || {
+        match rozum_agent::rag_chunk::refresh_in_background(&root, &mut |_, _, _| {}) {
+            Ok(Some((stats, _))) if stats.rechunked > 0 || stats.removed > 0 => proxy_log(&format!(
+                "rag warmup: {} chunks ({} re-parsed, {} reused, {} removed)",
+                stats.chunks, stats.rechunked, stats.reused, stats.removed
+            )),
+            Ok(_) => {}
+            Err(e) => proxy_log(&format!("rag warmup skipped: {e}")),
+        }
+    });
 }
 
 /// A tool result carrying one JSON text block — the shape `rag.search` answers in, and the same

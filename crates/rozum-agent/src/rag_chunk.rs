@@ -8,7 +8,7 @@
 //! `.rozum/rag-index.json` is what lets `search_documents` serve an agent session that did not
 //! just run the indexer.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,6 +39,16 @@ pub struct IndexStats {
     /// Markdown files that took the paragraph path instead of the tree, because they exceed
     /// [`MAX_MARKDOWN_TREE_BYTES`] — indexed, but without heading-bounded sections.
     pub degraded: usize,
+    /// Files whose chunks were REUSED from the previous index because their `mtime` and length
+    /// were unchanged. Zero on a full build. This is the number that says whether an incremental
+    /// pass did its job — `files` counts what is in the index, not what had to be re-parsed.
+    pub reused: usize,
+    /// Files re-parsed because they were new or had changed.
+    pub rechunked: usize,
+    /// Entries dropped because the file is gone from the tree. Deletions matter more than they
+    /// look: a chunk for a file that no longer exists is the one failure mode retrieval cannot
+    /// recover from, since the agent is handed code it will never find on disk.
+    pub removed: usize,
 }
 
 /// The default limits the uniML markdown dialect itself uses (`MarkdownLimits_default` in the
@@ -456,13 +466,15 @@ const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// Walk `root`, chunk every text file (`.md` syntactically, the rest by paragraphs), feed
 /// `index`. Never fails the run on a bad file — that file is counted in `skipped`.
 pub fn index_project(root: &Path, index: &mut LexicalIndex) -> IndexStats {
-    let mut stats = IndexStats::default();
-    let mut chunks: Vec<Chunk> = Vec::new();
-    collect_project_chunks(root, root, &mut chunks, &mut stats, &mut |_, _, _| {});
-    for c in &chunks {
-        index.add(c.id.clone(), c.text.clone());
+    let (files, mut stats) = project_files_with_progress(root, &HashMap::new(), &mut |_, _, _| {});
+    let mut chunks = 0usize;
+    for f in &files {
+        for c in &f.chunks {
+            index.add(c.id.clone(), c.text.clone());
+            chunks += 1;
+        }
     }
-    stats.chunks = chunks.len();
+    stats.chunks = chunks;
     stats
 }
 
@@ -480,17 +492,35 @@ pub fn project_chunks_with_progress(
     root: &Path,
     progress: &mut dyn FnMut(&str, usize, bool),
 ) -> (Vec<Chunk>, IndexStats) {
+    let (files, stats) = project_files_with_progress(root, &HashMap::new(), progress);
+    (files.into_iter().flat_map(|f| f.chunks).collect(), stats)
+}
+
+/// The files-and-stats walk every indexing path shares. `prev` is the previous index keyed by
+/// project-relative path; a file whose `mtime` and length both match its entry is REUSED and
+/// never read or parsed. Pass an empty map for a full rebuild.
+fn project_files_with_progress(
+    root: &Path,
+    prev: &HashMap<String, FileChunks>,
+    progress: &mut dyn FnMut(&str, usize, bool),
+) -> (Vec<FileChunks>, IndexStats) {
     let mut stats = IndexStats::default();
-    let mut chunks: Vec<Chunk> = Vec::new();
-    collect_project_chunks(root, root, &mut chunks, &mut stats, progress);
-    stats.chunks = chunks.len();
-    (chunks, stats)
+    let mut files: Vec<FileChunks> = Vec::new();
+    collect_project_chunks(root, root, &mut files, prev, &mut stats, progress);
+    stats.chunks = files.iter().map(|f| f.chunks.len()).sum();
+    // Anything in the previous index the walk did not reach is gone from the tree. Counting it
+    // is not bookkeeping: these are the entries that would otherwise point an agent at code that
+    // no longer exists, which is the one wrong answer retrieval cannot recover from.
+    let seen: std::collections::HashSet<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    stats.removed = prev.keys().filter(|p| !seen.contains(p.as_str())).count();
+    (files, stats)
 }
 
 fn collect_project_chunks(
     root: &Path,
     dir: &Path,
-    out: &mut Vec<Chunk>,
+    out: &mut Vec<FileChunks>,
+    prev: &HashMap<String, FileChunks>,
     stats: &mut IndexStats,
     progress: &mut dyn FnMut(&str, usize, bool),
 ) {
@@ -515,13 +545,34 @@ fn collect_project_chunks(
         }
         if meta.is_dir() {
             if !SKIP_DIRS.contains(&name) {
-                collect_project_chunks(root, &path, out, stats, progress);
+                collect_project_chunks(root, &path, out, prev, stats, progress);
             }
             continue;
         }
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
         if BINARY_EXT.contains(&ext.as_str()) || meta.len() > MAX_FILE_BYTES {
             stats.skipped += 1;
+            continue;
+        }
+        let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+        let mtime_secs = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // The reuse decision is made HERE, before `fs::read` — that is the whole saving. Deciding
+        // after reading would still pay the I/O on every file and leave only the parse to skip,
+        // and on this corpus the parse is the cheaper half for everything except large markdown.
+        if let Some(hit) = prev.get(&rel)
+            && hit.mtime_secs == mtime_secs
+            && hit.len == meta.len()
+        {
+            stats.reused += 1;
+            if !hit.chunks.is_empty() {
+                stats.files += 1;
+            }
+            out.push(hit.clone());
             continue;
         }
         let bytes = match fs::read(&path) {
@@ -538,7 +589,6 @@ fn collect_project_chunks(
                 continue;
             }
         };
-        let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
         // `.rs` goes through the uniml.rust dialect (RAG phase 2). It shares markdown's size cap:
         // the cap exists because a non-ASCII document is still super-linear, and while code is
         // ASCII in practice a generated .rs file can be enormous, so the same bound applies.
@@ -554,10 +604,14 @@ fn collect_project_chunks(
         if (ext == "md" || ext == "rs") && !tree_path {
             stats.degraded += 1;
         }
+        stats.rechunked += 1;
         if !file_chunks.is_empty() {
             stats.files += 1;
-            out.extend(file_chunks);
         }
+        // Recorded even when it produced NO chunks (an empty or whitespace-only file). Skipping
+        // those here would leave them out of the manifest, so every later pass would re-read them
+        // forever — a small cost that never converges, which is the wrong shape for a cache.
+        out.push(FileChunks { path: rel, mtime_secs, len: meta.len(), chunks: file_chunks });
     }
 }
 
@@ -566,10 +620,38 @@ fn collect_project_chunks(
 /// On-disk shape of the per-project index: the CHUNKS, not the BM25 tables — rebuild on load
 /// is cheap and the format stays independent of `LexicalIndex` internals (which the embedding
 /// backend of phase 3 will replace anyway).
+///
+/// v2 groups chunks BY FILE and records the stat that produced them, which is what makes an
+/// incremental pass possible. A flat chunk list would force reuse to be decided by scanning
+/// every chunk id for a path prefix — O(all chunks) per file, 46k × 2648 here, slower than
+/// re-parsing the tree it was meant to avoid.
 #[derive(Serialize, Deserialize)]
 struct SavedIndex {
     version: u32,
     generated_utc: String,
+    /// v2. Empty when loading a v1 file, which is what makes the first pass after this change a
+    /// full rebuild rather than a wrong answer.
+    #[serde(default)]
+    files: Vec<FileChunks>,
+    /// v1's flat list. Still READ so an existing index keeps serving searches across the upgrade;
+    /// never written again, and it carries no stat, so it cannot be reused incrementally.
+    #[serde(default)]
+    chunks: Vec<Chunk>,
+}
+
+/// One source file's chunks, with the stat they were produced from.
+#[derive(Serialize, Deserialize, Clone)]
+struct FileChunks {
+    /// Project-relative, the same string that prefixes each chunk id.
+    path: String,
+    /// Seconds since the epoch. Second resolution is deliberate: it is what every filesystem
+    /// here agrees on, and the pairing with `len` covers the case it misses.
+    mtime_secs: u64,
+    /// Length in bytes. Carried BECAUSE mtime alone is not sufficient — a write inside the same
+    /// second (an agent editing a file it just wrote) leaves mtime unchanged, and a length
+    /// change catches most of those. This pair is a cheap heuristic, not a content hash: the
+    /// residual case is an edit that keeps the byte count within one second of the last write.
+    len: u64,
     chunks: Vec<Chunk>,
 }
 
@@ -590,18 +672,110 @@ pub fn index_and_save_with_progress(
     root: &Path,
     progress: &mut dyn FnMut(&str, usize, bool),
 ) -> std::io::Result<(IndexStats, PathBuf)> {
-    let (chunks, stats) = project_chunks_with_progress(root, progress);
+    write_index(root, &HashMap::new(), progress)
+}
+
+/// Refresh `root`'s index, re-parsing ONLY files whose `mtime` or length changed since the last
+/// build, and dropping entries whose files are gone.
+///
+/// This is what makes freshness affordable rather than aspirational: a full build of this repo is
+/// ~33 s, which is far too slow to run after an edit, so before this the index was rebuilt rarely
+/// and served stale in between — the failure mode `rag.search` could report but not fix.
+///
+/// Falls back to a full build when there is no previous index or it predates the per-file
+/// manifest (v1), which is the honest thing to do: a v1 file carries no stat, so "unchanged"
+/// cannot be established for any entry in it.
+pub fn reindex_incremental(
+    root: &Path,
+    progress: &mut dyn FnMut(&str, usize, bool),
+) -> std::io::Result<(IndexStats, PathBuf)> {
+    let prev = load_manifest(root);
+    write_index(root, &prev, progress)
+}
+
+/// Build-or-refresh the index behind a cross-process lock, for callers that run it eagerly in
+/// the background rather than on demand.
+///
+/// The lock is the point. Several agents commonly start in one project at the same time, and
+/// without it each would run the same 23.5 s full build, N× the CPU for one identical file — on
+/// a machine where local models are already competing for it. `try_lock` and not a blocking one:
+/// a second agent should skip the work, not queue behind it, because when the holder finishes
+/// the answer is already on disk for everyone.
+///
+/// `Ok(None)` = someone else is doing it. Returning that rather than an error keeps the caller's
+/// handling honest: nothing went wrong, and there is nothing to report.
+pub fn refresh_in_background(
+    root: &Path,
+    progress: &mut dyn FnMut(&str, usize, bool),
+) -> std::io::Result<Option<(IndexStats, PathBuf)>> {
+    let dir = root.join(".rozum");
+    fs::create_dir_all(&dir)?;
+    ignore_own_dir(&dir);
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("rag-index.lock"))?;
+    if lock.try_lock().is_err() {
+        return Ok(None);
+    }
+    // Held until this returns; the file stays on disk, which is fine — the LOCK is the state,
+    // not the file, so a crashed builder releases it with its fd and leaves nothing to reap.
+    let out = reindex_incremental(root, progress)?;
+    Ok(Some(out))
+}
+
+fn write_index(
+    root: &Path,
+    prev: &HashMap<String, FileChunks>,
+    progress: &mut dyn FnMut(&str, usize, bool),
+) -> std::io::Result<(IndexStats, PathBuf)> {
+    let (files, stats) = project_files_with_progress(root, prev, progress);
     let file = index_path(root);
+    // NOTHING CHANGED → do not rewrite the file. This is not an optimisation of the write, it is
+    // what makes refresh-on-every-search viable: a reader (the MCP proxy) holds the index in
+    // memory and reloads it when the file's mtime moves, so rewriting identical content on every
+    // call would make it re-read 31 MB every time — turning the freshness check into the most
+    // expensive part of a search. A no-op pass must leave the file untouched.
+    if !prev.is_empty() && stats.rechunked == 0 && stats.removed == 0 && file.exists() {
+        return Ok((stats, file));
+    }
     if let Some(dir) = file.parent() {
         fs::create_dir_all(dir)?;
+        ignore_own_dir(dir);
     }
     let saved = SavedIndex {
-        version: 1,
+        version: 2,
         generated_utc: chrono::Utc::now().to_rfc3339(),
-        chunks,
+        files,
+        chunks: Vec::new(),
     };
     fs::write(&file, serde_json::to_vec(&saved)?)?;
     Ok((stats, file))
+}
+
+/// Make `.rozum/` ignore itself, the convention the meeting store already established
+/// (`store.rs::materialize`). Load-bearing now that the index is built AUTOMATICALLY in the
+/// background: without it every project an agent visits grows a 31 MB untracked file that shows
+/// up in `git status` and can be swept into a commit by a careless `git add -A`. Best-effort and
+/// never overwritten — a project that wants different rules keeps them.
+fn ignore_own_dir(dir: &Path) {
+    let gi = dir.join(".gitignore");
+    if !gi.exists() {
+        let _ = fs::write(&gi, "*\n");
+    }
+}
+
+/// The previous build's per-file manifest, keyed by project-relative path. Empty for a missing
+/// index or a v1 one.
+fn load_manifest(root: &Path) -> HashMap<String, FileChunks> {
+    let Ok(bytes) = fs::read(index_path(root)) else {
+        return HashMap::new();
+    };
+    let Ok(saved) = serde_json::from_slice::<SavedIndex>(&bytes) else {
+        return HashMap::new();
+    };
+    saved.files.into_iter().map(|f| (f.path.clone(), f)).collect()
 }
 
 /// Load the persisted index for `root`, rebuilding the BM25 tables. `None` when no index has
@@ -610,6 +784,13 @@ pub fn load_project_index(root: &Path) -> Option<LexicalIndex> {
     let bytes = fs::read(index_path(root)).ok()?;
     let saved: SavedIndex = serde_json::from_slice(&bytes).ok()?;
     let mut index = LexicalIndex::new();
+    // v2 keeps chunks grouped by file; `chunks` is v1's flat list and is still read so an index
+    // written before the manifest existed keeps answering searches until the next build.
+    for f in saved.files {
+        for c in f.chunks {
+            index.add(c.id, c.text);
+        }
+    }
     for c in saved.chunks {
         index.add(c.id, c.text);
     }
@@ -892,6 +1073,131 @@ mod tests {
         assert_eq!(hits[0].id, "n.md#notes");
         assert!(project_retrieval_tools(root).is_some());
         assert!(project_retrieval_tools(&root.join("nowhere")).is_none());
+    }
+
+    /// The correctness gate for the whole incremental path, and the one that matters most: an
+    /// incremental pass must produce the SAME index a full build would. A cache that is merely
+    /// fast is worthless; the risk here is that it is fast and quietly different.
+    #[test]
+    fn incremental_matches_a_full_build_after_edit_add_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.md"), "# Alpha\nresidency admission queue\n").unwrap();
+        fs::write(root.join("b.md"), "# Beta\nsomething else entirely\n").unwrap();
+        fs::write(root.join("gone.md"), "# Gone\ntemporary content\n").unwrap();
+        index_and_save(root).unwrap();
+
+        // Edit one, add one, delete one — the three things that happen to a working tree.
+        // mtime has SECOND resolution, so a same-second rewrite is exactly the case the `len`
+        // half of the pair exists for; the edit here deliberately changes the length.
+        fs::write(root.join("a.md"), "# Alpha\nresidency admission queue, revised and longer\n")
+            .unwrap();
+        fs::write(root.join("c.md"), "# Gamma\nbrand new file\n").unwrap();
+        fs::remove_file(root.join("gone.md")).unwrap();
+
+        let (inc, _) = reindex_incremental(root, &mut |_, _, _| {}).unwrap();
+        assert_eq!(inc.removed, 1, "the deleted file's entry is dropped");
+        assert!(inc.rechunked >= 2, "edited + added were re-parsed: {inc:?}");
+        assert!(inc.reused >= 1, "the untouched file was NOT re-parsed: {inc:?}");
+
+        let incremental: Vec<(String, String)> = {
+            let ix = load_manifest(root);
+            let mut v: Vec<(String, String)> = ix
+                .values()
+                .flat_map(|f| f.chunks.iter().map(|c| (c.id.clone(), c.text.clone())))
+                .collect();
+            v.sort();
+            v
+        };
+        // Now the same tree from scratch.
+        fs::remove_file(index_path(root)).unwrap();
+        index_and_save(root).unwrap();
+        let full: Vec<(String, String)> = {
+            let ix = load_manifest(root);
+            let mut v: Vec<(String, String)> = ix
+                .values()
+                .flat_map(|f| f.chunks.iter().map(|c| (c.id.clone(), c.text.clone())))
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(incremental, full, "an incremental index must equal a full one");
+        assert!(
+            incremental.iter().all(|(id, _)| !id.starts_with("gone.md")),
+            "no chunk may survive its file: {incremental:?}"
+        );
+        assert!(incremental.iter().any(|(id, _)| id.starts_with("c.md")), "the new file is in");
+    }
+
+    /// Several agents commonly start in one project at once. The build lock is what stops each
+    /// of them running the same full build — N× the CPU for one identical file, on a machine
+    /// already contended by local models. A blocked caller must SKIP, not queue: by the time the
+    /// holder is done the answer is on disk for everyone.
+    #[test]
+    fn a_concurrent_builder_skips_instead_of_repeating_the_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.md"), "# Alpha\ncontent\n").unwrap();
+        fs::create_dir_all(root.join(".rozum")).unwrap();
+
+        // Stand in for the sibling that got there first.
+        let held = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join(".rozum").join("rag-index.lock"))
+            .unwrap();
+        held.lock().unwrap();
+
+        let out = refresh_in_background(root, &mut |_, _, _| {}).unwrap();
+        assert!(out.is_none(), "a second builder must skip, not build");
+        assert!(!index_path(root).exists(), "and must not have written anything");
+
+        drop(held);
+        let out = refresh_in_background(root, &mut |_, _, _| {}).unwrap();
+        assert!(out.is_some(), "with the lock free it builds");
+        assert!(index_path(root).exists());
+    }
+
+    /// A no-change pass must not rewrite the file. The MCP proxy holds the index in memory and
+    /// reloads when the mtime moves, so an idempotent-content rewrite would make every search
+    /// re-read the whole index — the freshness check would cost more than the search.
+    #[test]
+    fn an_unchanged_tree_leaves_the_index_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.md"), "# Alpha\nstable content\n").unwrap();
+        let (_, file) = index_and_save(root).unwrap();
+        let before = fs::metadata(&file).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let (stats, _) = reindex_incremental(root, &mut |_, _, _| {}).unwrap();
+        assert_eq!((stats.rechunked, stats.removed), (0, 0), "nothing changed: {stats:?}");
+        let after = fs::metadata(&file).unwrap().modified().unwrap();
+        assert_eq!(before, after, "a no-op pass must not touch the file");
+    }
+
+    /// A v1 index (flat chunk list, no per-file stat) must still SERVE searches, and must fall
+    /// back to a full rebuild rather than treating "no manifest" as "nothing changed" — which
+    /// would freeze the index at its v1 contents forever.
+    #[test]
+    fn a_v1_index_still_loads_and_upgrades_by_rebuilding() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".rozum")).unwrap();
+        let v1 = serde_json::json!({
+            "version": 1,
+            "generated_utc": "2026-01-01T00:00:00Z",
+            "chunks": [{ "id": "old.md#s", "text": "legacy chunk text" }]
+        });
+        fs::write(index_path(root), serde_json::to_vec(&v1).unwrap()).unwrap();
+        let ix = load_project_index(root).expect("a v1 index still loads");
+        assert_eq!(ix.search("legacy chunk", 1)[0].id, "old.md#s");
+
+        fs::write(root.join("real.md"), "# Real\nactual project content\n").unwrap();
+        let (stats, _) = reindex_incremental(root, &mut |_, _, _| {}).unwrap();
+        assert_eq!(stats.reused, 0, "a v1 file carries no stat, so nothing may be reused");
+        let after = load_project_index(root).unwrap();
+        assert_eq!(after.search("actual project", 1)[0].id, "real.md#real");
     }
 
     // End-to-end smoke over THIS repo's own specs: section-sized chunks make the
