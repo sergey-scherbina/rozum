@@ -267,8 +267,26 @@ pub fn _str_code_at(s: &str, i: i64) -> i64 {
 // `substring(from)` / `substring(from, until)` — same code-unit basis, and same panic as the
 // JVM's StringIndexOutOfBounds rather than a silent clamp: a wrong slice that keeps running
 // is how a parser produces plausible garbage.
+// ASCII FAST PATH, and it is the single hottest thing in this runtime. When the prefix
+// through `until` is ASCII, a byte index IS the code-unit index, so the answer is a direct
+// byte slice: no allocation, no walk of the whole string.
+//
+// The general path below materialises a `Vec<u16>` of the ENTIRE string on EVERY call.
+// `uniml/markdown`'s line splitter calls this once PER CHARACTER (`text.substring(i, i+1)`
+// to take one char), so that is an O(n) allocation per character — O(n²) with the allocator
+// in the inner loop. Measured: `split` was 90% of a whole markdown parse profile, and the
+// parse curve was ~3.6× per doubling.
 #[allow(dead_code)]
 pub fn _str_substring(s: &str, from: i64, until: i64) -> String {
+    if from >= 0 && until >= from {
+        let bs = s.as_bytes();
+        let (a, z) = (from as usize, until as usize);
+        // Only the prefix through `until` need be ASCII — a multi-byte character AFTER the
+        // slice cannot shift the mapping of indices inside it.
+        if z <= bs.len() && bs[..z].is_ascii() {
+            return s[a..z].to_string();
+        }
+    }
     let units: Vec<u16> = s.encode_utf16().collect();
     let (a, b) = (from as usize, until as usize);
     if a > b || b > units.len() {
@@ -279,6 +297,14 @@ pub fn _str_substring(s: &str, from: i64, until: i64) -> String {
 
 #[allow(dead_code)]
 pub fn _str_substring_from(s: &str, from: i64) -> String {
+    // Same fast path: an all-ASCII string has byte length == code-unit length, so the tail
+    // is a byte slice. Avoids collecting the whole string just to learn its length.
+    if from >= 0 && s.is_ascii() {
+        let a = from as usize;
+        if a <= s.len() {
+            return s[a..].to_string();
+        }
+    }
     let units: Vec<u16> = s.encode_utf16().collect();
     _str_substring(s, from, units.len() as i64)
 }
@@ -295,6 +321,17 @@ pub fn _str_substring_from(s: &str, from: i64) -> String {
 #[allow(dead_code)]
 pub fn _str_starts_with_at(s: &str, prefix: &str, at: i64) -> bool {
     if at < 0 { return false; }
+    // ASCII fast path (see `_str_substring`): with an ASCII prefix through `at`, code unit
+    // `at` sits at byte `at`, which is a char boundary — and comparing UTF-8 bytes from a
+    // char boundary is equivalent to comparing the text, whatever `prefix` itself contains.
+    // A scanner probing "am I at a marker" calls this once per position.
+    {
+        let bs = s.as_bytes();
+        let start = at as usize;
+        if start <= bs.len() && bs[..start].is_ascii() {
+            return bs[start..].starts_with(prefix.as_bytes());
+        }
+    }
     let units: Vec<u16> = s.encode_utf16().collect();
     let start = at as usize;
     if start > units.len() { return false; }
@@ -312,6 +349,16 @@ pub fn _str_starts_with_at(s: &str, prefix: &str, at: i64) -> bool {
 #[allow(dead_code)]
 pub fn _str_index_of_from(s: &str, needle: &str, from: i64) -> i64 {
     if from < 0 { return -1; }
+    // ASCII fast path (see `_str_substring`): an all-ASCII string has byte offsets equal to
+    // code-unit offsets throughout, so the search and the returned index need no conversion
+    // and no `Vec<u16>` of the whole string.
+    if s.is_ascii() {
+        let start = (from as usize).min(s.len());
+        return match s[start..].find(needle) {
+            Some(byte_idx) => (start + byte_idx) as i64,
+            None => -1,
+        };
+    }
     let units: Vec<u16> = s.encode_utf16().collect();
     let start = (from as usize).min(units.len());
     let suffix = String::from_utf16_lossy(&units[start..]);
@@ -333,6 +380,18 @@ pub fn _str_index_of_from(s: &str, needle: &str, from: i64) -> i64 {
 #[allow(dead_code)]
 pub fn _str_region_matches(s: &str, ignore_case: bool, toffset: i64, other: &str, ooffset: i64, len: i64) -> bool {
     if toffset < 0 || ooffset < 0 || len < 0 { return false; }
+    // ASCII fast path (see `_str_substring`): both regions become plain byte slices, with
+    // no `Vec<u16>` of either whole string. `autolinkAtWWW`/`autolinkScheme` call this once
+    // per scan position.
+    {
+        let (sb, ob) = (s.as_bytes(), other.as_bytes());
+        let (to, oo, l) = (toffset as usize, ooffset as usize, len as usize);
+        if to.saturating_add(l) <= sb.len() && oo.saturating_add(l) <= ob.len()
+            && sb[..to + l].is_ascii() && ob[..oo + l].is_ascii() {
+            let (sa, ob2) = (&sb[to..to + l], &ob[oo..oo + l]);
+            return if !ignore_case { sa == ob2 } else { sa.eq_ignore_ascii_case(ob2) };
+        }
+    }
     let s_units: Vec<u16> = s.encode_utf16().collect();
     let o_units: Vec<u16> = other.encode_utf16().collect();
     let (to, oo, l) = (toffset as usize, ooffset as usize, len as usize);

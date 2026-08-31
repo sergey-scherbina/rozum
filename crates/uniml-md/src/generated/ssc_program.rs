@@ -880,7 +880,7 @@ impl MarkdownBlocks {
             startFence(line.clone(), content.clone(), __self.startsFence(trimmed.clone()).clone().unwrap(), frames, nextId, open, out, pendingClose, pos, source.clone());
             (index + 1i64) } } else { if __self.startsBlockquote(trimmed.clone()) { openBlockquoteAndReprocess(lines.clone(), index, line.clone(), content.clone(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self) } else { if __self.startsListItem(trimmed.clone()).is_some() { openListItemAndReprocess(lines.clone(), index, line.clone(), content.clone(), __self.startsListItem(trimmed.clone()).clone().unwrap(), containers, frames, gfm.clone(), indentedCodeBlanks, indentedCodePendingPrefix, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self) } else { if ((indentWidth < 4i64) && __self.htmlBlockType(trimmed.clone(), ((*open) == OpenLeaf::Paragraph)).is_some()) { { let ht = __self.htmlBlockType(trimmed.clone(), ((*open) == OpenLeaf::Paragraph)).clone().unwrap();
             finishParagraph(frames, indentedCodeBlanks, nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
-            handleHtmlBlock(lines.clone(), index, ht, frames, nextId, open, out, pendingClose, pos, source.clone()) } } else { if (((*open) != OpenLeaf::Paragraph) && __self.scanRefDef(refDefLines(lines.clone(), index, line.clone(), content.clone(), containers), 0i64).is_some()) { (index + emitDefinition(__self.scanRefDef(refDefLines(lines.clone(), index, line.clone(), content.clone(), containers), 0i64).clone().unwrap(), frames, nextId, open, out, pendingClose, pos, source.clone())) } else { if ((gfm && ((*open) != OpenLeaf::Paragraph)) && __self.isTableStart(lines.clone(), index, content.clone())) { emitTable(lines.clone(), index, frames, nextId, open, out, pendingClose, pos, source.clone()) } else { { appendParagraph(line.clone(), content.clone(), open, paragraphPendingPrefix, paragraphSegs);
+            handleHtmlBlock(lines.clone(), index, ht, frames, nextId, open, out, pendingClose, pos, source.clone()) } } else { if __self.refDefAt(lines.clone(), index, line.clone(), content.clone(), (*containers).clone(), (*open).clone()).is_some() { (index + emitDefinition(__self.refDefAt(lines.clone(), index, line.clone(), content.clone(), (*containers).clone(), (*open).clone()).clone().unwrap(), frames, nextId, open, out, pendingClose, pos, source.clone())) } else { if ((gfm && ((*open) != OpenLeaf::Paragraph)) && __self.isTableStart(lines.clone(), index, content.clone())) { emitTable(lines.clone(), index, frames, nextId, open, out, pendingClose, pos, source.clone()) } else { { appendParagraph(line.clone(), content.clone(), open, paragraphPendingPrefix, paragraphSegs);
             (index + 1i64) } } } } } } } } } } }
         }
         fn matchContainers(line: MdLine, containers: &mut Vec<Container>, frames: &mut Vec<String>, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> String {
@@ -1189,9 +1189,6 @@ impl MarkdownBlocks {
             if !lines[(i) as usize].clone().ending.is_empty() { leaf("markdown.line-break".to_string(), lines[(i) as usize].clone().ending, Some("close".to_string()), TokenChannel::Trivia.clone(), frames, nextId, out, pos, source.clone()); } else { (); }
             (i + 1i64) } } else { index } } } else { index }
         }
-        fn refDefLines(lines: Vec<MdLine>, index: i64, line: MdLine, content: String, containers: &Vec<Container>) -> Vec<MdLine> {
-            if (*containers).is_empty() { lines.clone().into_iter().skip(index as usize).collect::<Vec<_>>() } else { vec![MdLine { content: content.clone(), ending: line.ending.clone() }] }
-        }
         fn collectReferences(lines: Vec<MdLine>, limits: MarkdownLimits, refs: &mut std::collections::HashMap<String, LinkRef>, __self: &MarkdownBlocks) {
             let mut inFence = false;
             let mut fenceChar = 32i64;
@@ -1303,6 +1300,11 @@ impl MarkdownBlocks {
         finishOpenBlocks(&mut diagnostics, &mut frames, &mut indentedCodeBlanks, &mut nextId, &mut open, &mut out, &mut paragraphPendingPrefix, &mut paragraphSegs, &mut pendingClose, &mut pos, self.profile.clone(), &mut refs, self.source.clone(), self);
         closeDangling(&mut frames, &mut open, &mut out);
         MarkdownBlockResult { tokens: out.clone(), diagnostics: diagnostics.clone() } } }
+    }
+
+    pub fn refDefAt(&self, lines: Vec<MdLine>, index: i64, line: MdLine, content: String, containers: Vec<Container>, open: OpenLeaf) -> Option<RefDef> {
+        let Paragraph = "markdown.paragraph".to_string();
+        if (open == OpenLeaf::Paragraph) { None } else { if containers.is_empty() { self.scanRefDef(lines, index) } else { self.scanRefDef(vec![MdLine { content: content, ending: line.ending }], 0i64) } }
     }
 
     pub fn scanRefDef(&self, lines: Vec<MdLine>, index: i64) -> Option<RefDef> {
@@ -2095,24 +2097,24 @@ pub fn UniML_parse(source: SourceInput, dialect: std::rc::Rc<dyn DialectAdapter>
     for chunk in source.chunks.iter().cloned() {
         let stepped = lexer.step(lexState.clone(), chunk);
         lexState = stepped.state.clone();
-        tokens = [&(tokens)[..], &(stepped.batch.values)[..]].concat();
-        diagnostics = [&(diagnostics)[..], &(stepped.batch.diagnostics)[..]].concat();
+        tokens.extend((stepped.batch.values).iter().cloned());
+        diagnostics.extend((stepped.batch.diagnostics).iter().cloned());
     };
     let lexFinal = lexer.stop(lexState.clone());
-    tokens = [&(tokens)[..], &(lexFinal.values)[..]].concat();
-    diagnostics = [&(diagnostics)[..], &(lexFinal.diagnostics)[..]].concat();
+    tokens.extend((lexFinal.values).iter().cloned());
+    diagnostics.extend((lexFinal.diagnostics).iter().cloned());
     let vm = TreeVm { limits: limits };
     let mut vmState = vm.start();
     let mut roots: Vec<UniNode> = Vec::new();
     for token in tokens.iter().cloned() {
         let stepped = vm.step(vmState.clone(), token);
         vmState = stepped.state.clone();
-        roots = [&(roots)[..], &(stepped.batch.values)[..]].concat();
-        diagnostics = [&(diagnostics)[..], &(stepped.batch.diagnostics)[..]].concat();
+        roots.extend((stepped.batch.values).iter().cloned());
+        diagnostics.extend((stepped.batch.diagnostics).iter().cloned());
     };
     let vmFinal = vm.stop(vmState.clone());
-    roots = [&(roots)[..], &(vmFinal.values)[..]].concat();
-    diagnostics = [&(diagnostics)[..], &(vmFinal.diagnostics)[..]].concat();
+    roots.extend((vmFinal.values).iter().cloned());
+    diagnostics.extend((vmFinal.diagnostics).iter().cloned());
     let status = if diagnostics.iter().cloned().any(|__p0| { (__p0.severity == Severity::Fatal) }) { CompletionStatus::Halted.clone() } else { if diagnostics.iter().cloned().any(|__p0| { (__p0.severity == Severity::Error) }) { CompletionStatus::Incomplete.clone() } else { CompletionStatus::Complete.clone() } };
     ParseResult { roots: roots.clone(), diagnostics: diagnostics.clone(), status: status }
 }
@@ -2493,7 +2495,7 @@ pub fn buildLink(content: String, start: i64, labelStart: i64, labelEnd: i64, la
     let branch = if image { Image.clone() } else { Link.clone() };
     let mut pieces: Vec<InlinePiece> = Vec::new();
     pieces.push(InlinePiece::Open { branch: branch.clone(), kind: LinkOpen.clone(), lexeme: crate::runtime::_str_substring(&content, start, labelStart), role: Some("delimiter.open".to_string()) });
-    pieces = [&(pieces)[..], &(MarkdownInlines_parse(labelText, refs, profile))[..]].concat();
+    pieces.extend((MarkdownInlines_parse(labelText, refs, profile)).iter().cloned());
     pieces.push(InlinePiece::Tok { kind: LinkClose.clone(), lexeme: crate::runtime::_str_substring(&content, labelEnd, (labelEnd + 1i64)), role: Some("label.close".to_string()), channel: TokenChannel::Syntax.clone() });
     slice(DestOpen.clone(), (labelEnd + 1i64), spans.destStart.clone(), "dest.open".to_string(), TokenChannel::Syntax.clone(), content.clone(), &mut pieces);
     slice(Destination.clone(), spans.destStart.clone(), spans.destEnd.clone(), "destination".to_string(), TokenChannel::Syntax.clone(), content.clone(), &mut pieces);
@@ -2513,7 +2515,7 @@ pub fn buildRefLink(content: String, start: i64, labelStart: i64, labelEnd: i64,
     let branch = if image { Image.clone() } else { Link.clone() };
     let mut pieces: Vec<InlinePiece> = Vec::new();
     pieces.push(InlinePiece::Open { branch: branch.clone(), kind: LinkOpen.clone(), lexeme: crate::runtime::_str_substring(&content, start, labelStart), role: Some("delimiter.open".to_string()) });
-    pieces = [&(pieces)[..], &(MarkdownInlines_parse(labelText, refs, profile))[..]].concat();
+    pieces.extend((MarkdownInlines_parse(labelText, refs, profile)).iter().cloned());
     pieces.push(InlinePiece::Close { branch: branch.clone(), kind: ReferenceLabel.clone(), lexeme: crate::runtime::_str_substring(&content, labelEnd, endEx), role: Some("reference".to_string()) });
     WNode::WFixed { pieces: pieces.clone() }
 }
@@ -2760,24 +2762,24 @@ pub fn compatible(opener: WNode, closer: WNode) -> bool {
 
 pub fn split(text: String) -> Vec<MdLine> {
     let empty = DialectRegistry { byName: std::collections::HashMap::new() };
+    let chars = text.encode_utf16().map(|__u| __u as i64).collect::<Vec<i64>>();
     let mut lines: Vec<MdLine> = Vec::new();
-    let mut content: Vec<String> = Vec::new();
+    let mut lineStart = 0i64;
     let mut index = 0i64;
-    while (index < crate::runtime::_str_length(&text)) {
-        let char = crate::runtime::_str_char_at(&text, index);
-        match (char).0 {
-            10i64 => { lines.push(MdLine { content: (content).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(""), ending: "\n".to_string() });
-            content = Vec::new();
-            (index += 1i64); },
-            13i64 => { if (((index + 1i64) < crate::runtime::_str_length(&text)) && (crate::runtime::_str_char_at(&text, (index + 1i64)) == 10i64)) { lines.push(MdLine { content: (content).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(""), ending: "\r\n".to_string() });
-            (index += 2i64); } else { lines.push(MdLine { content: (content).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(""), ending: "\r".to_string() });
+    while (index < (chars.len() as i64)) {
+        let char = chars[(index) as usize].clone();
+        match (char).clone() {
+            10i64 => { lines.push(MdLine { content: crate::runtime::_str_substring(&text, lineStart, index), ending: "\n".to_string() });
+            (index += 1i64);
+            lineStart = index; },
+            13i64 => { if (((index + 1i64) < (chars.len() as i64)) && (chars[((index + 1i64)) as usize].clone() == 10i64)) { lines.push(MdLine { content: crate::runtime::_str_substring(&text, lineStart, index), ending: "\r\n".to_string() });
+            (index += 2i64); } else { lines.push(MdLine { content: crate::runtime::_str_substring(&text, lineStart, index), ending: "\r".to_string() });
             (index += 1i64); }
-            content = Vec::new(); },
-            _ => { content.push(crate::runtime::_str_substring(&text, index, (index + 1i64)));
-            (index += 1i64); },
+            lineStart = index; },
+            _ => { (index += 1i64); },
         }
     };
-    if !content.is_empty() { lines.push(MdLine { content: (content).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(""), ending: "".to_string() }); } else { (); }
+    if (lineStart < (chars.len() as i64)) { lines.push(MdLine { content: crate::runtime::_str_substring_from(&text, lineStart), ending: "".to_string() }); } else { (); }
     lines
 }
 

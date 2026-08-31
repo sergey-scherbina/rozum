@@ -241,30 +241,31 @@ const SKIP_DIRS: &[&str] =
 /// Cost tracks BYTES, not block count — 16 KB as 682 sections (25.5 s) and as 8 sections
 /// (22.8 s) cost the same — so nothing about how a document is structured avoids it.
 ///
-/// **Kept at 16 KB on 2026-08-31, and the attempt to raise it is the useful part.** Two fixes
-/// in scalascript's Rust backend (`f4e2cd38e`) made this parser 2.8× faster at every size —
-/// a self-append (`xs = xs :+ x`) now lowers to `xs.push(x)` instead of copying and cloning the
-/// whole vector per append, and the runtime's UTF-16 index helpers got an ASCII fast path
-/// (32 KB 2.768 s → 0.997 s; 256 KB 173.4 s → 61.8 s). The obvious next move was to spend that
-/// speedup on a bigger cap. It was tried at 64 KB, then at 32 KB, and MEASURED on this repo's
-/// actual `docs/specs` rather than on the synthetic benchmark:
+/// **Raised 16 KB → 64 KB on 2026-08-31, and this time the corpus says yes.** The vendored
+/// parser got ~13× faster over a series of fixes in scalascript's Rust backend (self-append →
+/// `push`, self-extend → `extend`, ASCII fast paths in the string helpers, `String.toVector`,
+/// read-only `Vec` captures by reference, and uniml scanning ref-defs by index instead of
+/// copying the tail): 256 KB 173.4 s → 13.0 s.
 ///
-///     125 files <= 16 KB    41.5 s of parse   (both caps pay this)
-///      15 files 16-32 KB    49.5 s of parse   (only a 32 KB cap pays this)
+/// Re-measured on this repo's actual `docs/specs`, the same way the earlier attempt to raise
+/// this constant was measured — and rejected — before the speedup:
 ///
-/// Raising the cap to 32 KB MORE THAN DOUBLES total reindex parse work for 15 files out of 147,
-/// i.e. it spends the entire 2.8× and more, to move coverage 88% → 98.6%. A synthetic
-/// paragraph benchmark had suggested "+10-15 s"; real specs in that band are much heavier,
-/// which is exactly why the number here comes from the corpus. So the speedup is taken as a
-/// 2.8× cheaper reindex at the SAME coverage, not as a wider cap.
+///     cap  16 KB   125 files    7.6 s     (was 41.5 s)
+///     cap  32 KB   140 files   14.2 s     (was 91.0 s)
+///     cap  64 KB   142 files   16.7 s     ← every file, syntactically
 ///
-/// The cap exists only because the parser is O(bytes²) — 2.8× is a constant, not a shape, and
-/// this repo's own 505 KB `SPRINT.md` merely went from ~7 h to ~2.5 h. Removing the cap needs
-/// the asymptotic fix: `docs/specs/ssc-rust-string-representation.md` (`ssc-rust-string-repr`
-/// in BACKLOG.md) — emulating JVM UTF-16 indexing over a Rust UTF-8 `String` costs O(i) per
-/// `charAt` even on the fast path. Phase 2 (chunking CODE, where files are routinely larger
-/// than any doc) stays blocked on that.
-pub const MAX_MARKDOWN_TREE_BYTES: usize = 16 * 1024;
+/// Full syntactic coverage now costs LESS THAN HALF what partial coverage cost before. That is
+/// what pays for the cap; the earlier 64 KB attempt was reverted precisely because the number
+/// did not, and the rule that caught it stands: against a quadratic cost, take the figure from
+/// the corpus, not from a synthetic benchmark.
+///
+/// The cap still EXISTS because the parser is still O(bytes²) — ~13× is a constant, not a shape.
+/// The remaining cost is not one bug: uniML is written in Scala's persistent-immutable idiom
+/// where append/slice/share are O(1)–O(log n), and the backend lowers `Vector` to `Vec` where
+/// each is an O(n) copy. Six profiling rounds found six instances of that one shape. The
+/// architectural fix is `ssc-rust-persistent-vector` in BACKLOG.md; phase 2 (chunking CODE,
+/// where files are routinely larger than any doc) is what needs it.
+pub const MAX_MARKDOWN_TREE_BYTES: usize = 64 * 1024;
 
 /// Files larger than this are skipped outright — a multi-megabyte blob is generated output or
 /// data, and one such file would dominate BM25's length statistics.
@@ -548,7 +549,7 @@ mod tests {
     fn oversized_markdown_degrades_to_text_but_is_indexed() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let big = format!("# Huge\n\n{}\n", "lorem ipsum dolor ".repeat(2000));
+        let big = format!("# Huge\n\n{}\n", "lorem ipsum dolor ".repeat(8000));
         assert!(big.len() > MAX_MARKDOWN_TREE_BYTES);
         fs::write(root.join("big.md"), &big).unwrap();
         fs::write(root.join("small.md"), "# Small\n\nbody\n").unwrap();
