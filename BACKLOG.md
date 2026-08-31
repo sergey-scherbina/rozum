@@ -297,18 +297,21 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   boost multiplies existing signal rather than adding new — for every code chunk equally,
   competitors included. Nothing is discriminated; the field is just scaled. Recorded because the
   idea is obvious and the story behind it is plausible, so it will be proposed again.
-- [ ] **rag-embeddings-backend — now justified by EVIDENCE, not by a guess.** Measured at k=300
-  after the lexical work: of the eleven answers still outside top-5, **five sit at ranks 13–31**
-  (ordinary ranking, may still yield to a lexical lever) and **six sit at 58, 59, 189 or score
-  zero outright**. The zero-scoring three are the case in one line each — the doc comment says the
-  same thing in different words: `"transcript … written to disk"` vs `fn append`'s *"Append one
-  message"*; `"record a room"` vs `register_room`'s *"Upsert a room"*; `"tell the room it is
-  leaving"` vs `announce_left`'s *"`left:` presence line"*. BM25 matches words and these share
-  none. Land behind the existing `Retriever` seam; judge on `crates/rozum-agent/tests/rag-eval.json`
-  (26 questions, currently 9/26 top-1 and 15/26 top-5). Cost is a resident model beside the frozen
-  4B, so it lands UNDER the residency-admission rules, not beside them.
-  NB the earlier version of this entry claimed all eleven scored zero; that was wrong and pointed
-  here for the wrong reason. The real ceiling was ranking, most of which has since been taken.
+- [ ] **rag-embeddings-backend — SPIKED 2026-08-31, and the trade is now visible. Needs a call.**
+  Measured before building anything, on the same 26 questions:
+  BM25 (ships) **9/26 & 15/26**, embeddings ALONE **7/26 & 15/26**, **RRF fusion 10/26 & 17/26**.
+  So embeddings alone LOSE; fused they win +1 top-1 and +2 top-5, because the two miss different
+  questions — that is the whole argument for carrying both.
+  Price: 336 MB model resident beside the frozen 4B (so under the residency-admission rules, with
+  a BM25 fallback when admission is refused), 41 MB of vectors on top of the 9.3 MB index, minutes
+  of background embedding per full build, and a query-time forward pass per search.
+  **+1 and +2 out of 26 for that is close enough to be a judgement call, not an obvious yes** —
+  which is why the spike stopped at the measurement. Spec: `docs/specs/rag-embeddings-backend.md`;
+  spike kept at `crates/rozum-mlx/examples/embed_spike.rs`.
+  METHOD NOTE that nearly cost the answer: the first spike used mean pooling and scored **0/26 and
+  6/26**, which reads as a decisive verdict against embeddings. Qwen3-Embedding wants LAST-token
+  pooling with `<|endoftext|>` appended and an instruction-wrapped query; its own recipe moved the
+  same model on the same corpus to 7/26 and 15/26. A model measured off-recipe measures nothing.
 - [ ] **teach-collect** — phase 0, independently shippable and FIRST (SFT under ~100
   quality pairs overfits — the dataset must accumulate ahead of any trainer): teach-mode
   toggles, 👍/👎/correction affordances on Telegram (`/teach on|off`) + UCC + CLI/TUI, one
