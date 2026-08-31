@@ -1,6 +1,0 @@
-feature/rag-ranking-truth 2026-08-31T16:50:14Z
-agent: claude-code
-heartbeat: 2026-08-31T16:50:14Z
-status: in-progress
-done-so-far: my own published claim was WRONG — answers are not scoring zero, they rank 6..95 (one absent). So the ceiling is RANKING, not vocabulary. Also found: the eval file and its spec are now indexed and rank #1 for their own questions
-next: correct the spec/backlog record, stop the eval measuring itself, fix the ranking defects (title boost on a  block is not a symbol name)
