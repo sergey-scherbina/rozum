@@ -105,11 +105,23 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   Acceptance test: `uniml/markdown` parse becomes LINEAR on ASCII input. **Recorded so nobody
   retries it:** a thread-local cache keyed by `(ptr, len)` is UNSOUND — allocation reuse (ABA)
   would serve one string's data for another, and there is no drop hook to invalidate it.
-- [ ] **rag-uniml-hoist-pure-length** — the cheapest concrete step of the item above, split out so
-  it can be picked up on its own: in the ssc Rust backend, hoist a pure `_str_length(s)` out of a
-  `while` CONDITION when `s` is not reassigned in the loop. Sound (pure function, unchanging
-  argument), no representation question, and it removes one of the two O(n)-per-iteration terms in
-  every string scanner uniML has.
+- [x] **rag-uniml-hoist-pure-length — CLOSED 2026-08-31, measured and NOT worth doing.** The
+  premise was that `_str_length(s)` in a `while` CONDITION is recomputed every iteration and is
+  O(n), making every string scanner quadratic. The first half is true (26 of 102 `_str_length`
+  calls in the emitted markdown parser sit in loop conditions); the conclusion is not. Measured
+  two ways:
+  - **Total work is LINEAR.** Instrumenting the helper: bytes scanned grows ×2.00 per input
+    doubling, ASCII and non-ASCII alike — 1.76 MB scanned for a 128 KB document. It is called on
+    LINES and LEXEMES, not on the whole file, so "O(n) per iteration" never compounds.
+  - **Removing it entirely buys nothing.** Patching `_str_length` to a bare `s.len()` (O(1), and
+    correct for the ASCII benchmark) changed the curve from 0.046/0.096/0.216/0.517/1.484 s to
+    0.045/0.095/0.212/0.519/1.392 s across 64 KB–1 MB — inside the noise. `is_ascii()` is
+    vectorised, so even the O(n) path is cheap next to everything else.
+
+  The non-ASCII quadratic that remains is therefore NOT in `length` — it is `charAt(i)` costing
+  O(i) because the ASCII prefix check is itself a scan. That is `ssc-rust-string-repr`, which
+  subsumes whatever this item could have offered.
+
 - [ ] **rag-uniml-unenforced-limits** — smaller uniML finding from the same run: `maxBlocks` and
   `maxLineCodePoints` are ACCEPTED by `MarkdownLimits` and then silently not enforced (a document
   exceeding either parses `Complete` with a full tree), while `maxNodes`/`maxDepth`/
