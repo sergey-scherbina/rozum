@@ -112,32 +112,31 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   The fix belongs in the TEST — query a phrase that does not appear in the test file — not in the
   product; excluding `#[cfg(test)]` bodies was considered and rejected, since test code is
   legitimately useful to retrieve.
-- [ ] **ssc-rust-string-repr** — **DEMOTED 2026-08-31 by measurement** (see `ssc-rust-persistent-vector`, which supersedes it as the asymptotic fix): the string work bought 2.8× of the 13×, and the two profile leaders remaining after every string fix are both `Vector` copies, not string indexing. Still real, still specced, and the riskier of the two — `"String"` is the backend's INFERENCE KEY at 19 sites and a probe produced 27 emitter refusals before a line of Rust compiled. Was described as the fix that removes
-  `MAX_MARKDOWN_TREE_BYTES` entirely. Spec: `docs/specs/ssc-rust-string-representation.md`.
-  ScalaScript's string semantics (UTF-16 code units, per JVM/JS — uniML's surrogate handling
-  depends on them) stay; the REPRESENTATION gains metadata so `length`/`charAt` are O(1) instead
-  of O(n)/O(i). Phase 1 = an `SscStr` newtype carrying a cached ASCII flag (`Deref<Target = str>`
-  keeps `format!`/`&str` sites unchanged; `SscChar` is the established precedent in the same
-  runtime); phase 2 = a lazy UTF-16 table for non-ASCII, gated on a workload that needs it.
-  Acceptance test: `uniml/markdown` parse becomes LINEAR on ASCII input. **Recorded so nobody
-  retries it:** a thread-local cache keyed by `(ptr, len)` is UNSOUND — allocation reuse (ABA)
-  would serve one string's data for another, and there is no drop hook to invalidate it.
-- [x] **rag-uniml-hoist-pure-length — CLOSED 2026-08-31, measured and NOT worth doing.** The
-  premise was that `_str_length(s)` in a `while` CONDITION is recomputed every iteration and is
-  O(n), making every string scanner quadratic. The first half is true (26 of 102 `_str_length`
-  calls in the emitted markdown parser sit in loop conditions); the conclusion is not. Measured
-  two ways:
-  - **Total work is LINEAR.** Instrumenting the helper: bytes scanned grows ×2.00 per input
-    doubling, ASCII and non-ASCII alike — 1.76 MB scanned for a 128 KB document. It is called on
-    LINES and LEXEMES, not on the whole file, so "O(n) per iteration" never compounds.
-  - **Removing it entirely buys nothing.** Patching `_str_length` to a bare `s.len()` (O(1), and
-    correct for the ASCII benchmark) changed the curve from 0.046/0.096/0.216/0.517/1.484 s to
-    0.045/0.095/0.212/0.519/1.392 s across 64 KB–1 MB — inside the noise. `is_ascii()` is
-    vectorised, so even the O(n) path is cheap next to everything else.
+- [x] **ssc-rust-string-repr — CLOSED 2026-08-31: its premise was measured and is FALSE.** The
+  item said non-ASCII is quadratic because `charAt(i)` costs O(i). Instrumenting the helper says
+  otherwise: charAt CALLS grow ×2.00 per input doubling, the slow-path walk work grows ×2.00, and
+  **the longest string ever indexed on the slow path is 86 bytes and does not grow with the
+  document**. charAt was never the asymptotic problem — it is a constant factor on short strings.
+  The migration this justified was also bigger than the item claimed: not "58 emitter sites + 17
+  helpers" but ~106 (58 `"String"` + 34 `"Vec<String>"` + 14 `"HashMap<String"`, all type-string
+  matches driving inference) plus every construction site.
 
-  The non-ASCII quadratic that remains is therefore NOT in `length` — it is `charAt(i)` costing
-  O(i) because the ASCII prefix check is itself a scan. That is `ssc-rust-string-repr`, which
-  subsumes whatever this item could have offered.
+  The real cause was found with an allocation counter, by its signature — allocation COUNT growing
+  ×2.00 (linear) while allocated BYTES grew ×3.74: the same number of allocations, each one
+  bigger. `_str_substring`'s general path materialised a `Vec<u16>` of the WHOLE string on every
+  call, which the ASCII fast path hid completely. Fixed in ~25 lines of runtime (walk
+  `char_indices` to the two offsets and slice; a code-unit index inside a surrogate pair falls
+  through to the old path). scalascript `c73b38565`: non-ASCII allocation bytes ×3.74 → **×2.00**,
+  3,242 MB → **201 MB** at 256 KB, time 0.970 s → 0.483 s.
+
+  If a future workload genuinely needs O(1) code-unit indexing, the design is still recorded in
+  `docs/specs/ssc-rust-string-representation.md` — but nothing measured today asks for it.
+- [ ] **uniml-nonascii-residual-superlinear** — after the `_str_substring` fix, non-ASCII parse
+  TIME still grows ~×3.25 per doubling while ASCII is ~×2.1. It is NOT allocation (bytes are
+  linear now, measured) and NOT `charAt` (calls and walk work both linear, measured), so one
+  compute-side term remains unaccounted for. Cheap to chase with the tools this series built:
+  the counting allocator, the sampling allocator with backtraces, and comparing two input sizes to
+  separate a quadratic site from a linear one by number rather than by argument.
 
 - [ ] **rag-uniml-unenforced-limits** — smaller uniML finding from the same run: `maxBlocks` and
   `maxLineCodePoints` are ACCEPTED by `MarkdownLimits` and then silently not enforced (a document

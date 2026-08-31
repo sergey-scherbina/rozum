@@ -1,5 +1,43 @@
 # Changelog
 
+## ssc-rust-string-repr — closed by measurement; the real defect was 25 lines away
+Completed: 2026-08-31
+
+The item was claimed to migrate every string to an `SscStr` newtype so code-unit indexing would
+be O(1). It ends without that migration, because the premise did not survive being measured.
+
+**The premise was false.** Instrumenting `_str_code_at`: calls grow ×2.00 per input doubling, the
+slow-path walk work grows ×2.00, and the longest string ever indexed on the slow path is **86
+bytes** and does not grow with the document. `charAt` is linear and only ever walks short strings.
+The migration it justified was also larger than the item stated — ~106 emitter sites, not 58,
+once `"Vec<String>"` (34) and `"HashMap<String"` (14) are counted, since those are type-string
+matches driving inference too.
+
+**The real cause, found by signature.** An allocation counter showed non-ASCII allocation COUNT
+growing ×2.00 (linear) while allocated BYTES grew ×3.25, ×3.53, ×3.74 — the same number of
+allocations, each one bigger, which is what a whole-buffer-per-call looks like from outside.
+`_str_substring`'s general path did `let units: Vec<u16> = s.encode_utf16().collect()` on EVERY
+call; the ASCII fast path added earlier hid it completely on ASCII input.
+
+Fixed in ~25 lines (scalascript `c73b38565`): walk `char_indices` to the two byte offsets and
+slice, so cost is O(until) time and O(until − from) allocation. A code-unit index landing inside a
+surrogate pair has no byte offset to slice at, so those fall through to the original path and
+answer identically — verified by RUNNING the emitted code on `"aé😀bc"` (length 6, substring(2,4)
+the whole emoji, substring(2,3) the replacement character from splitting the pair).
+
+    non-ASCII, 256 KB     before    after
+    allocation bytes      ×3.74     ×2.00 per doubling (linear)
+    memory                3,242 MB  201 MB
+    time                  0.970 s   0.483 s
+
+505/505 `backendRust/test`, full uniML suite green, all four corpora emit and `cargo build` clean,
+`v1-jit-size` PASS.
+
+One term is still unaccounted for: non-ASCII TIME grows ~×3.25 while ASCII is ~×2.1, and it is
+neither allocation nor `charAt` (both measured linear). Filed as
+`uniml-nonascii-residual-superlinear` rather than guessed at.
+
+
 ## rag-syntactic-rust-dialect — RAG phase 2: code is chunked by item, not by paragraph
 Completed: 2026-08-31
 
