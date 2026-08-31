@@ -92,8 +92,40 @@ of apparent score. The numbers above exclude hits from those two files. This is
 `rag-self-reference-contamination` arriving in the measurement rather than in the product, and it
 is the clearest possible demonstration of it.
 
-Current honest standing: **top-1 8/20, top-5 11/20**, with the remaining gap owned by ranking, not
-vocabulary.
+### What actually occupies the agent's five slots
+
+Chasing the competitors at ranks 6–95 turned up the real shape of the noise. Classifying every
+hit across the 20 questions — 100 slots in total:
+
+```text
+                 implementation   tests   import blocks   prose
+  before                     54      32               6       8
+  after                      80      12               0       8
+```
+
+**Nearly a third of what an agent was shown for "where is this implemented" was TEST code.** Not a
+scoring bug but a property of good tests: their names are English sentences
+(`single_model_gate_is_identical_with_or_without_reservation`), which is exactly the shape of a
+natural-language question, so they match one better than the terse function that does the work.
+Import blocks took another 6 for the reason already known — short and identifier-dense.
+
+`search_balanced` now apportions slots to IMPLEMENTATION chunks, with tests and prose filling the
+rest; tests are demoted, never dropped, since sometimes the test is the answer.
+
+**The hit rate did not move — 8/20 and 11/20 before and after — and that is worth stating plainly
+rather than hiding.** For these twenty questions the answer was already in the retrieved set or
+already out of reach, so the metric could not see the change. What changed is what the agent
+READS: 80 of 100 slots are implementation instead of 54. Both numbers are true and they measure
+different things; a set of questions whose answers sit at ranks 6–15 would show the difference in
+hit rate too, and building one is the obvious next refinement of the eval.
+
+A first attempt at this made things WORSE (top-1 8 → 6): detecting a test by
+`text.contains("mod tests")` marks ordinary implementation chunks, because `chunk_code` tiles a
+file and its last chunk usually carries the whole test module. The attribute has to OPEN the
+chunk. Recorded because the loose version looks obviously correct.
+
+Current honest standing: **top-1 8/20, top-5 11/20**, 80% implementation in the slots, remaining
+gap owned by ranking, not vocabulary.
 ## Out of scope
 
 - **Embeddings** (`rag-embeddings-backend`) — the justified next step, and it lands behind the

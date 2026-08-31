@@ -194,6 +194,20 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   In a corpus that is mostly code, collapsing distinct identifiers into one term loses more
   precision than the few word pairs are worth. A curated SYNONYM list remains a different, open
   bet — but it now has to beat 8/20, not fix a vocabulary problem that does not exist.
+- [x] **rag-ranking-competitors — DONE 2026-08-31.** Chased what outranks the answers at ranks
+  6–95 instead of guessing. Classifying all 100 top-5 slots across the eval: **32 were TEST code**
+  and 6 were import blocks — 38% of what an agent saw for "where is this implemented". Tests win
+  because their names are English sentences, which is the shape of the question. `search_balanced`
+  now reserves slots for IMPLEMENTATION, with tests and prose filling the rest (demoted, never
+  dropped — sometimes the test is the answer). Result: **implementation 54 → 80 of 100 slots**,
+  while top-1/top-5 stayed 8/20 and 11/20 — the hit-rate metric cannot see it because these
+  answers were already in or already out. GOTCHA worth keeping: a first cut detected tests with
+  `text.contains("mod tests")` and made top-1 8 → 6, because `chunk_code` tiles a file so the last
+  chunk carries the test module; the attribute must OPEN the chunk.
+- [ ] **rag-eval-mid-rank-questions** — the eval set cannot see slot-composition wins, because
+  every answer is either already top-5 or unreachable. Add questions whose answers currently sit
+  at ranks ~6–15 (`rag_lite.rs` at 6, `rag_chunk.rs` at 7, `fn forward` at 15 are ready-made), so
+  a ranking change shows up as hit rate rather than only as composition.
 - [x] **rag-ranking-truth — a published diagnosis of mine was wrong, corrected 2026-08-31.** The
   `rag-code-retrieval-quality` spec said the unfound answers "score zero" and that "no re-ranking
   reaches a chunk that scored nothing", which pointed the next agent at embeddings. Measured at

@@ -237,34 +237,70 @@ pub fn search_balanced(index: &dyn Retriever, query: &str, k: usize) -> Vec<Hit>
     if k == 0 {
         return Vec::new();
     }
-    // Over-fetch: the code answer may sit well below k among prose.
-    let raw = index.search(query, k.saturating_mul(4).max(20));
-    // Most of k, not half: measured, the answer is often the 4th or 5th code chunk, and giving
-    // code only half the slots loses exactly those.
-    let code_slots = (k * 4).div_ceil(5).max(1);
-    let mut picked: Vec<Hit> = Vec::new();
-    for h in raw.iter().filter(|h| is_code_chunk(&h.id)).take(code_slots) {
-        picked.push(h.clone());
+    // Over-fetch: the implementation may sit well below k among tests and prose.
+    let raw = index.search(query, k.saturating_mul(8).max(40));
+    let mut impls: Vec<&Hit> = Vec::new();
+    let mut rest: Vec<&Hit> = Vec::new();
+    for h in &raw {
+        if is_code_chunk(&h.id) && !is_test_chunk(&h.id, &h.text) && !is_import_chunk(&h.id) {
+            impls.push(h);
+        } else {
+            rest.push(h);
+        }
     }
-    for h in raw.iter().filter(|h| !is_code_chunk(&h.id)) {
+    let impl_slots = (k * 4).div_ceil(5).max(1);
+    let mut picked: Vec<Hit> = impls.iter().take(impl_slots).map(|h| (*h).clone()).collect();
+    for h in rest {
         if picked.len() >= k {
             break;
         }
         picked.push(h.clone());
     }
-    for h in raw.iter() {
+    for h in impls.iter().skip(impl_slots) {
         if picked.len() >= k {
             break;
         }
-        if !picked.iter().any(|p| p.id == h.id) {
-            picked.push(h.clone());
-        }
+        picked.push((*h).clone());
     }
-    // NOT re-sorted by score. Sorting here would undo the whole point: the reason prose wins is
-    // that it scores higher, so re-ranking the apportioned set by score puts it straight back on
-    // top and the slots become decoration. Code keeps its slots in code order, prose follows.
+    // NOT re-sorted by score. Sorting here would undo the whole point: the reason the wrong kinds
+    // of chunk win is that they score higher, so re-ranking the apportioned set by score puts
+    // them straight back on top and the classes become decoration.
     picked.truncate(k);
     picked
+}
+
+/// A TEST rather than an implementation.
+///
+/// Measured, and larger than it sounds: across the 20-question eval set, **32 of the 100 top-5
+/// slots were test chunks** — nearly a third of what an agent is shown for "where is this
+/// implemented". The cause is not a scoring bug but a property of good tests: their names are
+/// written as English sentences (`single_model_gate_is_identical_with_or_without_reservation`),
+/// which is exactly the shape of a natural-language question, so they match it better than the
+/// terse function that does the work.
+///
+/// Demoted, never dropped: sometimes the test IS the answer ("what proves this holds"), and it
+/// still fills any slot the implementations leave. Detected from the chunk's own text, so no
+/// index format change and no separate pass.
+fn is_test_chunk(id: &str, text: &str) -> bool {
+    // The attribute must OPEN the chunk, not merely appear in it. `chunk_code` tiles a file, so
+    // its last chunk usually carries the whole `mod tests { … }` tail — a `contains` therefore
+    // marks ordinary implementation chunks as tests. Measured: the loose version took top-1 from
+    // 8/20 to 6/20 by demoting real answers (`fn chunk_text`, `rag_lite.rs`).
+    if id.contains("/tests/") {
+        return true;
+    }
+    let head: String = text.chars().take(120).collect();
+    let head = head.trim_start();
+    head.starts_with("#[test]") || head.starts_with("#[tokio::test]") || head.starts_with("#[cfg(test)]")
+}
+
+/// The import block at the top of a file. `chunk_code` tiles a file, so this chunk exists in
+/// every source file, is short, and is dense with identifiers — which BM25's length
+/// normalisation rewards. It held 6 of those same 100 slots. Kept for its module `//!` doc,
+/// but it does not compete for an implementation slot.
+fn is_import_chunk(id: &str) -> bool {
+    let frag = id.split('#').nth(1).unwrap_or("");
+    frag == "use" || frag.starts_with("use ")
 }
 
 /// Whether a chunk id names source code rather than prose. By extension, which is crude and
