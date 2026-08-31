@@ -94,11 +94,25 @@ length (ABA), and the cache would serve one string's data for another. There is 
 invalidate on drop. Metadata has to live WITH the value, which means the value's type
 changes.
 
-**Why this is a smaller change than it looks.** The backend already has this exact pattern:
-`SscChar(pub i64)` is a newtype over a primitive with its own `Display`, introduced for the
-same reason (JVM char semantics do not match a Rust primitive). `Deref<Target = str>` makes
-`SscStr` transparent for reads, so the mechanical work is the type name at emission sites
-plus the trait impls, not a rewrite of string handling.
+**~~Why this is a smaller change than it looks.~~ MEASURED 2026-08-31: it is BIGGER than it
+looks, and this paragraph was wrong.** The original reasoning was that `SscChar(pub i64)` is
+the same pattern, and that `Deref<Target = str>` makes `SscStr` transparent for reads, so the
+work is "the type name at emission sites plus the trait impls". A probe disproved it: defining
+a minimal `SscStr` and flipping `mapType`'s one `String` line produced **27 emitter refusals on
+the markdown corpus alone, before a single line of Rust was compiled** — `def flatten reads
+isEmpty without parentheses … it is a collection member, not a field`, and 26 more of that shape.
+
+The reason is structural. The emitted type name `"String"` is not just an output; it is the
+**inference key** the backend uses to decide what a receiver IS. `RustCodeWalk.scala` mentions
+the literal `"String"` 57 times, 19 of them as a direct equality/`case` test driving decisions
+like no-paren `.isEmpty`/`.nonEmpty` lowering, `isKnownStringField`, and string-vs-collection
+dispatch. Changing what `mapType` returns silently rewires all of that.
+
+So phase 1 is not "rename the type at emission sites". It is: introduce the newtype, AND migrate
+every one of those inference sites to a predicate that knows both spellings, AND convert the
+~40 `to_string()` / ~31 `format!` construction sites plus ~20 runtime signatures, AND iterate
+the four corpora to green. That is a multi-session change with a real chance of subtle breakage,
+and it should be planned as one — not started as a cleanup.
 
 **Why ASCII-flag-first.** It is one bool, computed with a vectorised `is_ascii`, and it
 covers source code and nearly all documentation. The lazy UTF-16 table is strictly more
@@ -120,7 +134,49 @@ its own.
 
 ## Results
 
-(to fill at verify: the `uniml/markdown` before/after size-vs-time table showing the
-quadratic→linear shape change; `backendRust/test` count; all four corpora clean; the
-`MAX_MARKDOWN_TREE_BYTES` value the fix allows in rozum — the cap exists only because of
-this defect, and the goal is removing it.)
+**Partial — the constant is fixed, the shape is not. Phase 1 is NOT done.**
+
+Profiling before implementing (the lesson from the previous round, where the filed hypothesis
+turned out to be 11% of its problem) moved the target: the dominant cost was **not** the index
+emulation this spec was written about. `MdLine.split` was **90% of the whole markdown parse**,
+and inside it the cost was `_str_substring` **materialising a `Vec<u16>` of the entire string on
+every call** — while `split` calls it once *per character* (`text.substring(i, i+1)` to take one
+char). An O(n) allocation per character, with the allocator in the inner loop.
+
+Four sibling helpers had the same shape and are called once per scan position by the same kind
+of scanner code: `_str_substring_from`, `_str_starts_with_at`, `_str_index_of_from`,
+`_str_region_matches`. All five now take an ASCII fast path — when the relevant *prefix* is
+ASCII a byte index IS the code-unit index, so the answer is a direct byte slice or byte
+comparison, with no allocation and no walk of the whole string. General paths, and their panic
+messages, are untouched. (scalascript `1498a5f39`.)
+
+Measured, `uniml/markdown` parsing plain paragraphs, same harness:
+
+| size | before | after | |
+|---|---|---|---|
+| 4 KB | 0.027 s | 0.012 s | |
+| 8 KB | 0.092 s | 0.041 s | |
+| 16 KB | 0.355 s | 0.136 s | |
+| 32 KB | 1.359 s | 0.523 s | |
+| 64 KB | 4.924 s | 2.153 s | |
+| 256 KB | — | 32.079 s | |
+
+**2.3× at every size**, on top of the earlier 2.8× — but still ~3.9× per doubling, i.e. still
+O(n²). Semantics verified by RUNNING the emitted code, not by inspection: `"a😀b".length == 4`,
+`charAt(1)`/`charAt(2)` = 55357/56832 (the surrogate halves), `substring(1,3)` = `"😀"`,
+`"aébc".length == 4` / `substring(1,3)` = `"éb"`, `indexOf`/`startsWith` across a multi-byte
+prefix, and the out-of-range `startsWith` contract (false, not a panic). 504/504
+`backendRust/test`; all four corpora emit and `cargo build` clean; `v1-jit-size` PASS (runtime
+template only).
+
+**What still needs the newtype, and why nothing cheaper works.** `split`'s inner loop still
+calls `_str_length` (in the loop CONDITION), `_str_char_at` and `_str_substring`, and each
+re-scans the prefix to decide ASCII-ness — three O(n) SIMD scans per character. There is no
+O(1) sufficient check without metadata stored on the value: `byte index == code-unit index`
+holds only if nothing multi-byte precedes the index, and `is_char_boundary(i) && b[i] < 0x80`
+is not sufficient (`"é" + "abc"`: byte 2 is `a`, ASCII and a boundary, but its code-unit index
+is 1). So the conclusion of this spec stands — the flag must live on the value — but see the
+corrected size estimate in Design.
+
+`MAX_MARKDOWN_TREE_BYTES` in rozum therefore stays where it is; removing it is still gated on
+the real phase 1.
