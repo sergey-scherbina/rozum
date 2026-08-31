@@ -1,8 +1,8 @@
 feature/ssc-rust-string-repr 2026-08-30T23:53:38Z
 agent: claude-opus-5 (fable)
-heartbeat: 2026-08-31T00:06:58Z
-status: in-progress
-done-so-far: PROFILED FIRST — dominant cost was _str_substring collecting a Vec<u16> of the whole string per call (split calls it per CHARACTER), NOT the index emulation the spec assumed. Five runtime helpers given ASCII fast paths = 2.3x on top of the earlier 2.8x. 504/504 green, 4 corpora clean, surrogate semantics verified by RUNNING. scalascript 1498a5f39.
-next: SscStr newtype still required for LINEARITY (three prefix rescans per char in split); assessing blast radius before committing to it
+heartbeat: 2026-08-31T00:24:21Z
+status: blocked
+done-so-far: 5 runtime ASCII fast paths + String.toVector lowering fix + uniml split single-pass — cumulative 5.3x, all merged to scalascript main. Phase 1 newtype PROBED and NOT done: 27 emitter refusals, "String" is the backend inference key at 19 sites
+next: OPERATOR DECISION — the newtype is a multi-session task; remaining cost is diffuse allocation churn, not one hot spot
 cross-repo: implementation in scalascript (v1/runtime/backend/rust), then regen rozum crates/uniml-md
 spec: docs/specs/ssc-rust-string-representation.md
