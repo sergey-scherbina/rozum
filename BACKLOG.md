@@ -95,15 +95,30 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   emitted code says `no field isDefined on type Option<T>`. Both times the workaround was to
   promote the local def to a class method. Fix: record a lifted def's own declared return type
   where the lifting already computes its parameter types.
-- [ ] **uniml-treevm-quadratic-frames** — a GENERAL defect in the shared VM, found while building
-  the Rust dialect and worked around dialect-side rather than fixed. `TreeVm.addTop` rebuilds the
-  open frame on every token, and on the Rust lane `edges :+ edge` copies the frame's edges DEEPLY
-  because an edge owns its subtree — O(k²) in tokens PER FRAME. Markdown never noticed: a block
-  holds a handful of tokens. A Rust function body holds thousands. Measured at a fixed ~18 KB of
-  source: 400 small functions 1.57 s, eight large ones 3.60 s, **one single large function
-  40.85 s**. The Rust dialect sidesteps it by emitting each item body as ONE token (a structural
-  chunker slices by span and never needed a node per token), so the defect is unfixed and will
-  bite the next dialect whose frames hold many tokens.
+- [x] **uniml-treevm-quadratic-frames — DONE 2026-08-31, and the filed cause was WRONG.** The
+  symptom reproduced far more cleanly than this entry described — through plain markdown, no Rust
+  dialect needed: the same 64 KB as many small blocks parsed in 0.171 s and as one block in
+  35.203 s, **206× on document SHAPE alone**. But it was not `TreeVm.addTop` and not frame edges.
+  Splitting the two variables apart settled it: the same bytes in ONE frame cost 2.076 s as a
+  single long line and 0.068 s wrapped at 80 columns — 30× on LINE LENGTH, with the frame identical.
+  `sample` then put 100% of frames under one leaf, `MarkdownInlines.tokenize`, in a memmove.
+  The cause was a match-arm guard `isExtendedAutolinkStart(content, i, pending)` evaluated at every
+  character, with `content` — the whole line — taken by value, so the call copied 48 KB per
+  character. Fixed in the BACKEND, not the dialect (scalascript `37906bcab`): `_refParamPos` now
+  takes read-only `Vec`/`String` parameters of every def by shared reference, not only class
+  methods'. One 64 KB line 35.203 → 0.220 s (160×); Cyrillic 512 KB 1.301 → 0.263 s; emoji
+  3.193 → 0.492 s; SPRINT.md 3.244 → 2.707 s. Getting 160 emitted-code errors to 0 took five
+  separate fixes, each documented at its site — the sharpest being that the widened rewrite
+  composed with `cloneIfMoved` into `&xs.clone()`, so the signature said `&Vec` while the call
+  still copied and the optimisation read as applied while measuring as absent.
+- [ ] **uniml-single-frame-residual-superlinear** — honest remainder of the above. A single
+  enormous frame is STILL mildly super-linear: 0.018 / 0.055 / 0.215 s at 16 / 32 / 64 KB, about
+  ×3.8 per doubling, where ordinary multi-block documents are ~×2. It is 160× cheaper than it was
+  and no longer blocks anything, so this is filed rather than chased. Whoever picks it up: the
+  method that worked twice is to hold total bytes fixed and vary ONE structural variable at a time
+  (blocks-per-document, then line-length-within-a-block), which is what separated this from the
+  filed-but-wrong `TreeVm` theory; `crates/rozum-agent/examples/mdbench.rs` is the instrument, and
+  `TreeVm.addTop`'s per-token frame rebuild is still a real O(k²) shape that simply was not this.
 - [ ] **rag-smoke-test-self-reference** — the one unchecked box in `docs/specs/rag-rust-dialect.md`.
   Now that `.rs` files are indexed, `rag search "residency admission"` returns
   `rag_chunk.rs#fn e2e_smoke_own_docs` first — the test that searches for that exact phrase and so

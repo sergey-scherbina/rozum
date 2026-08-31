@@ -416,28 +416,37 @@ const SKIP_DIRS: &[&str] =
 /// one `toVector`, and finally `MdLine.split` slicing that code-unit vector rather than calling
 /// `substring` on the whole document. 256 KB went 173.4 s → 0.108 s, roughly 1600×.
 ///
-/// Re-measured 2026-08-31 against the regenerated crate, on this repo's own largest documents and
-/// on synthetic worst cases, best of 3:
+/// A second round then took read-only `Vec`/`String` parameters of EVERY generated def by shared
+/// reference instead of only class methods'. `uniml/markdown`'s inline lexer had a match-arm guard
+/// evaluated at every character of a line, holding the whole line by value — so it copied the line
+/// per character. Re-measured 2026-08-31 against that crate, best of 3:
 ///
 /// ```text
-///   SPRINT.md      503 KB   0.8% non-ASCII   3.244 s
-///   CHANGELOG.md   451 KB   0.5% non-ASCII   1.096 s
-///   BACKLOG.md     142 KB   0.5% non-ASCII   0.564 s
+///   SPRINT.md      503 KB   0.8% non-ASCII   2.707 s   (5.26 -> 3.244 -> 2.707)
+///   CHANGELOG.md   451 KB   0.5% non-ASCII   0.804 s   (2.82 -> 1.096 -> 0.804)
+///   BACKLOG.md     142 KB   0.5% non-ASCII   0.450 s   (0.75 -> 0.564 -> 0.450)
 ///
-///   Cyrillic  83% non-ASCII      32 KB 0.087   64 KB 0.170   128 KB 0.340   512 KB 1.301
-///   emoji     74% non-ASCII      32 KB 0.204   64 KB 0.402   128 KB 0.814   512 KB 3.193
+///   Cyrillic 512 KB  83% non-ASCII   1.301 -> 0.263 s
+///   emoji    512 KB  74% non-ASCII   3.193 -> 0.492 s
+///
+///   ONE 64 KB LINE (one frame, one token stream)   35.203 -> 0.220 s
+///   the same 64 KB as many small blocks             0.171 ->  0.011 s
 /// ```
 ///
-/// Every doubling costs ~2× (×1.93–2.02 across both non-ASCII series), so cost is now predictable
-/// at roughly 6.5 s/MB in the worst case measured — emoji-dense text and, separately, ASCII
-/// SPRINT.md, which land at the same rate for different reasons.
+/// The single-huge-line column is the one worth remembering: cost depends on document SHAPE, not
+/// only size. 64 KB as many blocks and 64 KB as one line differed by 206× before this, and the
+/// pathological shape is what a CODE dialect produces (one function body is one frame), which is
+/// why it mattered beyond prose.
 ///
-/// WHY A CAP AT ALL, STILL: not super-linearity any more — that is fixed — but LATENCY. A linear
-/// parser still owes ~6.5 s for a 1 MB file, and [`MAX_FILE_BYTES`] admits documents up to 4 MB, so
-/// without a cap one file could hold indexing for half a minute. 1 MB sits above every document
-/// anyone here writes (the largest is SPRINT.md at 503 KB) while bounding a single file's tree
-/// parse. Raise it only with a measurement, not an estimate: the last two raises on synthetic
-/// reasoning both had to be reverted.
+/// WHY A CAP AT ALL, STILL: not super-linearity — that is fixed for ordinary documents — but
+/// LATENCY, and one honest gap. Worst case measured is now ~1 s/MB for dense non-ASCII prose, but
+/// SPRINT.md still costs 2.707 s for 503 KB (~5.4 s/MB) on structure alone, and a single enormous
+/// frame remains mildly super-linear (~×3.8 per doubling: 0.018 / 0.055 / 0.215 s at 16/32/64 KB),
+/// just 160× cheaper than before. [`MAX_FILE_BYTES`] admits documents up to 4 MB, so without a cap
+/// one adversarially-shaped file could still hold indexing for a long time. 1 MB sits above every
+/// document anyone here writes (the largest is SPRINT.md at 503 KB) while bounding a single file's
+/// tree parse. Raise it only with a measurement, not an estimate: the first two raises were argued
+/// from a synthetic benchmark and both had to be reverted. `examples/mdbench.rs` is the instrument.
 pub const MAX_MARKDOWN_TREE_BYTES: usize = 1024 * 1024;
 
 /// Files larger than this are skipped outright — a multi-megabyte blob is generated output or
