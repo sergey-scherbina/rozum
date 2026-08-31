@@ -27,45 +27,21 @@ cargo errors) — landed in scalascript `main` 2026-08-30. Integration seam on t
 already exists: `src/rag_lite.rs` (BM25 `LexicalIndex`, `Retriever` trait, `search_documents`
 tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
 
-- [ ] **rag-uniml-parser-quadratic** — **STILL BLOCKS phase 2, but 2.8× cheaper as of 2026-08-31.**
-  uniML's `Markdown_parse` is O(bytes²). Two fixes landed in scalascript (`f4e2cd38e`), each
-  measured, and `crates/uniml-md` regenerated onto them:
-  1. **Self-append.** `xs = xs :+ x` lowered to `[&(xs)[..], &[x][..]].concat()` — a whole-vector
-     copy cloning every accumulated element on EVERY append. Now `xs.push(x)` (96 of the emitted
-     crate's 117 concat sites). This was the ORIGINAL hypothesis in this entry and it was real —
-     but it turned out to be worth only ~11%.
-  2. **The actual dominant cost, found by profiling rather than by guessing:** the runtime
-     emulates JVM UTF-16 code-unit indexing over a Rust UTF-8 `String` by WALKING
-     `encode_utf16()` — O(n) for `_str_length`, O(i) for `_str_code_at`. A scanner written the
-     ordinary way (`while i < s.length do s.charAt(i)`, exactly what `codePointCount` and the
-     block scanner do) therefore pays O(n) per iteration in BOTH, entirely inside the runtime;
-     `codePointCount` + `_str_code_at` were 40% of the profile. Given an ASCII fast path
-     (vectorised `is_ascii`, prefix-only so a mostly-ASCII doc keeps it).
-
-  Measured end to end, same benchmark: 32 KB 2.768 s → **0.997 s**; 256 KB 173.4 s → **61.8 s**.
-
-  **The speedup was NOT spent on a bigger cap, and that decision is measured.** Raising
-  `MAX_MARKDOWN_TREE_BYTES` was tried at 64 KB, then at 32 KB, and finally checked against this
-  repo's ACTUAL `docs/specs` instead of the synthetic benchmark: 125 files ≤16 KB cost 41.5 s of
-  parse, while the 15 files in the 16–32 KB band cost **49.5 s** on their own. A 32 KB cap
-  therefore MORE THAN DOUBLES total reindex parse work for 15 files out of 147 — it spends the
-  whole 2.8× and more to move coverage 88% → 98.6%. (The synthetic estimate had said "+10–15 s";
-  real specs in that band are much heavier. Twice now the cap arithmetic looked fine and the
-  corpus said otherwise — take the number from the corpus.) The cap stays 16 KB and the win is
-  taken as a 2.8× cheaper reindex at the same coverage.
-
-  **What is left, and why it is a design decision rather than another patch:** the SHAPE is still
-  O(n²) — the ASCII fast path's prefix check is itself O(i). 505 KB `SPRINT.md` went ~7 h → ~2.5 h,
-  which is still not usable, and CODE files are routinely larger than docs. Three candidate fixes,
-  in increasing order of cost:
-  - **Hoist `_str_length` out of loop CONDITIONS** (`while i < s.length`) — it is pure and the
-    string does not change, yet it is recomputed every iteration. A sound lowering optimisation,
-    kills one of the two O(n)-per-iteration terms. Cheapest real next step.
-  - **Cache the UTF-16 expansion per string.** Keying on `(ptr, len)` is NOT sound — allocation
-    reuse (ABA) would serve another string's data — so this needs a real answer, not a hash.
-  - **Change the representation** so code-unit indexing is O(1) (e.g. carry a UTF-16 buffer, or
-    make the backend prove ASCII once at construction). Largest, and the only one that removes
-    the quadratic outright.
+- [x] **rag-uniml-parser-quadratic — DONE 2026-08-31.** `Markdown_parse` was O(bytes²); it is now
+  linear in size for ordinary documents, and phase 2 (code) shipped on top of it. 256 KB went
+  173.4 s → 0.108 s (~1600×) over four rounds, each of which killed the previous round's cause:
+  eager `Vector` clones (real, 11%), the UTF-16-over-UTF-8 `charAt` emulation (real, 2.8× of 13×),
+  `_str_substring` allocating per call plus `xs = xs ++ ys` copying the accumulator per token, and
+  finally `MdLine.split` — introduced by round 3's own fix, because `substring` counts from the
+  START of the string and so costs O(index) on this backend.
+  Then `uniml-treevm-quadratic-frames` removed the last 160× on pathological SHAPE.
+  **The cap is no longer the coverage limit it was.** This entry's central decision — keep
+  `MAX_MARKDOWN_TREE_BYTES` at 16 KB because the 16–32 KB band cost more than all 125 smaller files
+  combined — was correct against a quadratic parser and is obsolete against a linear one. The cap is
+  1 MB now, above every document in the repo, and a full reindex reports **0 large .md on the text
+  path**: coverage went 88% → 100%. `rozum rag index` = 2648 files → 46,733 chunks.
+  The durable lesson is the one this entry already recorded twice and then a third time: cap
+  arithmetic must come from the corpus, never from a synthetic benchmark.
 - [ ] **ssc-rust-persistent-vector** — **the O(n²) class itself, and the successor to the two
   items below.** Spec: `docs/specs/ssc-rust-persistent-vector.md`. Scala's `Vector` is persistent
   (append/slice/share O(1)–O(log n)); the Rust backend lowers it to `Vec<T>`, where each is an
@@ -89,6 +65,17 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   shipped in this series (self-append → `push`, self-extend → `extend`) are exactly this shape and
   were worth 2–4× each. Re-measure after: if the curve goes linear,
   `ssc-rust-persistent-vector` closes without a representation change at all.
+
+  **Update 2026-08-31 — the premise held, and the curve DID go linear.** The biggest single step
+  was not proving clones dead but making them unnecessary: read-only `Vec`/`String` parameters of
+  every def are now taken by shared reference (`uniml-treevm-quadratic-frames`), so the by-value
+  calling convention this entry names as the cause no longer applies to them — 59 `&Vec` and 70
+  `&String` parameters in the emitted crate today. Ordinary documents are now ~×2 per doubling on
+  both ASCII and non-ASCII. Clone volume is still high in absolute terms (1414 sites against 101
+  `push`), so the counting idea keeps its value — but it is no longer on the critical path, and
+  the next measurement should establish whether the REMAINING clones cost anything before more
+  machinery is built for them. `uniml-single-frame-residual-superlinear` is the one shape still
+  above ×2 and is the honest place to look first.
 - [ ] **ssc-rust-lifted-def-return-types** — small backend gap, found twice now: `.isDefined` /
   `.get` (and any other return-type-driven lowering) do not resolve on a call to a LIFTED LOCAL
   def, because its declared return type never reaches the global `_returnTypes` table — the
@@ -165,10 +152,10 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   exceeding either parses `Complete` with a full tree), while `maxNodes`/`maxDepth`/
   `maxSourceCodePoints`/`maxTokenCodePoints` do halt. A limit that cannot be relied on is worse
   than one that is absent. Fix in scalascript's uniml/markdown, or drop the two fields.
-- [ ] **rag-syntactic-rust-dialect** — a "Rust-ish" uniML dialect for chunking CODE: structural,
-  not a grammar — `fn`/`impl`/`struct`/`mod` keywords + brace matching, string/comment aware;
-  `dialect/Literal.scala` is the lossless-fallback template, `uniml/markdown` the worked example
-  of a real dialect. Lives in scalascript's `uniml/`, then regen-vendored into rozum like phase 1.
+- [x] **rag-syntactic-rust-dialect — DONE.** `uniml/rust` exists in scalascript (`RustLexer` +
+  `RustDialect`, structural: keyword + brace-depth item finder, string/comment aware) and
+  `rag_chunk::chunk_code` parses `.rs` through it, so code is chunked by item rather than by
+  paragraph. Phase 2 of `docs/specs/syntactic-rag.md` is shipped.
 - [ ] **rag-embeddings-backend** — swap BM25 for embeddings behind the EXISTING `Retriever` trait
   (rag-lite's own comment names this as the planned follow-up). Local-only, must fit alongside the
   frozen 4B under the residency-admission rules; BM25 stays as the zero-model fallback.
