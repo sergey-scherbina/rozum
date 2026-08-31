@@ -1,7 +1,7 @@
 feature/rag-syntactic-rust-dialect 2026-08-31T10:54:18Z
 agent: claude-opus-5 (fable)
-heartbeat: 2026-08-31T11:22:45Z
+heartbeat: 2026-08-31T13:05:00Z
 status: in-progress
-done-so-far: dialect + 2 backend gaps fixed (loop-bound clone, qualified ctor defaults), merged corpus emits and cargo builds clean, uniml-md regenerated with the rust dialect, chunk_code + .rs routing + tests written
-next: finish rozum-side test run, full verification, commit both branches
+done-so-far: dialect + 2 backend gaps fixed; PERF: found+fixed a quadratic (TreeVm.addTop deep-copies frame edges per token on the Rust lane -> O(k^2) per frame; worked around by coalescing item bodies into one VM token) plus O(offset) lexeme slicing (windowed lexer). 40 KB 3.18s -> 0.204s, one-huge-fn 40.8s -> 0.008s, 200 KB 136s -> 4.4s. uniml 14/14 + full suite green; rozum rag_chunk 17/17. Committed+pushed both branches.
+next: full rozum lib test, index_project timing over crates/, spec Results + Behavior boxes, room post
 plan-after: operator 2026-08-31 chose order A -> V -> B: this item, then rag-uniml-hoist-pure-length, then ssc-rust-string-repr
