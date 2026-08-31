@@ -1,6 +1,0 @@
-feature/rag-rank-next 2026-08-31T18:23:40Z
-agent: claude-code
-heartbeat: 2026-08-31T18:23:40Z
-status: in-progress
-done-so-far: metric now sensitive (raw 4/26 vs 8/26); 80% implementation in slots
-next: analyse remaining misses for a structural cause, one lever, measure
