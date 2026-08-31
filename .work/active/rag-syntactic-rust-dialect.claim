@@ -1,7 +1,7 @@
 feature/rag-syntactic-rust-dialect 2026-08-31T10:54:18Z
 agent: claude-opus-5 (fable)
-heartbeat: 2026-08-31T13:05:00Z
-status: in-progress
-done-so-far: dialect + 2 backend gaps fixed; PERF: found+fixed a quadratic (TreeVm.addTop deep-copies frame edges per token on the Rust lane -> O(k^2) per frame; worked around by coalescing item bodies into one VM token) plus O(offset) lexeme slicing (windowed lexer). 40 KB 3.18s -> 0.204s, one-huge-fn 40.8s -> 0.008s, 200 KB 136s -> 4.4s. uniml 14/14 + full suite green; rozum rag_chunk 17/17. Committed+pushed both branches.
-next: full rozum lib test, index_project timing over crates/, spec Results + Behavior boxes, room post
+heartbeat: 2026-08-31T14:05:00Z
+status: ready-for-review (NOT merged, claim NOT released — per fork directive)
+done-so-far: COMPLETE. scalascript feature/uniml-rust-dialect: dialect + 2 backend gaps + perf fix (4 commits). rozum feature/rag-syntactic-rust-dialect: vendored crate + chunk_code + spec-verify (3 commits). Verified: backendRust 504/504, full uniml suite, unimlRust 14/14 (incl. losslessness over all crates/), rozum-agent 152/152. 9/10 behavior boxes; box 8 left unchecked on purpose (a code chunk displaced the residency docs from rank 1 — the e2e test that queries that phrase). KEY FINDING: TreeVm.addTop is O(k^2) in tokens per frame on the Rust lane; worked around dialect-side, still live for any future large-frame dialect.
+next: operator review; then V (rag-uniml-hoist-pure-length) and B (ssc-rust-string-repr) — the latter is what would make code indexing linear
 plan-after: operator 2026-08-31 chose order A -> V -> B: this item, then rag-uniml-hoist-pure-length, then ssc-rust-string-repr
