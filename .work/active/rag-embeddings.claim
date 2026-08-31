@@ -1,0 +1,6 @@
+feature/rag-embeddings 2026-08-31T19:50:28Z
+agent: claude-code
+heartbeat: 2026-08-31T19:50:28Z
+status: in-progress
+done-so-far: risk retired — Qwen3Model.forward returns hidden states before the LM head, field is public, no fork change needed
+next: SPIKE FIRST — measure whether embeddings actually fix the 6 semantic misses, before building any plumbing
