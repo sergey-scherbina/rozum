@@ -1,0 +1,6 @@
+feature/rag-code-retrieval-quality 2026-08-31T16:27:51Z
+agent: claude-code
+heartbeat: 2026-08-31T16:27:51Z
+status: in-progress
+done-so-far: scope cleaned (46733->10530 chunks). BM25 still ranks code by word overlap; specs about retrieval outrank the code they describe
+next: eval set FIRST (~20 real questions, each labelled with the answer chunk and whether grep beats it), then the free structural lever (chunk kind + symbol name are known and discarded), measure, only then consider embeddings
