@@ -1454,6 +1454,62 @@ mod tests {
         assert!(hint.contains("rozum rag index"), "the hint must name the fix: {hint}");
     }
 
+    /// The question this whole design turns on: can an agent keep working while the index is
+    /// still being built, and pick it up the moment it lands — WITHOUT restarting?
+    ///
+    /// Asserted inside ONE proxy instance, because that is where it could go wrong: the index is
+    /// held in memory and the cheap `tried` flag exists precisely to stop a missing index being
+    /// re-read on every call. If that flag latched, the answer would be "restart your agent",
+    /// and the background warmup would be worth very little — an agent session outlives the build
+    /// it started.
+    #[tokio::test]
+    async fn an_index_that_lands_mid_session_is_picked_up_without_a_restart() {
+        let project = tempdir().unwrap();
+        let root = project.path();
+        std::fs::write(root.join("notes.md"), "# Notes\n\nzzq-live-pickup-sentinel here\n").unwrap();
+        let proxy = DaemonProxy::build(
+            root.join("meeting.sock"),
+            Some(root.to_string_lossy().into_owned()),
+            "claude".into(),
+            false,
+        );
+
+        // Before: no index. Work continues — the answer says so and points at grep, rather than
+        // returning an empty list that reads as "this project contains nothing like that".
+        let before = tool_result_json(
+            &proxy
+                .rag_search(Parameters(RagSearchParams {
+                    query: "zzq-live-pickup-sentinel".into(),
+                    top_k: None,
+                }))
+                .await,
+        );
+        assert_eq!(before["no_index"], true, "got {before}");
+        assert!(before["results"].as_array().is_some_and(|r| r.is_empty()));
+
+        // The build lands, as the background warmup would have it.
+        let root_owned = root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            rozum_agent::rag_chunk::index_and_save(&root_owned).unwrap()
+        })
+        .await
+        .unwrap();
+
+        // After: the SAME instance serves it. No restart, no second tool, no user action.
+        let after = tool_result_json(
+            &proxy
+                .rag_search(Parameters(RagSearchParams {
+                    query: "zzq-live-pickup-sentinel".into(),
+                    top_k: None,
+                }))
+                .await,
+        );
+        assert!(after["no_index"].is_null(), "the index is there now: {after}");
+        let ids: Vec<&str> =
+            after["results"].as_array().unwrap().iter().filter_map(|r| r["id"].as_str()).collect();
+        assert!(ids.iter().any(|i| i.contains("notes.md")), "got {ids:?}");
+    }
+
     /// The end an agent actually sees: a hit that names `path#item` so it can open the file, and
     /// the index's age alongside, so a stale answer is visibly stale rather than quietly wrong.
     #[tokio::test]
