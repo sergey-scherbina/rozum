@@ -106,6 +106,67 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   (blocks-per-document, then line-length-within-a-block), which is what separated this from the
   filed-but-wrong `TreeVm` theory; `crates/rozum-agent/examples/mdbench.rs` is the instrument, and
   `TreeVm.addTop`'s per-token frame rebuild is still a real O(k²) shape that simply was not this.
+### RAG: agents doing ORDINARY CODE WORK must use it (operator, 2026-08-31)
+
+The operator set both the goal and the primary case: **RAG is first of all for agents working
+on code day to day** — not the chat assistant, not meetings. Everything below is ordered by
+that, not by how interesting the work is.
+
+**The bar is not "RAG works", it is "RAG beats what the agent already has."** A coding agent
+already has grep, glob and Read, and they are exact, instant and never stale. Retrieval earns a
+call only where those lose: the exact token is unknown (a concept, a symptom, "where is
+admission decided"), the answer is spread over files that share no literal string, or the agent
+is new to an area and needs the shape before the detail. A tool that returns what `grep -rn`
+would have returned, slower and less precisely, will be correctly ignored. Design and evaluate
+against that bar explicitly — including a "should this have been grep?" check in the eval set.
+
+Priority is set by one measured fact: **`search_documents` is written and registered NOWHERE.**
+`crates/rozum-agent/src/rag_lite.rs:143` builds the tool; the only callers are its own unit test
+and the CLI — no gateway, no MCP server, no agent loop. `rag-embeddings-backend` was the item
+asked for and is P2 here because better ranking behind a tool nobody is served is worth nothing.
+
+Baseline measured 2026-08-31: 2648 files → 46,733 chunks, 31.4 MB index, 33 s full build, 0.35 s
+per search (re-reads the whole 31 MB from disk every call). Code retrieval quality is the known
+weak spot and it is BM25's, not the chunker's: `rag search "read-only parameter shared reference"`
+returns `struct SandboxPolicy` first — word overlap with no notion of meaning — while the same
+index answers prose queries correctly (`"residency admission queue"` → the right spec, top hit).
+
+- [ ] **rag-expose-to-agents (P0)** — the one that makes the rest matter. Two surfaces, both
+  already built and both unconnected:
+  1. **MCP.** `crates/rozum-meeting/src/meeting/mcp_server.rs` is the server every agent in this
+     project is already attached to (`meeting.*`, `rooms.*`). One more `#[tool]` — `rag.search`
+     — and every claude/codex/nadia session gets project retrieval with no client config change.
+     Hold the index in memory in the server: 0.35 s per call is a disk reload, not a search.
+  2. **In-process agent loop.** `MultiToolSource` already composes `CallbackToolSource` with
+     `McpToolSource` (`docs/specs/mcp-toolsource.md`), so `rag_lite::…` needs registering, not
+     writing. This is the path the local Qwen assistant and the cascade take.
+  NOT via gateway-side injection into every request: `reference` tool-schema bloat is measured
+  (~4.9K tokens of schema per request, which is why `--lean` exists), and a tool the client did
+  not ask for is exactly that cost on every call. MCP is opt-in by construction.
+- [ ] **rag-index-freshness (P1)** — for CODE this is not hygiene, it is correctness. Docs drift
+  slowly; a working tree changes under the agent on every edit it itself makes, so a stale index
+  answers confidently out of code that no longer exists and the agent cannot tell. Today there is
+  no freshness tracking of any kind (no mtime, no digest — grep says so) and every build is from
+  scratch at 33 s, which is far too slow to run per edit. Two parts: incremental reindex keyed on
+  path+mtime+size, and a decision on WHEN it runs (on-demand when the tool notices a stale entry,
+  a post-commit hook, or a watcher — pick the cheapest that cannot silently drift). Until this
+  exists the tool should report the index's age with its results, so a stale answer is visibly
+  stale rather than quietly wrong. Lands with or immediately behind P0.
+
+- [ ] **rag-code-retrieval-quality (P2)** — the sharp end of the "beat grep" bar, and where
+  `rag-embeddings-backend` actually belongs. Measured today: BM25 ranks prose correctly and code
+  by word overlap, which for code is close to useless (a query about parameter passing returned a
+  sandbox struct). Two candidate levers and they are NOT the same bet:
+  - **embeddings behind the existing `Retriever` trait** (the filed item) — buys concept queries,
+    costs a model resident alongside the frozen 4B, so it lands under the residency-admission
+    rules, not beside them;
+  - **structure-aware lexical** — the chunker already knows each chunk is a `fn`/`impl`/`struct`
+    (`chunk_code` parses through `uniml/rust`), and that signal is currently thrown away at index
+    time. Symbol-name and kind weighting is free, needs no model, and may cover much of the gap.
+  Measure the cheap one first, then decide whether the model is still needed. **Build the eval set
+  before either**: ~20 real questions from actual sessions in this repo, each labelled with the
+  answer chunk AND with whether grep would have found it faster — that label is what keeps the
+  work honest about the bar above.
 - [ ] **rag-smoke-test-self-reference** — the one unchecked box in `docs/specs/rag-rust-dialect.md`.
   Now that `.rs` files are indexed, `rag search "residency admission"` returns
   `rag_chunk.rs#fn e2e_smoke_own_docs` first — the test that searches for that exact phrase and so
