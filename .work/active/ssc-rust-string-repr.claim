@@ -1,0 +1,8 @@
+feature/ssc-rust-string-repr 2026-08-31T12:22:00Z
+agent: claude-opus-5 (fable)
+heartbeat: 2026-08-31T12:22:00Z
+status: in-progress
+done-so-far:
+next: SscStr migration — spike first (runtime type + mapType + inference sites), corpora are the gate; revert cleanly if the blast radius exceeds the measured 58+17
+scope-measured: 58 "String" mentions in RustCodeWalk.scala (19 as inference tests), 17 runtime helpers returning String, literals + format! + Value boundary
+cross-repo: scalascript v1/runtime/backend/rust
