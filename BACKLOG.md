@@ -66,7 +66,25 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   - **Change the representation** so code-unit indexing is O(1) (e.g. carry a UTF-16 buffer, or
     make the backend prove ASCII once at construction). Largest, and the only one that removes
     the quadratic outright.
-- [ ] **ssc-rust-string-repr** — the ASYMPTOTIC fix for the item above, and the one that removes
+- [ ] **ssc-rust-persistent-vector** — **the O(n²) class itself, and the successor to the two
+  items below.** Spec: `docs/specs/ssc-rust-persistent-vector.md`. Scala's `Vector` is persistent
+  (append/slice/share O(1)–O(log n)); the Rust backend lowers it to `Vec<T>`, where each is an
+  O(n) copy — so idiomatic Scala is silently quadratic. Six profiling rounds on `uniml/markdown`
+  found six hot spots and every one was that shape; the fixes shipped (~13× cumulative, 256 KB
+  173.4 s → 13.0 s) but the curve never changed slope — each fix only revealed the next instance.
+  **Phase 1 is a MEASUREMENT, not a change**: `Vec` vs a persistent RRB vector vs copy-on-write
+  `Rc<Vec>`, on the real corpus, ratios reported. CoW is the a-priori favourite (this parser
+  iterates and indexes constantly, which is where RRB pays its constant, while what the six
+  findings actually needed was cheap APPEND and cheap SHARE). "No candidate wins" is a valid
+  outcome that closes the item with the table. Removing `MAX_MARKDOWN_TREE_BYTES` and unblocking
+  RAG phase 2 is what phase 2 of this buys.
+- [ ] **ssc-rust-lifted-def-return-types** — small backend gap, found twice now: `.isDefined` /
+  `.get` (and any other return-type-driven lowering) do not resolve on a call to a LIFTED LOCAL
+  def, because its declared return type never reaches the global `_returnTypes` table — the
+  emitted code says `no field isDefined on type Option<T>`. Both times the workaround was to
+  promote the local def to a class method. Fix: record a lifted def's own declared return type
+  where the lifting already computes its parameter types.
+- [ ] **ssc-rust-string-repr** — **DEMOTED 2026-08-31 by measurement** (see `ssc-rust-persistent-vector`, which supersedes it as the asymptotic fix): the string work bought 2.8× of the 13×, and the two profile leaders remaining after every string fix are both `Vector` copies, not string indexing. Still real, still specced, and the riskier of the two — `"String"` is the backend's INFERENCE KEY at 19 sites and a probe produced 27 emitter refusals before a line of Rust compiled. Was described as the fix that removes
   `MAX_MARKDOWN_TREE_BYTES` entirely. Spec: `docs/specs/ssc-rust-string-representation.md`.
   ScalaScript's string semantics (UTF-16 code units, per JVM/JS — uniML's surrogate handling
   depends on them) stay; the REPRESENTATION gains metadata so `length`/`charAt` are O(1) instead

@@ -1,5 +1,59 @@
 # Changelog
 
+## ssc-rust-string-repr — ~13× on the parser, full syntactic coverage of the docs, and the real diagnosis
+Completed: 2026-08-31 (the item stays open; see below)
+
+Claimed to build an `SscStr` newtype so JVM UTF-16 code-unit indexing over a Rust UTF-8
+`String` would be O(1) instead of O(i). It ended somewhere more useful: **the string
+representation was not the main defect**, and six rounds of profiling — each one measuring
+rather than reasoning — found six instances of a single, different shape.
+
+Shipped to scalascript `main`, each verified and separately committed:
+1. **Self-extend** `xs = xs ++ ys` → `Vec::extend`. This sat in `UniML_parse`'s OWN per-token
+   loops (eight sites on `tokens`, `roots`, `diagnostics`), copying the whole accumulated
+   vector once per TOKEN. 256 KB parse 61.8 s → 14.4 s on its own. It also exposed a bug in
+   the guard both self-mutation rewrites share: `readsName` counted a FIELD spelled like the
+   variable (`stepped.batch.diagnostics`) as a read of it, so the rewrite silently refused
+   exactly the sites it was written for. `readsNameAsValue` walks only a Select's qualifier.
+2. **ASCII fast paths** for five more runtime string helpers — the worst, `_str_substring`,
+   materialised a `Vec<u16>` of the ENTIRE string on every call while the line splitter called
+   it once per character.
+3. **`(s: String).toVector`** — a lowering that could not fire (its receiver test was purely
+   syntactic, so a `String` PARAMETER missed it) and would have been wrong if it had (`Vec<char>`
+   is code points; `charAt` is code units). Now `encode_utf16()` as `Vec<i64>`. This gives any
+   index-based scanner a cheap escape: one hoisted `val chars = text.toVector` pays O(n) once.
+4. **Read-only `Vec` captures by reference** — a lifted local def's captured `val` was always
+   passed by value, i.e. `.clone()` of a whole vector at every call site.
+5. **uniML: scan ref-defs by index**, not by copying the tail. `scanRefDef` already took a start
+   index, so `lines.drop(index)` was never needed — and the caller ran the whole expression
+   TWICE per line to reach `.get`. O(log n) on the JVM, O(n) here.
+
+**Cumulative: 32 KB 2.768 s → 0.230 s; 256 KB 173.4 s → 13.0 s (~13×).** 504/504
+`backendRust/test`, 53/53 uniML markdown tests on the JVM, all four uniML corpora emit and
+`cargo build` clean, `v1-jit-size` ratchets bumped with attributed entries.
+
+In rozum: `crates/uniml-md` regenerated onto it, and `MAX_MARKDOWN_TREE_BYTES` raised 16 → 64 KB
+— **every** file in `docs/specs` is now chunked syntactically (was 88%), and full coverage costs
+16.7 s where partial coverage used to cost 41.5 s. The e2e agrees: 535 s against 571 s before,
+covering more. An earlier attempt to raise this same constant was REVERTED on measurement two
+days' work ago; the rule that caught it is now recorded next to the constant — against a
+quadratic cost, take the figure from the corpus, not from a synthetic benchmark.
+
+**The item stays OPEN, and the diagnosis is the deliverable.** The curve never changed slope
+(~3.9× per doubling throughout); each fix only revealed the next instance. What remains is not
+a bug but an impedance mismatch: uniML is written in Scala's persistent-immutable idiom, where
+append, slice and share are O(1)–O(log n) and copying is not real, while the backend lowers
+`Vector` to `Vec`, where each of those is an O(n) copy. Specced as
+`ssc-rust-persistent-vector`, whose phase 1 is deliberately a MEASUREMENT (`Vec` vs persistent
+RRB vs copy-on-write `Rc<Vec>`) rather than a chosen structure — picking before measuring is
+precisely what cost this item its first round. `ssc-rust-string-repr` is demoted with it: real,
+but 2.8× of the 13×, and the riskier change (`"String"` is the backend's inference key at 19
+sites; a probe produced 27 emitter refusals before a line of Rust compiled).
+
+Two smaller backend gaps were found and recorded: `.isDefined`/`.get` do not resolve on a call
+to a lifted local def (its return type never reaches the global table — worked around twice by
+promoting the def to a class method), filed as `ssc-rust-lifted-def-return-types`.
+
 ## rag-uniml-parser-quadratic — the parser is 2.8× faster, and the hypothesis it was filed on was 11% of the problem
 Completed: 2026-08-31
 
