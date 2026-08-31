@@ -1,5 +1,45 @@
 # Changelog
 
+## rag-syntactic-rust-dialect — RAG phase 2: code is chunked by item, not by paragraph
+Completed: 2026-08-31
+
+`search_documents` now returns the function you meant. Indexing this repo yields 10,490 chunks
+over 489 files (0 degraded): 6,427 from `.rs` at a mean of 713 B, 2,390 from `.md` at 1,243 B —
+code chunks come out TIGHTER than prose, which is what an item boundary should give. Citation
+ids read as intended (`rag_chunk.rs#fn chunk_code`).
+
+`uniml/rust` is a new dialect: a lossless lexer (nested block comments, raw strings with hashes,
+`'a` as a lifetime rather than an unterminated char) plus a brace-depth item finder. STRUCTURAL,
+not a grammar — a chunker needs boundaries, and the lexer exists only so a brace inside a string
+or comment cannot invent one. Losslessness is verified byte-for-byte over every `.rs` in
+`crates/`, at both the lexer and the dialect level.
+
+**The finding worth keeping is a defect in the SHARED VM, not in the dialect.** The dialect was
+correct early and then unusably slow — a 200 KB file had not finished after two minutes. The
+first guess (blame `substring`, build a windowed lexer) measured NO improvement; profiling found
+`UniNode::clone`. `TreeVm.addTop` rebuilds the open frame per token, and `edges :+ edge` copies
+the frame's edges deeply because an edge owns its subtree: O(k²) in tokens PER FRAME. At a fixed
+~18 KB of source — 400 small functions 1.57 s, eight large ones 3.60 s, one single large function
+**40.85 s**. Markdown never noticed because a block holds a handful of tokens. Worked around
+dialect-side (each item body is emitted as one token, since a structural chunker slices by span)
+rather than by rewriting the shared VM: 200 KB 136 s → 4.4 s, one-huge-function 40.85 s → 0.008 s.
+**The O(k²) is still there** and is filed as `uniml-treevm-quadratic-frames`.
+
+Three ssc→Rust backend gaps were fixed along the way — a value bound outside a `while` and read
+by value inside it, a qualified constructor reading a same-named constructor's defaults, and
+(reported by the dialect work, reproduced and fixed here) **`.length` on a String taken out of a
+local `Vector[String]` returning BYTES instead of UTF-16 code units**. That last one is a silent
+correctness bug: measured on `"aé"`, the same string gave 2 named directly and 3 via the vector,
+where the JVM says 2 for both. It compiles, it runs, and it is wrong only outside ASCII.
+
+505/505 `backendRust/test`, full uniML suite green, `unimlRust` 14/14, `rozum-agent` 152/152, all
+four existing corpora still emit and `cargo build` clean, `v1-jit-size` PASS.
+
+One behavior box is deliberately unchecked and filed as `rag-smoke-test-self-reference`: the
+docs-first assertion now fails because the top hit is the test that searches for that very phrase
+and therefore contains it. Self-reference, not code drowning prose.
+
+
 ## ssc-rust-reduce-clone-volume — the markdown parse is LINEAR, 615x faster, and the RAG cap is effectively gone
 Completed: 2026-08-31
 

@@ -95,6 +95,23 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   emitted code says `no field isDefined on type Option<T>`. Both times the workaround was to
   promote the local def to a class method. Fix: record a lifted def's own declared return type
   where the lifting already computes its parameter types.
+- [ ] **uniml-treevm-quadratic-frames** — a GENERAL defect in the shared VM, found while building
+  the Rust dialect and worked around dialect-side rather than fixed. `TreeVm.addTop` rebuilds the
+  open frame on every token, and on the Rust lane `edges :+ edge` copies the frame's edges DEEPLY
+  because an edge owns its subtree — O(k²) in tokens PER FRAME. Markdown never noticed: a block
+  holds a handful of tokens. A Rust function body holds thousands. Measured at a fixed ~18 KB of
+  source: 400 small functions 1.57 s, eight large ones 3.60 s, **one single large function
+  40.85 s**. The Rust dialect sidesteps it by emitting each item body as ONE token (a structural
+  chunker slices by span and never needed a node per token), so the defect is unfixed and will
+  bite the next dialect whose frames hold many tokens.
+- [ ] **rag-smoke-test-self-reference** — the one unchecked box in `docs/specs/rag-rust-dialect.md`.
+  Now that `.rs` files are indexed, `rag search "residency admission"` returns
+  `rag_chunk.rs#fn e2e_smoke_own_docs` first — the test that searches for that exact phrase and so
+  contains it verbatim. That is self-reference from indexing our own test source, NOT code
+  crowding out prose (the other probes show code and prose rank correctly against each other).
+  The fix belongs in the TEST — query a phrase that does not appear in the test file — not in the
+  product; excluding `#[cfg(test)]` bodies was considered and rejected, since test code is
+  legitimately useful to retrieve.
 - [ ] **ssc-rust-string-repr** — **DEMOTED 2026-08-31 by measurement** (see `ssc-rust-persistent-vector`, which supersedes it as the asymptotic fix): the string work bought 2.8× of the 13×, and the two profile leaders remaining after every string fix are both `Vector` copies, not string indexing. Still real, still specced, and the riskier of the two — `"String"` is the backend's INFERENCE KEY at 19 sites and a probe produced 27 emitter refusals before a line of Rust compiled. Was described as the fix that removes
   `MAX_MARKDOWN_TREE_BYTES` entirely. Spec: `docs/specs/ssc-rust-string-representation.md`.
   ScalaScript's string semantics (UTF-16 code units, per JVM/JS — uniML's surrogate handling
