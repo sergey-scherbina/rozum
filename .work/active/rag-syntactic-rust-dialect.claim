@@ -1,7 +1,7 @@
 feature/rag-syntactic-rust-dialect 2026-08-31T10:54:18Z
 agent: claude-opus-5 (fable)
-heartbeat: 2026-08-31T10:54:18Z
+heartbeat: 2026-08-31T11:05:24Z
 status: in-progress
-done-so-far:
-next: spec first (docs/specs/rag-rust-dialect.md), then a structural Rust-ish uniML dialect for chunking CODE
+done-so-far: uniml/rust dialect written + wired into build; 9/9 unit tests; LOSSLESS over rozum crates/ (159 files, 3.78M chars, 6125 items). scalascript branch feature/uniml-rust-dialect pushed.
+next: ssc->Rust emit of the merged rust corpus, fix lowering gaps, then vendor into rozum + chunk_code
 plan-after: operator 2026-08-31 chose order A -> V -> B: this item, then rag-uniml-hoist-pure-length, then ssc-rust-string-repr
