@@ -1,5 +1,5 @@
 # GENERATED CRATE — do not edit by hand. scripts/regen-uniml-md.sh rewrites all of it.
-# Source: scalascript uniml core+markup+markdown+rust at 37906bcab0c3075ef8c6a2f58a89a496295fa013, via ssc-tools emit-rust.
+# Source: scalascript uniml core+markup+markdown+rust at 95f95f07090c92b224ccd7dcd56dab037c00704c, via ssc-tools emit-rust.
 [package]
 name = "uniml-md"
 version = "0.1.0"

@@ -87,8 +87,11 @@ pub fn chunk_markdown(path: &str, text: &str) -> Vec<Chunk> {
 }
 
 /// [`chunk_markdown`] with caller-supplied limits — exists so the fallback path is TESTABLE
-/// (a tiny `maxBlocks` makes uniML halt with a diagnostic on an ordinary document; fabricating
-/// a document that ordinary limits refuse would need megabytes).
+/// (a tiny limit makes uniML halt with a diagnostic on an ordinary document; fabricating a
+/// document that ordinary limits refuse would need megabytes). The example this comment used to
+/// give was `maxBlocks`, which at the time was ACCEPTED AND NEVER READ — four of `MarkdownLimits`'
+/// six fields were, so the comment named a limit that could not have halted anything. The test
+/// below has always used `maxNodes`, which is enforced, so it was sound; the comment was not.
 pub fn chunk_markdown_with_limits(path: &str, text: &str, limits: u::MarkdownLimits) -> Vec<Chunk> {
     if text.trim().is_empty() {
         return Vec::new();
@@ -1079,6 +1082,37 @@ mod tests {
             "expected chunk_text ids, got {:?}",
             chunks.iter().map(|c| &c.id).collect::<Vec<_>>()
         );
+    }
+
+    /// The two limits that `rag-uniml-unenforced-limits` found dead, asserted THROUGH the
+    /// vendored Rust crate rather than only in scalascript's own suite — that is the whole point
+    /// of the entry. A limit enforced in the Scala source but lost in the ssc→Rust lowering would
+    /// be the same defect one layer down, and this is the layer rozum actually runs.
+    #[test]
+    fn markdown_line_and_block_limits_are_enforced_in_the_vendored_crate() {
+        let mut line_limited = default_limits();
+        line_limited.maxLineCodePoints = 4;
+        let chunks = chunk_markdown_with_limits("d.md", "short\nthis line is far too long\n", line_limited);
+        assert!(
+            chunks.iter().all(|c| c.id.contains("#p")),
+            "a line-limit halt must fall back to chunk_text, got {:?}",
+            chunks.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+
+        let mut block_limited = default_limits();
+        block_limited.maxBlocks = 2;
+        let doc: String = (1..=20).map(|i| format!("# Heading {i}\n\nbody {i}\n\n")).collect();
+        let chunks = chunk_markdown_with_limits("d.md", &doc, block_limited);
+        assert!(
+            chunks.iter().all(|c| c.id.contains("#p")),
+            "a block-limit halt must fall back to chunk_text, got {:?}",
+            chunks.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+
+        // And the defaults must not fire on an ordinary document: a limit that trips in normal use
+        // silently costs every file its heading structure, which is exactly what the cap saga cost.
+        let ok = chunk_markdown_with_limits("d.md", "# T\n\nbody\n\n## S\n\nmore\n", default_limits());
+        assert!(ok.iter().any(|c| c.id.contains("#t")), "defaults must keep the tree: {ok:?}");
     }
 
     // Behavior: index_project walks a tree, skips VCS/build/binaries, counts right.

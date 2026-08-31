@@ -267,11 +267,24 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   (Cyrillic ×1.93–2.00, emoji ×1.97–2.02). `MAX_MARKDOWN_TREE_BYTES` re-justified as a LATENCY
   bound rather than a super-linearity guard.
 
-- [ ] **rag-uniml-unenforced-limits** — smaller uniML finding from the same run: `maxBlocks` and
-  `maxLineCodePoints` are ACCEPTED by `MarkdownLimits` and then silently not enforced (a document
-  exceeding either parses `Complete` with a full tree), while `maxNodes`/`maxDepth`/
-  `maxSourceCodePoints`/`maxTokenCodePoints` do halt. A limit that cannot be relied on is worse
-  than one that is absent. Fix in scalascript's uniml/markdown, or drop the two fields.
+- [x] **rag-uniml-unenforced-limits — DONE 2026-08-31, and it was FOUR fields, not two.** This
+  entry named `maxBlocks` and `maxLineCodePoints`; grepping every field of `MarkdownLimits` found
+  `maxDelimiterRun` and `maxFenceCodePoints` dead as well — only `maxSourceCodePoints` and
+  `maxReferences` were ever read, against a struct whose own doc promises "finite bounds guarding
+  every buffer, stack and delegated region". The two this entry named are now enforced
+  (scalascript `3538a1c95`, vendored here): `maxLineCodePoints` once after the split against the
+  longest line, `maxBlocks` counted at `track`, which sees every `Open` — so it counts block
+  OPENINGS, one frame and one branch each. Both halt in the same shape as the source limit: no
+  tokens plus a fatal diagnostic, since a truncated stream would sit in a tree that looks
+  complete. Tested at BOTH layers — the Scala suite and, separately, through the vendored Rust
+  crate, because a limit enforced in the source and lost in the ssc→Rust lowering is the same
+  defect one layer down. Also corrected a comment in `rag_chunk.rs` that named `maxBlocks` as the
+  example of a working limit while it was dead (the test it describes has always used `maxNodes`,
+  which is enforced — the test was sound, the comment was not).
+- [ ] **uniml-remaining-dead-limits** — `maxDelimiterRun` and `maxFenceCodePoints` are still
+  ACCEPTED and never read. Both live in the inline lexer rather than the block driver, which is
+  why they were not bundled with the two above. Same argument applies: a limit nobody enforces is
+  worse than one that is absent, because it is the one a caller builds on.
 - [x] **rag-syntactic-rust-dialect — DONE.** `uniml/rust` exists in scalascript (`RustLexer` +
   `RustDialect`, structural: keyword + brace-depth item finder, string/comment aware) and
   `rag_chunk::chunk_code` parses `.rs` through it, so code is chunked by item rather than by
