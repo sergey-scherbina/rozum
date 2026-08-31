@@ -72,12 +72,23 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   O(n) copy — so idiomatic Scala is silently quadratic. Six profiling rounds on `uniml/markdown`
   found six hot spots and every one was that shape; the fixes shipped (~13× cumulative, 256 KB
   173.4 s → 13.0 s) but the curve never changed slope — each fix only revealed the next instance.
-  **Phase 1 is a MEASUREMENT, not a change**: `Vec` vs a persistent RRB vector vs copy-on-write
+  **Phase 1 DONE 2026-08-31 — and it overturned this item's own favourite** (results in the spec): `Rc<Vec>` CoW degenerates to `Vec` exactly (×4.1) as soon as a clone outlives the next mutation, which is what a tree-building parser does; only `im::Vector` stays linear, at a 6–9× read-path tax. It also surfaced a cheaper third option now promoted above (`ssc-rust-reduce-clone-volume`), so PHASE 2 IS NOT STARTED pending that. Original framing: **a MEASUREMENT, not a change**: `Vec` vs a persistent RRB vector vs copy-on-write
   `Rc<Vec>`, on the real corpus, ratios reported. CoW is the a-priori favourite (this parser
   iterates and indexes constantly, which is where RRB pays its constant, while what the six
   findings actually needed was cheap APPEND and cheap SHARE). "No candidate wins" is a valid
   outcome that closes the item with the table. Removing `MAX_MARKDOWN_TREE_BYTES` and unblocking
   RAG phase 2 is what phase 2 of this buys.
+- [ ] **ssc-rust-reduce-clone-volume** — **promoted ahead of the representation change by phase-1
+  measurement** (`docs/specs/ssc-rust-persistent-vector.md` § Results). The emitted markdown
+  parser has **1378 `.clone()` sites against 95 `.push()`** — the dominant cost is `cloneIfMoved`
+  and the by-value calling convention being defensive because they cannot prove a value is dead,
+  and a microbenchmark reproduces the parser's own ~×4 curve **from clone volume alone**. Measure
+  how many of the 1378 are provably unnecessary (single-use, or the last read before the value
+  goes out of scope), then remove those. Cheapest of the three options, needs no dependency, and
+  — unlike adopting a persistent structure — costs nothing on the read path. The two fixes already
+  shipped in this series (self-append → `push`, self-extend → `extend`) are exactly this shape and
+  were worth 2–4× each. Re-measure after: if the curve goes linear,
+  `ssc-rust-persistent-vector` closes without a representation change at all.
 - [ ] **ssc-rust-lifted-def-return-types** — small backend gap, found twice now: `.isDefined` /
   `.get` (and any other return-type-driven lowering) do not resolve on a call to a LIFTED LOCAL
   def, because its declared return type never reaches the global `_returnTypes` table — the
