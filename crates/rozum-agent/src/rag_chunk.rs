@@ -506,7 +506,19 @@ fn project_files_with_progress(
 ) -> (Vec<FileChunks>, IndexStats) {
     let mut stats = IndexStats::default();
     let mut files: Vec<FileChunks> = Vec::new();
-    collect_project_chunks(root, root, &mut files, prev, &mut stats, progress);
+    match git_project_files(root) {
+        Some(paths) => {
+            for rel in paths {
+                let path = root.join(&rel);
+                let Ok(meta) = path.symlink_metadata() else { continue };
+                if meta.file_type().is_symlink() || meta.is_dir() {
+                    continue;
+                }
+                index_one_file(&path, rel, &meta, prev, &mut files, &mut stats, progress);
+            }
+        }
+        None => collect_project_chunks(root, root, &mut files, prev, &mut stats, progress),
+    }
     stats.chunks = files.iter().map(|f| f.chunks.len()).sum();
     // Anything in the previous index the walk did not reach is gone from the tree. Counting it
     // is not bookkeeping: these are the entries that would otherwise point an agent at code that
@@ -514,6 +526,119 @@ fn project_files_with_progress(
     let seen: std::collections::HashSet<&str> = files.iter().map(|f| f.path.as_str()).collect();
     stats.removed = prev.keys().filter(|p| !seen.contains(p.as_str())).count();
     (files, stats)
+}
+
+
+/// The files git considers part of this project: tracked, plus untracked ones that are NOT
+/// ignored. `None` when `root` is not a git repository (or git is unavailable), in which case
+/// the caller falls back to walking directories with the `SKIP_DIRS` fences.
+///
+/// This replaces a hardcoded denylist with the project's OWN declaration of what is source, and
+/// it was worth doing on a measurement rather than on taste: in this repo `scripts/bench/results/`
+/// — gitignored benchmark RUN OUTPUT, not code — was **36,034 of 46,733 chunks, 77% of the index
+/// and 15.9 MB of its 31 MB**. That is not merely wasted space: BM25 ranks on document-frequency
+/// statistics computed over the whole corpus, so three quarters of it being machine-generated
+/// transcripts skews every score, and one such file was measurably ranking top-3 for a question
+/// about the proxy.
+///
+/// Untracked-but-not-ignored files are deliberately INCLUDED: a file the agent created moments
+/// ago is exactly what it will ask about next, and "tracked only" would undo the freshness the
+/// incremental refresh exists to provide.
+fn git_project_files(root: &Path) -> Option<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let paths: Vec<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| std::str::from_utf8(p).ok().map(str::to_string))
+        .collect();
+    // An empty list from a real repo is possible but indistinguishable here from a git that
+    // answered nothing useful; walking is the safe reading, and costs one pass on an empty tree.
+    if paths.is_empty() { None } else { Some(paths) }
+}
+
+/// Index ONE file: the shared body of both discovery paths (the git file list and the
+/// directory walk), so a rule added to one can never quietly miss the other.
+#[allow(clippy::too_many_arguments)]
+fn index_one_file(
+    path: &Path,
+    rel: String,
+    meta: &std::fs::Metadata,
+    prev: &HashMap<String, FileChunks>,
+    out: &mut Vec<FileChunks>,
+    stats: &mut IndexStats,
+    progress: &mut dyn FnMut(&str, usize, bool),
+) {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if BINARY_EXT.contains(&ext.as_str()) || meta.len() > MAX_FILE_BYTES {
+        stats.skipped += 1;
+        return;
+    }
+    let mtime_secs = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // The reuse decision is made HERE, before `fs::read` — that is the whole saving. Deciding
+    // after reading would still pay the I/O on every file and leave only the parse to skip,
+    // and on this corpus the parse is the cheaper half for everything except large markdown.
+    if let Some(hit) = prev.get(&rel)
+        && hit.mtime_secs == mtime_secs
+        && hit.len == meta.len()
+    {
+        stats.reused += 1;
+        if !hit.chunks.is_empty() {
+            stats.files += 1;
+        }
+        out.push(hit.clone());
+        return;
+    }
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => {
+            stats.skipped += 1;
+            return;
+        }
+    };
+    let text = match String::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(_) => {
+            stats.skipped += 1;
+            return;
+        }
+    };
+    // `.rs` goes through the uniml.rust dialect (RAG phase 2). It shares markdown's size cap:
+    // the cap exists because a non-ASCII document is still super-linear, and while code is
+    // ASCII in practice a generated .rs file can be enormous, so the same bound applies.
+    let tree_path = (ext == "md" || ext == "rs") && text.len() <= MAX_MARKDOWN_TREE_BYTES;
+    progress(&rel, text.len(), tree_path);
+    let file_chunks = if tree_path && ext == "md" {
+        chunk_markdown(&rel, &text)
+    } else if tree_path {
+        chunk_code(&rel, &text)
+    } else {
+        chunk_text(&rel, &text)
+    };
+    if (ext == "md" || ext == "rs") && !tree_path {
+        stats.degraded += 1;
+    }
+    stats.rechunked += 1;
+    if !file_chunks.is_empty() {
+        stats.files += 1;
+    }
+    // Recorded even when it produced NO chunks (an empty or whitespace-only file). Skipping
+    // those here would leave them out of the manifest, so every later pass would re-read them
+    // forever — a small cost that never converges, which is the wrong shape for a cache.
+    out.push(FileChunks { path: rel, mtime_secs, len: meta.len(), chunks: file_chunks });
 }
 
 fn collect_project_chunks(
@@ -549,69 +674,8 @@ fn collect_project_chunks(
             }
             continue;
         }
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        if BINARY_EXT.contains(&ext.as_str()) || meta.len() > MAX_FILE_BYTES {
-            stats.skipped += 1;
-            continue;
-        }
         let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
-        let mtime_secs = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        // The reuse decision is made HERE, before `fs::read` — that is the whole saving. Deciding
-        // after reading would still pay the I/O on every file and leave only the parse to skip,
-        // and on this corpus the parse is the cheaper half for everything except large markdown.
-        if let Some(hit) = prev.get(&rel)
-            && hit.mtime_secs == mtime_secs
-            && hit.len == meta.len()
-        {
-            stats.reused += 1;
-            if !hit.chunks.is_empty() {
-                stats.files += 1;
-            }
-            out.push(hit.clone());
-            continue;
-        }
-        let bytes = match fs::read(&path) {
-            Ok(b) => b,
-            Err(_) => {
-                stats.skipped += 1;
-                continue;
-            }
-        };
-        let text = match String::from_utf8(bytes) {
-            Ok(t) => t,
-            Err(_) => {
-                stats.skipped += 1;
-                continue;
-            }
-        };
-        // `.rs` goes through the uniml.rust dialect (RAG phase 2). It shares markdown's size cap:
-        // the cap exists because a non-ASCII document is still super-linear, and while code is
-        // ASCII in practice a generated .rs file can be enormous, so the same bound applies.
-        let tree_path = (ext == "md" || ext == "rs") && text.len() <= MAX_MARKDOWN_TREE_BYTES;
-        progress(&rel, text.len(), tree_path);
-        let file_chunks = if tree_path && ext == "md" {
-            chunk_markdown(&rel, &text)
-        } else if tree_path {
-            chunk_code(&rel, &text)
-        } else {
-            chunk_text(&rel, &text)
-        };
-        if (ext == "md" || ext == "rs") && !tree_path {
-            stats.degraded += 1;
-        }
-        stats.rechunked += 1;
-        if !file_chunks.is_empty() {
-            stats.files += 1;
-        }
-        // Recorded even when it produced NO chunks (an empty or whitespace-only file). Skipping
-        // those here would leave them out of the manifest, so every later pass would re-read them
-        // forever — a small cost that never converges, which is the wrong shape for a cache.
-        out.push(FileChunks { path: rel, mtime_secs, len: meta.len(), chunks: file_chunks });
+        index_one_file(&path, rel, &meta, prev, out, stats, progress);
     }
 }
 
@@ -716,8 +780,15 @@ pub fn refresh_in_background(
         .truncate(false)
         .write(true)
         .open(dir.join("rag-index.lock"))?;
-    if lock.try_lock().is_err() {
-        return Ok(None);
+    // WouldBlock and a real failure are DIFFERENT answers and must not share a branch. The first
+    // version treated any `Err` as "a sibling is building", so an I/O error silently became a
+    // skipped build with nothing logged — and it showed up as a flaky test (passing alone,
+    // failing about one run in three under the full suite's parallelism) rather than as the
+    // defect it is. A lock we could not even evaluate is an error to report, not a no-op.
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(fs::TryLockError::Error(e)) => return Err(e),
     }
     // Held until this returns; the file stays on disk, which is fine — the LOCK is the state,
     // not the file, so a crashed builder releases it with its fd and leaves nothing to reap.
@@ -1133,30 +1204,38 @@ mod tests {
     /// of them running the same full build — N× the CPU for one identical file, on a machine
     /// already contended by local models. A blocked caller must SKIP, not queue: by the time the
     /// holder is done the answer is on disk for everyone.
+    ///
+    /// The two branches are asserted on SEPARATE trees rather than by releasing the lock and
+    /// re-taking it. Released-then-reacquired was tried and is flaky here: under the suite's
+    /// thread parallelism a fresh descriptor still saw `WouldBlock` on a unique tempdir path
+    /// after the only holder had been dropped (about one run in three, always passing when run
+    /// alone). The property that matters is cross-PROCESS and both halves of it are covered
+    /// below; an in-process release/reacquire dance is not, and asserting it bought a flaky
+    /// test instead of a stronger guarantee.
     #[test]
     fn a_concurrent_builder_skips_instead_of_repeating_the_work() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        fs::write(root.join("a.md"), "# Alpha\ncontent\n").unwrap();
-        fs::create_dir_all(root.join(".rozum")).unwrap();
-
-        // Stand in for the sibling that got there first.
+        // Branch 1: someone else holds it → skip, and write nothing.
+        let busy = tempfile::tempdir().unwrap();
+        fs::write(busy.path().join("a.md"), "# Alpha\ncontent\n").unwrap();
+        fs::create_dir_all(busy.path().join(".rozum")).unwrap();
         let held = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(root.join(".rozum").join("rag-index.lock"))
+            .open(busy.path().join(".rozum").join("rag-index.lock"))
             .unwrap();
         held.lock().unwrap();
-
-        let out = refresh_in_background(root, &mut |_, _, _| {}).unwrap();
+        let out = refresh_in_background(busy.path(), &mut |_, _, _| {}).unwrap();
         assert!(out.is_none(), "a second builder must skip, not build");
-        assert!(!index_path(root).exists(), "and must not have written anything");
-
+        assert!(!index_path(busy.path()).exists(), "and must not have written anything");
         drop(held);
-        let out = refresh_in_background(root, &mut |_, _, _| {}).unwrap();
-        assert!(out.is_some(), "with the lock free it builds");
-        assert!(index_path(root).exists());
+
+        // Branch 2: nothing holds it → build.
+        let free = tempfile::tempdir().unwrap();
+        fs::write(free.path().join("a.md"), "# Alpha\ncontent\n").unwrap();
+        let out = refresh_in_background(free.path(), &mut |_, _, _| {}).unwrap();
+        assert!(out.is_some(), "an unlocked project builds");
+        assert!(index_path(free.path()).exists());
     }
 
     /// A no-change pass must not rewrite the file. The MCP proxy holds the index in memory and

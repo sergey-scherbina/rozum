@@ -154,13 +154,28 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   own `no_index` test, which began failing because the refresh had created the index it asserted
   the absence of). Building moved to a background warmup, guarded by a cross-process `try_lock`
   so N agents starting together do it once. Spec: `docs/specs/rag-index-freshness.md`.
-- [ ] **rag-index-scope (P2, cheap)** — the index carries material that can only mislead. Found
-  while probing `rag.search` live: `"how does the proxy forward a tool call"` ranked
-  `scripts/bench/results/_archive-…/…t5-code-easy.txt#p1` in its top 3 — archived benchmark
-  OUTPUT, indexed as if it were project prose. Bench results, `_archive-*`, and generated
-  artefacts are not things an agent asks about, and they dilute the df statistics BM25 ranks on,
-  so excluding them helps precision twice. Smaller and independent of the ranking work below;
-  do it first and re-measure, so the ranking change is judged on a clean corpus.
+- [x] **rag-index-scope — DONE 2026-08-31, and it was not small.** The index was **77% machine
+  output**: `scripts/bench/results/` (gitignored benchmark transcripts) was 36,034 of 46,733
+  chunks and 15.9 MB of 31.4 MB. Replaced the hardcoded `SKIP_DIRS` denylist with the project's
+  OWN declaration of what is source — `git ls-files --cached --others --exclude-standard`, one
+  subprocess, 0.017 s — falling back to the directory walk outside a repo. Untracked-but-not-
+  ignored files stay IN, deliberately: a file the agent just created is what it will ask about
+  next, and "tracked only" would undo the incremental freshness. Result: **46,733 → 10,530
+  chunks, 31.4 → 9.3 MB**; the probe query that returned an archived bench transcript now returns
+  `daemon_proxy.rs#fn forward` and `#fn forward_raw`. Build time barely moved (33 → 22 s) because
+  the noise took the cheap paragraph path — the win is ranking and size, not speed.
+  Fixed on the way: `refresh_in_background` treated ANY `try_lock` error as "a sibling is
+  building", so an I/O error silently became a skipped build; `WouldBlock` and a real error are
+  now separate branches. And a test I added in P1 was flaky (in-process release-then-reacquire of
+  an flock; ~1 run in 3) — rewritten to assert both branches on separate trees.
+- [ ] **rag-self-reference-contamination** — sharpened by the above and now bigger than the filed
+  `rag-smoke-test-self-reference`. Writing example queries INTO a spec makes that spec rank first
+  for them: `docs/specs/rag-expose-to-agents.md#results` is now the top hit for two of the three
+  probe queries, purely because it quotes them. This is not a test artefact — any document that
+  discusses retrieval will outrank the code it describes, for exactly the questions retrieval is
+  meant to answer. Levers to consider: down-weight `docs/specs/**` for code-shaped queries, or
+  prefer code chunks when a query names code shapes. Measure before choosing; it interacts with
+  `rag-code-retrieval-quality`.
 - [ ] **rag-code-retrieval-quality (P2)** — the sharp end of the "beat grep" bar, and where
   `rag-embeddings-backend` actually belongs. Measured today: BM25 ranks prose correctly and code
   by word overlap, which for code is close to useless (a query about parameter passing returned a
