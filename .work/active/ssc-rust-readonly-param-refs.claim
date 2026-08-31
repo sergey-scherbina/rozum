@@ -1,6 +1,0 @@
-feature/ssc-rust-readonly-param-refs 2026-08-31T13:42:45Z
-agent: claude-code
-heartbeat: 2026-08-31T13:42:45Z
-status: in-progress
-done-so-far: uniml-treevm-quadratic-frames re-measured — the markdown quadratic is NOT TreeVm frames but read-only String/Vec params of TOP-LEVEL fns passed by value; a match-arm guard clones a 48KB line per character (one 16KB line 2.076s vs same bytes wrapped 0.068s, 30x)
-next: extend the class-method _refParamPos rewrite to object/top-level defs; verify all four corpora + jit-size
