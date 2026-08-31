@@ -168,14 +168,16 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   building", so an I/O error silently became a skipped build; `WouldBlock` and a real error are
   now separate branches. And a test I added in P1 was flaky (in-process release-then-reacquire of
   an flock; ~1 run in 3) — rewritten to assert both branches on separate trees.
-- [ ] **rag-self-reference-contamination** — sharpened by the above and now bigger than the filed
-  `rag-smoke-test-self-reference`. Writing example queries INTO a spec makes that spec rank first
-  for them: `docs/specs/rag-expose-to-agents.md#results` is now the top hit for two of the three
-  probe queries, purely because it quotes them. This is not a test artefact — any document that
-  discusses retrieval will outrank the code it describes, for exactly the questions retrieval is
-  meant to answer. Levers to consider: down-weight `docs/specs/**` for code-shaped queries, or
-  prefer code chunks when a query names code shapes. Measure before choosing; it interacts with
-  `rag-code-retrieval-quality`.
+- [x] **rag-self-reference-contamination — CLOSED 2026-08-31 by measurement, not by machinery.**
+  Filed when `docs/specs/rag-expose-to-agents.md` took the top slot for two of three probe queries
+  purely because it quoted them, and it was real. It is now absorbed by the implementation slots
+  from `rag-code-retrieval-quality`: prose competes for ONE of five slots, so a document quoting a
+  question can no longer displace an answer. Measured over the 26-question set with and without
+  excluding the two self-referential files — **9/26 top-1 and 15/26 top-5, identical either way**.
+  The gate keeps its exclusion anyway: a gate that can score itself is wrong on principle even
+  while it happens to make no difference, and the day prose gets more slots it would matter again.
+  Nothing to build; the levers this entry proposed (down-weighting `docs/specs/**`, preferring code
+  for code-shaped queries) are NOT needed and would cost prose retrieval, which measures well.
 - [x] **rag-code-retrieval-quality — MEASURED AND IMPROVED 2026-08-31; the ceiling is now named.**
   Built the eval set first (`crates/rozum-agent/tests/rag-eval.json`, 20 questions that never name
   the symbol they ask about) and it paid immediately: **top-1 3/20 → 8/20, top-5 9/20 → 9/20**.
@@ -228,14 +230,10 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   actual functions — top-5 9/20 → 10/20; and the eval set now CONTAMINATES its own corpus, since
   it and its spec quote every question verbatim and rank first for them, so the gate and the
   runner both exclude those two files — 11/20 honest.
-- [ ] **rag-smoke-test-self-reference** — the one unchecked box in `docs/specs/rag-rust-dialect.md`.
-  Now that `.rs` files are indexed, `rag search "residency admission"` returns
-  `rag_chunk.rs#fn e2e_smoke_own_docs` first — the test that searches for that exact phrase and so
-  contains it verbatim. That is self-reference from indexing our own test source, NOT code
-  crowding out prose (the other probes show code and prose rank correctly against each other).
-  The fix belongs in the TEST — query a phrase that does not appear in the test file — not in the
-  product; excluding `#[cfg(test)]` bodies was considered and rejected, since test code is
-  legitimately useful to retrieve.
+- [x] **rag-smoke-test-self-reference — CLOSED, subsumed.** The narrower ancestor of the entry
+  above: `rag search "residency admission"` returned the test that contains that phrase. Both the
+  implementation slots (a test now competes in the leftover slots, not the reserved ones) and the
+  test demotion in `search_balanced` address it, and the umbrella entry carries the measurement.
 - [x] **ssc-rust-string-repr — CLOSED 2026-08-31: its premise was measured and is FALSE.** The
   item said non-ASCII is quadratic because `charAt(i)` costs O(i). Instrumenting the helper says
   otherwise: charAt CALLS grow ×2.00 per input doubling, the slow-path walk work grows ×2.00, and
