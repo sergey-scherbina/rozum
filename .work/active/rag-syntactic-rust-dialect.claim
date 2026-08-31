@@ -1,7 +1,7 @@
 feature/rag-syntactic-rust-dialect 2026-08-31T10:54:18Z
 agent: claude-opus-5 (fable)
-heartbeat: 2026-08-31T11:05:24Z
+heartbeat: 2026-08-31T11:22:45Z
 status: in-progress
-done-so-far: uniml/rust dialect written + wired into build; 9/9 unit tests; LOSSLESS over rozum crates/ (159 files, 3.78M chars, 6125 items). scalascript branch feature/uniml-rust-dialect pushed.
-next: ssc->Rust emit of the merged rust corpus, fix lowering gaps, then vendor into rozum + chunk_code
+done-so-far: dialect + 2 backend gaps fixed (loop-bound clone, qualified ctor defaults), merged corpus emits and cargo builds clean, uniml-md regenerated with the rust dialect, chunk_code + .rs routing + tests written
+next: finish rozum-side test run, full verification, commit both branches
 plan-after: operator 2026-08-31 chose order A -> V -> B: this item, then rag-uniml-hoist-pure-length, then ssc-rust-string-repr
