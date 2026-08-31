@@ -1,0 +1,6 @@
+feature/rag-eval-mid-rank 2026-08-31T17:48:31Z
+agent: claude-code
+heartbeat: 2026-08-31T17:48:31Z
+status: in-progress
+done-so-far: slot composition improved 54->80/100 but hit rate could not see it — every eval answer is either top-5 or unreachable
+next: add questions whose answers sit at ranks 3-20 so ranking changes register as hit rate
