@@ -1,0 +1,6 @@
+feature/rag-index-scope 2026-08-31T16:07:35Z
+agent: claude-code
+heartbeat: 2026-08-31T16:07:35Z
+status: in-progress
+done-so-far: measured in P0 — an archived bench-result .txt ranked top-3 for a code question
+next: exclude generated/archived output from indexing; re-measure chunk count and the probe queries
