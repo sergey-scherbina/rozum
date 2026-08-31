@@ -1286,6 +1286,13 @@ mod tests {
     /// agent asks when it does NOT know the symbol, each answered by a specific chunk of this
     /// repo.
     ///
+    /// The set has TWO bands. The first twenty ask about answers that were either already top-5
+    /// or beyond reach, and could therefore not see a ranking change at all — slot composition
+    /// improving from 54 to 80 of 100 shown chunks registered as no movement whatever. The second
+    /// six ask about answers that sat at ranks 2–29, and they do see it: over the full set, raw
+    /// BM25 scores 4/26 top-1 against 8/26 with the slot policy. A metric blind to the change it
+    /// exists to judge is worse than none, because it reads as evidence that nothing happened.
+    ///
     /// A floor rather than an exact score: the corpus is this repository, so the number moves
     /// whenever anyone writes a file, and pinning it exactly would make every unrelated commit
     /// fail. What must not happen silently is REGRESSION — the two changes measured here (indexing
@@ -1334,7 +1341,7 @@ mod tests {
                 })
                 .collect()
         };
-        assert!(questions.len() >= 20, "the set must not shrink silently");
+        assert!(questions.len() >= 26, "the set must not shrink silently");
 
         let mut index = LexicalIndex::new();
         index_project(&root, &mut index);
@@ -1358,8 +1365,8 @@ mod tests {
         eprintln!("rag eval: top-1 {top1}/{}, absent from top-5: {missed:?}", questions.len());
         assert!(
             top1 >= 6,
-            "top-1 fell to {top1}/{} (was 8/20 when measured; 3/20 before the identifier field \
-             and code slots). Something undid one of them.",
+            "top-1 fell to {top1}/{} (8/26 when measured; raw BM25 over the same set is 4/26). \
+             Something undid the identifier field or the implementation slots.",
             questions.len()
         );
     }

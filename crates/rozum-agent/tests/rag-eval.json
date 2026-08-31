@@ -12,48 +12,144 @@
     "so the set cannot drift into measuring only the cases retrieval happens to win.",
     "",
     "`answer` is a chunk-id substring. Ids are `path#kind name`, so naming the file and the item",
-    "pins the answer without depending on how the id is spelled in full."
+    "pins the answer without depending on how the id is spelled in full.",
+    "",
+    "SECOND BAND, added 2026-08-31: questions whose answers sat at ranks 2-29 rather than at 1",
+    "or beyond reach. The first twenty could not see a ranking change at all — every answer was",
+    "already in top-5 or unreachable — so slot composition improving 54 to 80 of 100 registered",
+    "as no movement whatever. A metric blind to the change it is meant to judge is worse than no",
+    "metric, because it reads as evidence of nothing happening."
   ],
   "questions": [
-    { "q": "where does the code decide whether a model is allowed to become resident in memory",
-      "answer": "share.rs#fn acquire_residency", "grep_beats_it": false },
-    { "q": "how does a markdown document get split into retrievable sections",
-      "answer": "rag_chunk.rs#fn chunk_markdown", "grep_beats_it": false },
-    { "q": "what detects that a chat template does not render tool definitions",
-      "answer": "mlx_native_backend.rs#fn template_renders_tools", "grep_beats_it": false },
-    { "q": "where is the project directory for an agent session determined",
-      "answer": "daemon_proxy.rs#fn detect_project", "grep_beats_it": false },
-    { "q": "what tells an agent it wrote its program to a path cargo does not build",
-      "answer": "main.rs#fn structural_hint", "grep_beats_it": false },
-    { "q": "how are only the changed files re-parsed when refreshing the search index",
-      "answer": "rag_chunk.rs#fn reindex_incremental", "grep_beats_it": false },
-    { "q": "where does the index get built ahead of time so nobody waits for it",
-      "answer": "daemon_proxy.rs#fn spawn_index_warmup", "grep_beats_it": false },
-    { "q": "how is a chunk identifier derived from a rust item's kind and name",
-      "answer": "rag_chunk.rs#fn item_frag", "grep_beats_it": false },
-    { "q": "which code hands a whole-file rewrite to a weak model during a benchmark repair",
-      "answer": "main.rs#fn benchmark_repair_recipe", "grep_beats_it": false },
-    { "q": "how does the stdio bridge pass a tool call through to the meeting daemon",
-      "answer": "daemon_proxy.rs#fn forward", "grep_beats_it": false },
-    { "q": "what splits plain text into paragraph chunks when there is no parse tree",
-      "answer": "rag_chunk.rs#fn chunk_text", "grep_beats_it": false },
-    { "q": "where is the relevance scoring for retrieved documents implemented",
-      "answer": "rag_lite.rs", "grep_beats_it": false },
-    { "q": "how does the walker decide a file belongs to the project at all",
-      "answer": "rag_chunk.rs#fn git_project_files", "grep_beats_it": false },
-    { "q": "what stops two agents starting together from building the same index twice",
-      "answer": "rag_chunk.rs#fn refresh_in_background", "grep_beats_it": false },
-    { "q": "where is the cap on how large a document may be before it loses its structure",
-      "answer": "rag_chunk.rs", "grep_beats_it": true },
-    { "q": "how does an agent search the project's code and docs by meaning",
-      "answer": "daemon_proxy.rs#fn rag_search", "grep_beats_it": false },
-    { "q": "what makes the sandbox refuse to read a secret",
-      "answer": "sandbox.rs", "grep_beats_it": false },
-    { "q": "where does a conversation get shortened so it fits the context window",
-      "answer": "auto_context.rs", "grep_beats_it": false },
-    { "q": "how is a persisted index turned back into something searchable",
-      "answer": "rag_chunk.rs#fn load_project_index", "grep_beats_it": false },
-    { "q": "what records which files produced which chunks so a refresh can reuse them",
-      "answer": "rag_chunk.rs", "grep_beats_it": true }
+    {
+      "q": "where does the code decide whether a model is allowed to become resident in memory",
+      "answer": "share.rs#fn acquire_residency",
+      "grep_beats_it": false
+    },
+    {
+      "q": "how does a markdown document get split into retrievable sections",
+      "answer": "rag_chunk.rs#fn chunk_markdown",
+      "grep_beats_it": false
+    },
+    {
+      "q": "what detects that a chat template does not render tool definitions",
+      "answer": "mlx_native_backend.rs#fn template_renders_tools",
+      "grep_beats_it": false
+    },
+    {
+      "q": "where is the project directory for an agent session determined",
+      "answer": "daemon_proxy.rs#fn detect_project",
+      "grep_beats_it": false
+    },
+    {
+      "q": "what tells an agent it wrote its program to a path cargo does not build",
+      "answer": "main.rs#fn structural_hint",
+      "grep_beats_it": false
+    },
+    {
+      "q": "how are only the changed files re-parsed when refreshing the search index",
+      "answer": "rag_chunk.rs#fn reindex_incremental",
+      "grep_beats_it": false
+    },
+    {
+      "q": "where does the index get built ahead of time so nobody waits for it",
+      "answer": "daemon_proxy.rs#fn spawn_index_warmup",
+      "grep_beats_it": false
+    },
+    {
+      "q": "how is a chunk identifier derived from a rust item's kind and name",
+      "answer": "rag_chunk.rs#fn item_frag",
+      "grep_beats_it": false
+    },
+    {
+      "q": "which code hands a whole-file rewrite to a weak model during a benchmark repair",
+      "answer": "main.rs#fn benchmark_repair_recipe",
+      "grep_beats_it": false
+    },
+    {
+      "q": "how does the stdio bridge pass a tool call through to the meeting daemon",
+      "answer": "daemon_proxy.rs#fn forward",
+      "grep_beats_it": false
+    },
+    {
+      "q": "what splits plain text into paragraph chunks when there is no parse tree",
+      "answer": "rag_chunk.rs#fn chunk_text",
+      "grep_beats_it": false
+    },
+    {
+      "q": "where is the relevance scoring for retrieved documents implemented",
+      "answer": "rag_lite.rs",
+      "grep_beats_it": false
+    },
+    {
+      "q": "how does the walker decide a file belongs to the project at all",
+      "answer": "rag_chunk.rs#fn git_project_files",
+      "grep_beats_it": false
+    },
+    {
+      "q": "what stops two agents starting together from building the same index twice",
+      "answer": "rag_chunk.rs#fn refresh_in_background",
+      "grep_beats_it": false
+    },
+    {
+      "q": "where is the cap on how large a document may be before it loses its structure",
+      "answer": "rag_chunk.rs",
+      "grep_beats_it": true
+    },
+    {
+      "q": "how does an agent search the project's code and docs by meaning",
+      "answer": "daemon_proxy.rs#fn rag_search",
+      "grep_beats_it": false
+    },
+    {
+      "q": "what makes the sandbox refuse to read a secret",
+      "answer": "sandbox.rs",
+      "grep_beats_it": false
+    },
+    {
+      "q": "where does a conversation get shortened so it fits the context window",
+      "answer": "auto_context.rs",
+      "grep_beats_it": false
+    },
+    {
+      "q": "how is a persisted index turned back into something searchable",
+      "answer": "rag_chunk.rs#fn load_project_index",
+      "grep_beats_it": false
+    },
+    {
+      "q": "what records which files produced which chunks so a refresh can reuse them",
+      "answer": "rag_chunk.rs",
+      "grep_beats_it": true
+    },
+    {
+      "q": "how does the gateway shorten a conversation that will not fit in the window",
+      "answer": "auto_context.rs#fn fit_to_context",
+      "grep_beats_it": false
+    },
+    {
+      "q": "what builds the request that asks a local model for a commit message",
+      "answer": "cascade/tasks.rs#fn commit_message_request",
+      "grep_beats_it": false
+    },
+    {
+      "q": "how does a room's transcript get written to disk",
+      "answer": "store.rs#fn append",
+      "grep_beats_it": false
+    },
+    {
+      "q": "where does the code wait until a socket is accepting connections",
+      "answer": "daemon.rs#fn wait_for_socket",
+      "grep_beats_it": false
+    },
+    {
+      "q": "where does the daemon record a room so it can be found again later",
+      "answer": "store.rs#fn register_room",
+      "grep_beats_it": false
+    },
+    {
+      "q": "how does an agent tell the room it is leaving",
+      "answer": "daemon_proxy.rs#fn announce_left",
+      "grep_beats_it": false
+    }
   ]
 }

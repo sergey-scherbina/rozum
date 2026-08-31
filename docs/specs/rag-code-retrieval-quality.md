@@ -124,8 +124,24 @@ A first attempt at this made things WORSE (top-1 8 → 6): detecting a test by
 file and its last chunk usually carries the whole test module. The attribute has to OPEN the
 chunk. Recorded because the loose version looks obviously correct.
 
-Current honest standing: **top-1 8/20, top-5 11/20**, 80% implementation in the slots, remaining
-gap owned by ranking, not vocabulary.
+### The eval set was blind, and now is not
+
+The composition result above could not be seen by the metric, which is a defect in the metric.
+Six questions were added whose answers sat at ranks 2–29 rather than at 1 or beyond reach, and the
+enlarged set was then checked against the thing it must detect — the slot policy itself:
+
+```text
+                      top-1     top-5
+  raw BM25 order       4/26      12/26
+  with the slots       8/26      13/26
+```
+
+It registers. The original twenty scored 8 and 8 across that same change. A metric blind to the
+change it exists to judge is worse than no metric, because it reads as evidence that nothing
+happened — and I nearly reported exactly that.
+
+Current honest standing over 26 questions: **top-1 8/26, top-5 13/26**, 80% implementation in the
+slots, remaining gap owned by ranking, not vocabulary.
 ## Out of scope
 
 - **Embeddings** (`rag-embeddings-backend`) — the justified next step, and it lands behind the

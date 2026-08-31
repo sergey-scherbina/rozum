@@ -204,10 +204,12 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   answers were already in or already out. GOTCHA worth keeping: a first cut detected tests with
   `text.contains("mod tests")` and made top-1 8 → 6, because `chunk_code` tiles a file so the last
   chunk carries the test module; the attribute must OPEN the chunk.
-- [ ] **rag-eval-mid-rank-questions** — the eval set cannot see slot-composition wins, because
-  every answer is either already top-5 or unreachable. Add questions whose answers currently sit
-  at ranks ~6–15 (`rag_lite.rs` at 6, `rag_chunk.rs` at 7, `fn forward` at 15 are ready-made), so
-  a ranking change shows up as hit rate rather than only as composition.
+- [x] **rag-eval-mid-rank-questions — DONE 2026-08-31.** Six questions added whose answers sat at
+  ranks 2–29, then the enlarged set was VALIDATED against the change it must detect: raw BM25
+  scores **4/26 top-1** against **8/26** with the implementation slots, where the original twenty
+  scored 8 and 8 across that same change. Candidates were screened by measuring where each answer
+  actually ranked and keeping the sensitive band — four proposals that already ranked #1 were
+  discarded, since a question the ranker already wins measures nothing.
 - [x] **rag-ranking-truth — a published diagnosis of mine was wrong, corrected 2026-08-31.** The
   `rag-code-retrieval-quality` spec said the unfound answers "score zero" and that "no re-ranking
   reaches a chunk that scored nothing", which pointed the next agent at embeddings. Measured at
