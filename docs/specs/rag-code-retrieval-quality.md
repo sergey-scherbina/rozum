@@ -191,6 +191,34 @@ much better one than the version this spec carried at first, which claimed all e
 and was wrong. Five of the eleven are still ordinary ranking and may yet yield to a lexical lever;
 six will not.
 
+### Indexing the doc comment as its own field: tried, measured, REJECTED
+
+The obvious next lexical lever, and it looked strong from the data: a chunk is a byte-exact slice
+of source, so most of a code chunk's words are syntax. In `detect_project`'s 55 words the meaning
+lives in ONE line — `/// The agent's project: the nearest ancestor with a .git, else the cwd` —
+and the rest is `unwrap_or`, `to_string_lossy` and a comment rule made of box-drawing characters.
+The one sentence written for a human reader carried the same weight as a punctuation run.
+
+So: extract the leading `///` / `//!` block per code chunk and boost it, exactly as the identifier
+field is boosted. Swept:
+
+```text
+  DOC_BOOST = 0   top-1 9/26   top-5 15/26     (no doc field — what ships)
+              1         7/26         16/26
+              2         8/26         14/26
+              3         7/26         14/26
+              5         7/26         14/26
+```
+
+**Every non-zero weight makes top-1 worse.** The reason, in hindsight: those words are ALREADY in
+the chunk text and already counted, so the boost adds no new signal — it multiplies existing
+signal, and it does so for every code chunk equally, competitors included. Nothing is
+discriminated; the whole field is scaled. The one +1 at top-5 does not pay for −2 at top-1, which
+is the number an agent lives on because it reads the first hit.
+
+Reverted. Recorded because "index the doc comment separately" is an obvious idea with a plausible
+story behind it, and it will be proposed again.
+
 Current honest standing over 26 questions: **top-1 9/26, top-5 15/26**, 80% implementation in the
 slots, remaining gap owned by ranking, not vocabulary.
 ## Out of scope

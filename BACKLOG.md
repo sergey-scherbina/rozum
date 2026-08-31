@@ -289,6 +289,14 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   `RustDialect`, structural: keyword + brace-depth item finder, string/comment aware) and
   `rag_chunk::chunk_code` parses `.rs` through it, so code is chunked by item rather than by
   paragraph. Phase 2 of `docs/specs/syntactic-rag.md` is shipped.
+- [x] **rag-doc-comment-field — TRIED AND REJECTED 2026-08-31.** A code chunk is a byte-exact
+  source slice, so most of its words are syntax: `detect_project` is 55 words of which the meaning
+  is one `///` line. Extracting the leading doc block as a boosted field (like the identifier one,
+  which did help) was swept 0/1/2/3/5 and **every non-zero weight made top-1 worse**: 9/26 → 7–8/26,
+  top-5 15/26 → 14–16/26. Those words are already in the chunk text and already counted, so the
+  boost multiplies existing signal rather than adding new — for every code chunk equally,
+  competitors included. Nothing is discriminated; the field is just scaled. Recorded because the
+  idea is obvious and the story behind it is plausible, so it will be proposed again.
 - [ ] **rag-embeddings-backend — now justified by EVIDENCE, not by a guess.** Measured at k=300
   after the lexical work: of the eleven answers still outside top-5, **five sit at ranks 13–31**
   (ordinary ranking, may still yield to a lexical lever) and **six sit at 58, 59, 189 or score
