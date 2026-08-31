@@ -105,5 +105,77 @@ measure rather than reach for the more sophisticated structure.
 
 ## Results
 
-(to fill at phase 1: the three-way table with load context; at phase 2: the linearity
-series to 1 MB, corpora + test status, and whether `MAX_MARKDOWN_TREE_BYTES` is gone.)
+### Phase 1 — measured 2026-08-31 (load 3–5, quiet machine)
+
+First, the **operation mix**, counted in the emitted parser rather than assumed:
+
+| op | sites |
+|---|---|
+| `.clone()` | **1378** |
+| `.iter()` | 119 |
+| `.len()` | 80 |
+| `.push()` | 95 |
+| index read | 48 |
+| `.extend()` | 11 |
+
+That alone reframes the problem: the dominant operation is not append or slice, it is the
+backend's DEFENSIVE CLONING (`cloneIfMoved` and the by-value calling convention). Which is
+also what the parser profile showed — `String::clone`, `Vec::clone`, malloc, free.
+
+**Accumulate + share** (`n` elements of a two-`String` struct; ×N = growth per doubling):
+
+| clones/elem | `Vec` | `Rc<Vec>` CoW | `im::Vector` |
+|---|---|---|---|
+| 0 | ×1.7 | ×2.0 | ×2.1 |
+| 1 | **×4.0** | ×2.0 | ×2.0 |
+| 4 | **×4.0** | ×2.0 | ×2.0 |
+
+`Vec` reproduces the parser's own ×3.9 curve exactly, from clone volume alone. Both
+alternatives are linear, and neither costs anything when nothing is cloned.
+
+**Adversarial — the clone is RETAINED across the next mutation** (8 live snapshots), which is
+what a parser building a TREE does, since nodes hold their children:
+
+| n | `Vec` | `Rc<Vec>` CoW | `im::Vector` |
+|---|---|---|---|
+| 4000 | ×3.8 | ×4.2 | ×2.0 |
+| 16000 | 4.017 s ×4.1 | 4.062 s ×4.1 | **0.018 s ×1.9** |
+
+**This overturned the spec's own a-priori favourite.** CoW is linear only while clones are
+transient; the moment one outlives the next mutation `Rc::make_mut` must copy and CoW
+degenerates to `Vec` exactly. `im::Vector` is the only candidate that stays linear — and is
+200× faster here at n=16000.
+
+**Read-heavy** (build once, 200 full iterations + strided indexing) — where persistence is
+supposed to lose, and does:
+
+| n | `Vec` | `im::Vector` | penalty |
+|---|---|---|---|
+| 4000 | 0.001 s | 0.008 s | 5.9× |
+| 16000 | 0.003 s | 0.024 s | 9.0× |
+| 64000 | 0.006 s | 0.050 s | 8.0× |
+
+### What phase 1 concludes
+
+`im::Vector` is the only representation that is linear under this workload, at a **6–9×
+constant on the read path**. Against an O(n²) it wins overwhelmingly at parser scale, but the
+tax is real and would be a regression for read-dominated programs — this lane compiles more
+than uniML.
+
+**Which surfaces a third option the spec did not consider, and it now looks better than
+either:** make the backend **clone LESS**, rather than make cloning cheap. 1378 clone sites
+against 95 pushes is not the source being profligate — it is `cloneIfMoved` being defensive
+because it cannot prove the value is dead. Every clone it can prove unnecessary is removed
+outright, with no representation change, no dependency, and no read-path tax. The two fixes
+already shipped in this series (self-append → `push`, self-extend → `extend`) are exactly
+that, and each was worth 2–4× on its own.
+
+**Recommended order, revised by the measurement:**
+1. **Reduce clone volume** (new item) — measure how many of the 1378 are provably dead, then
+   remove those. Cheapest, no tax, and directly attacks the measured dominant cost.
+2. Re-measure. If the curve is linear, this item CLOSES without a representation change.
+3. Only if a quadratic remains: adopt `im::Vector`, accepting the read tax, ideally scoped to
+   the accumulator shapes rather than every `Vector` in the language.
+
+Phase 2 is therefore NOT started: the measurement says the cheaper option should be tried
+first, which is what phase 1 existed to find out.
