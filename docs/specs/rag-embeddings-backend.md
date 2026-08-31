@@ -90,6 +90,38 @@ not a general licence to pad.
 On a machine whose hard invariant is no-OOM, this is not tuning. A background indexer that grows
 without a ceiling beside a resident model is a jetsam waiting for a larger corpus.
 
+## Why a second model — the resident 4B was tried, and cannot do this job
+
+The obvious objection to a 336 MB embedding model is that a 4B is ALREADY resident: take its
+hidden states and pool them, and the second model — with its disk, its admission and its memory —
+disappears. The mechanism is there (`Model.model` is public in the qwen3 family; for `qwen3_5` its
+`forward` is private, a one-word change in our own fork), so it was measured rather than argued.
+
+```text
+  Qwen3-Embedding-0.6B (purpose-built)   330 s    top-1 7/26   top-5 15/26
+  resident Qwen3.5-4B (chat model)      2333 s    top-1 0/26   top-5  0/26
+```
+
+Zero on both, and the vectors are not degenerate — 15 distinct first hits across 26 questions —
+they are simply meaningless: `.github/workflows/ci.yml`, CHANGELOG entries, `testdata`. What makes
+this a result about the MODEL rather than about the spike is that the identical code path scores
+7/26 and 15/26 with the 0.6B; only the checkpoint differs.
+
+The reason is the ordinary one, now measured here: a causal LM's last-token hidden state is
+trained to predict the NEXT TOKEN, not to represent the text it has read. Contrastive training is
+what turns hidden states into a metric space, and a chat model has not had it.
+
+And even had quality held, the cost runs the wrong way: **2333 s against 330 s** — 7x — on the very
+model the operator is talking to, rather than on a 0.6B that can be loaded and dropped around it.
+The second model is not overhead to be optimised away; it is the cheaper half of the trade.
+
+**Two silent failures happened inside this one spike, and both looked like verdicts.** Mean pooling
+instead of last-token scored 0/26 and read as "embeddings do not work here". Passing an EMPTY
+`LayerCache` slice to `qwen3_5` ran ZERO layers — its forward is `layers.iter_mut().zip(cache
+.iter_mut())`, so an empty slice yields no pairs — and returned the bare embedding lookup in 1.29 s
+with, again, 0/26. Neither errored. A wrong call in this area produces a plausible number, not a
+failure, so a zero is a reason to check the harness before it is a reason to conclude anything.
+
 ## If it is built
 
 - Behind the existing `Retriever` seam, as `rag-embeddings-backend` always intended.

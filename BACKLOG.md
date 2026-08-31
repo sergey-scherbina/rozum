@@ -315,6 +315,12 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   **+1 and +2 out of 26 for that is close enough to be a judgement call, not an obvious yes** —
   which is why the spike stopped at the measurement. Spec: `docs/specs/rag-embeddings-backend.md`;
   spike kept at `crates/rozum-mlx/examples/embed_spike.rs`.
+  WHY NOT THE RESIDENT 4B (asked, and measured): taking hidden states from the already-resident
+  chat model would remove the second model entirely. It does not work — **0/26 and 0/26** against
+  the 0.6B's 7/26 and 15/26 through the IDENTICAL code path, with non-degenerate but meaningless
+  vectors (CI yaml, CHANGELOG, testdata as top hits). A causal LM's last-token state predicts the
+  next token; contrastive training is what makes a metric space, and a chat model has not had it.
+  Cost runs the wrong way too: 2333 s vs 330 s, on the model the operator is talking to.
   METHOD NOTE that nearly cost the answer: the first spike used mean pooling and scored **0/26 and
   6/26**, which reads as a decisive verdict against embeddings. Qwen3-Embedding wants LAST-token
   pooling with `<|endoftext|>` appended and an instruction-wrapped query; its own recipe moved the
