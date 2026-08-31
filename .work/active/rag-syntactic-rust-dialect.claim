@@ -1,0 +1,7 @@
+feature/rag-syntactic-rust-dialect 2026-08-31T10:54:18Z
+agent: claude-opus-5 (fable)
+heartbeat: 2026-08-31T10:54:18Z
+status: in-progress
+done-so-far:
+next: spec first (docs/specs/rag-rust-dialect.md), then a structural Rust-ish uniML dialect for chunking CODE
+plan-after: operator 2026-08-31 chose order A -> V -> B: this item, then rag-uniml-hoist-pure-length, then ssc-rust-string-repr
