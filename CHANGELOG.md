@@ -1,5 +1,55 @@
 # Changelog
 
+## ssc-rust-reduce-clone-volume — the markdown parse is LINEAR, 615x faster, and the RAG cap is effectively gone
+Completed: 2026-08-31
+
+Eight rounds of profiling, each one measuring rather than reasoning, and each one killing the
+previous round's theory. The result:
+
+    256 KB markdown parse    173.4 s  ->  0.28 s     (~615x, ~2x per doubling)
+    allocations (128 KB)     134 M    ->  5.2 M      (linear)
+    bytes allocated          6.1 GB   ->  158 MB
+    rozum-agent lib suite    505 s    ->  20.8 s
+
+**The instrument mattered more than any single fix.** A leaf CPU profile could not see this
+problem at all — the clones are inlined into generated code and attributed to it (95% of leaf
+samples read as "parser logic"). A COUNTING global allocator showed the truth immediately
+(134 M allocations, 6 GB, growing x3.85 per doubling), and a SAMPLING allocator with backtraces
+gave exact attribution. Comparing two input sizes then separated quadratic sites from linear
+ones by number — x16 for a x4 input versus x3.8 — rather than by argument.
+
+Fixes, all in scalascript `main`, each separately committed and verified:
+- self-append `xs = xs :+ x` -> `Vec::push`, and self-extend `xs = xs ++ ys` -> `Vec::extend`
+  (the latter sat in `UniML_parse`'s own per-token loops, copying the whole accumulator per token);
+- read-only `Vec` parameters and captures passed by SHARED REFERENCE, for lifted defs and for
+  class methods (`__self.scanRefDef((*lines).clone(), ...)` copied the document's line vector once
+  per LINE);
+- `take`/`drop`/`slice` BORROW their receiver instead of cloning it — `xs.slice(a, b)` emitted
+  `xs.clone()[a..b].to_vec()`, copying a whole vector to produce a slice of it, which was 80% of
+  all allocations by itself;
+- a clone skipped when the very next statement overwrites the name;
+- `String.toVector` given a lowering that compiles and means code UNITS, then used by uniML's two
+  index-based string scanners to hoist one conversion out of their loops.
+
+In rozum: `crates/uniml-md` regenerated and `MAX_MARKDOWN_TREE_BYTES` raised 16 KB -> 1 MB. Every
+document in the repo is now chunked syntactically. `SPRINT.md` — the file that started this by
+extrapolating to ~7 HOURS and forcing a 16 KB cap — parses in 5.26 s.
+
+**Four things this run got wrong and caught itself**, all recorded where the next attempt will
+look: a last-use analysis that moved a value the corpus later read (reverted — proving last use
+needs real scope analysis, not a statement-list scan); a guard that counted a FIELD spelled like
+the variable as a read of it, so the rewrite refused exactly the sites it was written for; a
+round whose hypothesis (VM state cloned per token) was disproved by measurement after the fix
+was already written; and a ratchet comment that landed inside a heredoc and was parsed as data.
+
+**What is left, and it is now a smaller question than it looked.** Linearity holds on ASCII;
+non-ASCII is still ~x3.1-3.8 per doubling, because `charAt(i)` costs O(i) and `_str_length` is
+O(n) whenever the ASCII fast path does not apply. That is `ssc-rust-string-repr`, whose scope is
+now measured: 58 emitter sites where `"String"` is the type-inference key, 17 runtime helpers,
+plus literals and the `Value` boundary. Its payoff is non-ASCII documents and removing the last
+cap — NOT RAG phase 2, which chunks code, which is ASCII, which is already linear.
+
+
 ## ssc-rust-string-repr — ~13× on the parser, full syntactic coverage of the docs, and the real diagnosis
 Completed: 2026-08-31 (the item stays open; see below)
 

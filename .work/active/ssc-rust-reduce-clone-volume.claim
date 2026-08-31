@@ -1,7 +1,0 @@
-feature/ssc-rust-reduce-clone-volume 2026-08-31T08:50:17Z
-agent: claude-opus-5 (fable)
-heartbeat: 2026-08-31T08:50:17Z
-status: in-progress
-done-so-far:
-next: locate which of the 1378 clone sites are HOT, then find a provably-safe class to remove (last-use moves, not a general dataflow analysis)
-cross-repo: fix in scalascript v1/runtime/backend/rust
