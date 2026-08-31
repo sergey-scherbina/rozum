@@ -8744,7 +8744,9 @@ fn run_rag(action: RagAction) {
                 );
                 std::process::exit(1);
             };
-            let hits = index.search(&query, k);
+            // The same selection the `rag.search` tool uses — one policy, two readers, so the
+            // CLI cannot quietly disagree with what an agent sees.
+            let hits = rozum::rag_lite::search_balanced(&index, &query, k);
             if hits.is_empty() {
                 println!("no hits");
                 return;

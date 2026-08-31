@@ -710,8 +710,9 @@ impl DaemonProxy {
             }));
         };
 
-        let results: Vec<Value> = index
-            .search(&query, k)
+        // Code gets reserved slots — see `rag_lite::search_balanced`.
+        let picked = rozum_agent::rag_lite::search_balanced(index.as_ref(), &query, k);
+        let results: Vec<Value> = picked
             .into_iter()
             .map(|h| json!({ "id": h.id, "score": h.score, "text": h.text }))
             .collect();

@@ -176,20 +176,23 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   meant to answer. Levers to consider: down-weight `docs/specs/**` for code-shaped queries, or
   prefer code chunks when a query names code shapes. Measure before choosing; it interacts with
   `rag-code-retrieval-quality`.
-- [ ] **rag-code-retrieval-quality (P2)** — the sharp end of the "beat grep" bar, and where
-  `rag-embeddings-backend` actually belongs. Measured today: BM25 ranks prose correctly and code
-  by word overlap, which for code is close to useless (a query about parameter passing returned a
-  sandbox struct). Two candidate levers and they are NOT the same bet:
-  - **embeddings behind the existing `Retriever` trait** (the filed item) — buys concept queries,
-    costs a model resident alongside the frozen 4B, so it lands under the residency-admission
-    rules, not beside them;
-  - **structure-aware lexical** — the chunker already knows each chunk is a `fn`/`impl`/`struct`
-    (`chunk_code` parses through `uniml/rust`), and that signal is currently thrown away at index
-    time. Symbol-name and kind weighting is free, needs no model, and may cover much of the gap.
-  Measure the cheap one first, then decide whether the model is still needed. **Build the eval set
-  before either**: ~20 real questions from actual sessions in this repo, each labelled with the
-  answer chunk AND with whether grep would have found it faster — that label is what keeps the
-  work honest about the bar above.
+- [x] **rag-code-retrieval-quality — MEASURED AND IMPROVED 2026-08-31; the ceiling is now named.**
+  Built the eval set first (`crates/rozum-agent/tests/rag-eval.json`, 20 questions that never name
+  the symbol they ask about) and it paid immediately: **top-1 3/20 → 8/20, top-5 9/20 → 9/20**.
+  Two free levers, no model. (1) A chunk's identifier — `fn detect_project`, a heading — was not
+  indexed at all; it is now a 3× field, split on snake/camel case. Worth +1 alone. (2) The finding
+  that matters: **prose outranks the code it describes** — a spec mentions the query's words more
+  often than the function implementing them — so `search_balanced` reserves most of `k` for code
+  and does NOT re-sort by score (an earlier version did, which put prose back on top and made the
+  slots decoration). top-5 not moving is the honest half: for 11 of 20 the answer scores ZERO,
+  because BM25 matches words and these questions share none with their answers ("resident" ≠
+  "residency"). Selection cannot reach a chunk that scored nothing. Spec:
+  `docs/specs/rag-code-retrieval-quality.md`.
+- [ ] **rag-stemming-or-synonyms** — the cheap half of the ceiling above, and worth measuring
+  BEFORE embeddings precisely because it needs no model: light stemming (or a small synonym list)
+  would close the "resident"/"residency", "shorten"/"fit the window" class that accounts for much
+  of the 11 unreachable answers. Judge on the same eval set; if it closes most of the gap, the
+  embeddings item shrinks to a nice-to-have.
 - [ ] **rag-smoke-test-self-reference** — the one unchecked box in `docs/specs/rag-rust-dialect.md`.
   Now that `.rs` files are indexed, `rag search "residency admission"` returns
   `rag_chunk.rs#fn e2e_smoke_own_docs` first — the test that searches for that exact phrase and so
@@ -240,7 +243,8 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   `RustDialect`, structural: keyword + brace-depth item finder, string/comment aware) and
   `rag_chunk::chunk_code` parses `.rs` through it, so code is chunked by item rather than by
   paragraph. Phase 2 of `docs/specs/syntactic-rag.md` is shipped.
-- [ ] **rag-embeddings-backend** — swap BM25 for embeddings behind the EXISTING `Retriever` trait
+- [ ] **rag-embeddings-backend** — now has a MEASURE: `crates/rozum-agent/tests/rag-eval.json` says
+  BM25 leaves 11 of 20 answers unreachable at any k. Swap BM25 for embeddings behind the EXISTING `Retriever` trait
   (rag-lite's own comment names this as the planned follow-up). Local-only, must fit alongside the
   frozen 4B under the residency-admission rules; BM25 stays as the zero-model fallback.
 

@@ -1282,6 +1282,77 @@ mod tests {
     // End-to-end smoke over THIS repo's own specs: section-sized chunks make the
     // residency/admission docs the top hit for their own vocabulary.
     #[test]
+    /// The retrieval-quality floor, over `tests/rag-eval.json` — 20 questions phrased the way an
+    /// agent asks when it does NOT know the symbol, each answered by a specific chunk of this
+    /// repo.
+    ///
+    /// A floor rather than an exact score: the corpus is this repository, so the number moves
+    /// whenever anyone writes a file, and pinning it exactly would make every unrelated commit
+    /// fail. What must not happen silently is REGRESSION — the two changes measured here (indexing
+    /// the chunk identifier as a boosted field, and reserving most of `k` for code) took top-1
+    /// from 3/20 to 8/20, and a later change that quietly undid them would otherwise show up as
+    /// nothing at all.
+    ///
+    /// top-5 is deliberately NOT gated high. It stayed at 9/20 across both changes: for the other
+    /// eleven questions the answer is not in the retrieved set at ALL, which is BM25's vocabulary
+    /// ceiling (no stemming, no notion of meaning — "resident" does not match "residency") and
+    /// not something selection can fix. That is the measured case for embeddings, and this set is
+    /// what will judge them.
+    /// IGNORED BY DEFAULT, and that is a cost, not a preference: it indexes the whole repository,
+    /// which is ~22 s in release and 107 s in the debug profile tests build with — five times the
+    /// entire unit suite. Left enabled it would be disabled by whoever hit it next, and a gate
+    /// somebody switched off is worse than one that announces its price. Run it when touching
+    /// chunking, ranking or selection:
+    ///
+    /// ```text
+    /// cargo test -p rozum-agent --lib code_retrieval_meets_its_measured_floor -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "indexes the whole repo: ~107 s in the debug test profile"]
+    fn code_retrieval_meets_its_measured_floor() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let eval = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/rag-eval.json");
+        if !root.join("crates").is_dir() || !eval.is_file() {
+            return; // packaged build without the source tree
+        }
+        let questions: Vec<(String, String)> = {
+            let v: serde_json::Value =
+                serde_json::from_slice(&fs::read(&eval).unwrap()).expect("eval set parses");
+            v["questions"]
+                .as_array()
+                .expect("questions array")
+                .iter()
+                .map(|q| {
+                    (
+                        q["q"].as_str().unwrap_or_default().to_string(),
+                        q["answer"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect()
+        };
+        assert!(questions.len() >= 20, "the set must not shrink silently");
+
+        let mut index = LexicalIndex::new();
+        index_project(&root, &mut index);
+        let mut top1 = 0;
+        let mut missed: Vec<&str> = Vec::new();
+        for (q, answer) in &questions {
+            let hits = crate::rag_lite::search_balanced(&index, q, 5);
+            if hits.first().is_some_and(|h| h.id.contains(answer.as_str())) {
+                top1 += 1;
+            } else if !hits.iter().any(|h| h.id.contains(answer.as_str())) {
+                missed.push(answer);
+            }
+        }
+        eprintln!("rag eval: top-1 {top1}/{}, absent from top-5: {missed:?}", questions.len());
+        assert!(
+            top1 >= 6,
+            "top-1 fell to {top1}/{} (was 8/20 when measured; 3/20 before the identifier field \
+             and code slots). Something undid one of them.",
+            questions.len()
+        );
+    }
+
     fn e2e_smoke_own_docs() {
         let specs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs");
         if !specs.is_dir() {
