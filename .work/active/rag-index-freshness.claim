@@ -1,0 +1,6 @@
+feature/rag-index-freshness 2026-08-31T15:44:18Z
+agent: claude-code
+heartbeat: 2026-08-31T15:44:18Z
+status: in-progress
+done-so-far: P0 shipped (852d8bc) — rag.search is served and reports staleness but cannot fix it; full rebuild is 33 s with no per-file tracking
+next: per-file mtime+size manifest in SavedIndex, incremental reindex, then refresh-on-call in rag.search if a no-change pass is cheap enough
