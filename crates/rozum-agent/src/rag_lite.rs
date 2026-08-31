@@ -284,6 +284,16 @@ fn is_code_chunk(id: &str) -> bool {
 /// far more often than the path.
 fn title_of(id: &str) -> String {
     let (path, frag) = id.split_once('#').unwrap_or((id, ""));
+    // An import block is not a NAMED thing, and boosting its fragment ranks it as if it were.
+    // `chunk_code` tiles a file, so its first chunk is `#use <first-import>` — short, dense with
+    // identifiers, and carrying the module's `//!` doc. Measured: `store.rs#use` and
+    // `resident.rs#use` beat the actual functions for "where is the project directory determined"
+    // and "what decides residency"; dropping the boost took top-5 from 9/20 to 10/20. The chunk
+    // stays indexed — that module doc is genuinely worth finding — it just stops being credited
+    // with a symbol name it does not have.
+    if frag.starts_with("use ") || frag == "use" {
+        return String::new();
+    }
     let stem = std::path::Path::new(path)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())

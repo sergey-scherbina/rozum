@@ -1293,11 +1293,15 @@ mod tests {
     /// from 3/20 to 8/20, and a later change that quietly undid them would otherwise show up as
     /// nothing at all.
     ///
-    /// top-5 is deliberately NOT gated high. It stayed at 9/20 across both changes: for the other
-    /// eleven questions the answer is not in the retrieved set at ALL, which is BM25's vocabulary
-    /// ceiling (no stemming, no notion of meaning — "resident" does not match "residency") and
-    /// not something selection can fix. That is the measured case for embeddings, and this set is
-    /// what will judge them.
+    /// top-5 is deliberately NOT gated high — but NOT for the reason first written here. That
+    /// version said the missing answers "score zero"; measured at k=200 they rank 6, 7, 15, 24,
+    /// 36, 58, 79 and 95, and exactly one of twenty is genuinely absent. The ceiling is RANKING,
+    /// not vocabulary, and stemming was tried on the wrong story and made top-1 worse (8 -> 6).
+    /// See the correction in `docs/specs/rag-code-retrieval-quality.md`.
+    ///
+    /// Hits from the eval file itself and from that spec are EXCLUDED here: both are indexed and
+    /// quote these questions verbatim, so both rank first for them. A gate that scores itself is
+    /// not a gate.
     /// IGNORED BY DEFAULT, and that is a cost, not a preference: it indexes the whole repository,
     /// which is ~22 s in release and 107 s in the debug profile tests build with — five times the
     /// entire unit suite. Left enabled it would be disabled by whoever hit it next, and a gate
@@ -1336,8 +1340,15 @@ mod tests {
         index_project(&root, &mut index);
         let mut top1 = 0;
         let mut missed: Vec<&str> = Vec::new();
+        // The set and its spec quote every question verbatim and are part of the corpus.
+        let self_referential =
+            |id: &str| id.contains("rag-eval.json") || id.contains("rag-code-retrieval-quality");
         for (q, answer) in &questions {
-            let hits = crate::rag_lite::search_balanced(&index, q, 5);
+            let hits: Vec<_> = crate::rag_lite::search_balanced(&index, q, 12)
+                .into_iter()
+                .filter(|h| !self_referential(&h.id))
+                .take(5)
+                .collect();
             if hits.first().is_some_and(|h| h.id.contains(answer.as_str())) {
                 top1 += 1;
             } else if !hits.iter().any(|h| h.id.contains(answer.as_str())) {

@@ -188,11 +188,23 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   because BM25 matches words and these questions share none with their answers ("resident" ≠
   "residency"). Selection cannot reach a chunk that scored nothing. Spec:
   `docs/specs/rag-code-retrieval-quality.md`.
-- [ ] **rag-stemming-or-synonyms** — the cheap half of the ceiling above, and worth measuring
-  BEFORE embeddings precisely because it needs no model: light stemming (or a small synonym list)
-  would close the "resident"/"residency", "shorten"/"fit the window" class that accounts for much
-  of the 11 unreachable answers. Judge on the same eval set; if it closes most of the gap, the
-  embeddings item shrinks to a nice-to-have.
+- [x] **rag-stemming-or-synonyms — MEASURED AND REJECTED 2026-08-31, same day it was filed.** It
+  was filed against a diagnosis that turned out to be WRONG (see below), and once measured it made
+  things worse: a conservative suffix stripper took **top-1 from 8/20 to 6/20**, top-5 unchanged.
+  In a corpus that is mostly code, collapsing distinct identifiers into one term loses more
+  precision than the few word pairs are worth. A curated SYNONYM list remains a different, open
+  bet — but it now has to beat 8/20, not fix a vocabulary problem that does not exist.
+- [x] **rag-ranking-truth — a published diagnosis of mine was wrong, corrected 2026-08-31.** The
+  `rag-code-retrieval-quality` spec said the unfound answers "score zero" and that "no re-ranking
+  reaches a chunk that scored nothing", which pointed the next agent at embeddings. Measured at
+  `k=200`, **nine of the ten rank 6, 7, 15, 24, 36, 58, 79, 95 — only ONE is truly absent.** The
+  ceiling is RANKING, not vocabulary. I had inferred "scored zero" from "absent from top-5"
+  without querying at a larger k. Two fixes came out of the correction: `#use` chunks were being
+  credited with a symbol name (`chunk_code` tiles a file, so its first chunk is the import block —
+  short, identifier-dense, and holding the module `//!` doc), which put `store.rs#use` above the
+  actual functions — top-5 9/20 → 10/20; and the eval set now CONTAMINATES its own corpus, since
+  it and its spec quote every question verbatim and rank first for them, so the gate and the
+  runner both exclude those two files — 11/20 honest.
 - [ ] **rag-smoke-test-self-reference** — the one unchecked box in `docs/specs/rag-rust-dialect.md`.
   Now that `.rs` files are indexed, `rag search "residency admission"` returns
   `rag_chunk.rs#fn e2e_smoke_own_docs` first — the test that searches for that exact phrase and so

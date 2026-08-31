@@ -33,6 +33,9 @@ touching chunking, ranking or selection:
   baseline (BM25 over the corpus)   3/20      9/20
   + identifier as a boosted field   4/20      9/20
   + code keeps most of k's slots    8/20      9/20
+  + `use` blocks lose the boost     8/20     10/20
+  (excluding self-referential hits) 8/20     11/20
+  + stemming                        6/20     11/20   REJECTED, made top-1 worse
 ```
 
 **top-1 went 3 → 8; top-5 did not move at all.** Both halves of that matter.
@@ -51,20 +54,53 @@ for code chunks and does **not** re-sort the result by score — an earlier vers
 prose straight back on top and made the slots decoration. That mistake cost nothing but a
 measurement, and it is why the "no re-sort" is written down rather than implied.
 
-**top-5 stuck at 9/20 is the ceiling, and it is not a selection problem**: for the other eleven
-questions the answer is not in the retrieved set at all. BM25 matches words, and these questions
-do not share words with their answers — "resident" does not match "residency", "shortened" does
-not match "fit the context window". No amount of re-ranking reaches a chunk that scored zero.
+**CORRECTION (same day, before anyone acted on it).** The first version of this section said the
+remaining answers "scored zero" and that "no amount of re-ranking reaches a chunk that scored
+nothing". **That was wrong, and it was wrong in the direction that costs the most: it points the
+next agent at embeddings when the actual lever is ranking.** I inferred "scored zero" from "absent
+from top-5" without ever querying at a larger `k`.
 
-That is the measured case for embeddings, and the reason this spec does not attempt them: the
-lever now has a set that can judge it, which it did not before.
+Measured properly, at `k=200`, nine of the ten missing answers ARE retrieved:
 
+```text
+  rank   6   rag_lite.rs                          rank  36   fn refresh_in_background
+  rank   7   rag_chunk.rs                         rank  58   fn spawn_index_warmup
+  rank  15   fn forward                           rank  79   fn acquire_residency
+  rank  24   fn structural_hint                   rank  95   fn git_project_files
+  ABSENT     fn detect_project
+```
+
+So the ceiling is a RANKING problem — the answers are in the corpus and scoring — and exactly one
+question out of twenty is a genuine vocabulary miss. Two consequences follow, both measured:
+
+- **Stemming was tried and REJECTED.** It was filed as the cheap fix for the vocabulary story
+  above, and with that story corrected it had little left to fix: a conservative suffix stripper
+  (`residency`→`resident`, plurals, `-ing`/`-ed`) took **top-1 from 8/20 down to 6/20** while
+  leaving top-5 at 11. It collapses distinct identifiers into one term, and in a corpus that is
+  mostly code that loses more precision than the few word pairs are worth. Reverted; recorded so
+  it is not re-attempted on the same reasoning.
+- **An import block was ranking as if it were a named symbol.** `chunk_code` tiles a file, so its
+  first chunk is `#use <first-import>` — short, identifier-dense, and carrying the module's `//!`
+  doc — and the identifier boost was crediting `use std` as a symbol name. `store.rs#use` and
+  `resident.rs#use` were beating the actual functions. Dropping the boost for `use` fragments
+  (the chunk stays indexed) took **top-5 from 9/20 to 10/20**, and 11/20 once the eval set stopped
+  measuring itself.
+
+**The eval set now contaminates its own corpus.** `crates/rozum-agent/tests/rag-eval.json` and
+this spec are indexed and quote the questions verbatim, so both rank #1 for them — worth +1 to +2
+of apparent score. The numbers above exclude hits from those two files. This is
+`rag-self-reference-contamination` arriving in the measurement rather than in the product, and it
+is the clearest possible demonstration of it.
+
+Current honest standing: **top-1 8/20, top-5 11/20**, with the remaining gap owned by ranking, not
+vocabulary.
 ## Out of scope
 
 - **Embeddings** (`rag-embeddings-backend`) — the justified next step, and it lands behind the
   existing `Retriever` seam. Cost is a resident model beside the frozen 4B, so it lands under the
   residency-admission rules rather than beside them. Judge it on this eval set.
-- **Stemming / a synonym list** — cheaper than embeddings and would close some of the eleven
-  ("resident"/"residency"). Worth measuring first, precisely because it is cheap.
+- **Stemming** — measured and rejected, see the correction above. A curated SYNONYM list is a
+  different bet and still open, but it now has to beat 8/20 top-1 rather than fix a vocabulary
+  problem that turned out not to exist.
 - `rag-self-reference-contamination` — a document quoting a query outranks the code for it. The
   code slots reduce the symptom without addressing the cause.
