@@ -39,7 +39,16 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         is_query: bool,
     ) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
         let text = if is_query {
-            format!("Instruct: Given a question about a codebase, retrieve the code or document that answers it\nQuery: {text}")
+            {
+                // Part of Qwen3-Embedding's recipe, and the model is sensitive to it — the first
+                // wording used here was simply invented, so it is a variable rather than a
+                // constant. Empty means "no instruction at all", which is itself a variant worth
+                // measuring: the recipe is for retrieval in general, not for code.
+                let instr = std::env::var("EMB_INSTR").unwrap_or_else(|_| {
+                    "Given a question about a codebase, retrieve the code or document that answers it".into()
+                });
+                if instr.is_empty() { text.to_string() } else { format!("Instruct: {instr}\nQuery: {text}") }
+            }
         } else {
             text.to_string()
         };
@@ -141,10 +150,25 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     toks.sort_by_key(|(_, ids)| ids.len());
 
+    // Corpus vectors do NOT depend on the query instruction, so cache them on disk: sweeping
+    // instructions then costs 26 query embeddings instead of a 276 s corpus pass per variant.
+    let cache_path = std::env::var("EMB_CACHE").unwrap_or_default();
+    let cached: Option<Vec<Vec<f32>>> = if cache_path.is_empty() {
+        None
+    } else {
+        std::fs::read(&cache_path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Vec<Vec<f32>>>(&b).ok())
+            .filter(|v| v.len() == chunks.len())
+    };
     let t0 = std::time::Instant::now();
     let mut vecs: Vec<Vec<f32>> = vec![Vec::new(); chunks.len()];
     let mut done = 0usize;
-    let mut start = 0usize;
+    let mut start = if cached.is_some() { toks.len() } else { 0 };
+    if let Some(c) = &cached {
+        vecs = c.clone();
+        eprintln!("corpus vectors from cache ({})", cache_path);
+    }
     while start < toks.len() {
         // Sorted ascending, so the last row in the window is the widest; grow the window while
         // rows x width stays inside the budget.
@@ -197,6 +221,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     eprintln!("\rembedded {} chunks in {:?} (token budget {budget})", chunks.len(), t0.elapsed());
 
+    if !cache_path.is_empty() && cached.is_none() {
+        let _ = std::fs::write(&cache_path, serde_json::to_vec(&vecs)?);
+    }
     let eval: serde_json::Value = serde_json::from_slice(&std::fs::read(eval_path)?)?;
     let (mut top1, mut top5, mut n) = (0, 0, 0);
     for q in eval["questions"].as_array().into_iter().flatten() {

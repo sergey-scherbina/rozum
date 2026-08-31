@@ -305,7 +305,14 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   took embeddings alone to **10/26 & 16/26** and the build DOWN to 276 s — better and cheaper,
   since there is less text; and re-tuning the fusion weights (embeddings deserve the higher weight
   even though they are weaker alone — in a fusion what pays is finding what the other misses) took
-  the pair to **~11/26 & ~18-19/26**. So the gain over BM25 is +2 top-1 and +3-4 top-5, not +1/+2.
+  the pair to **~11/26 & ~18-19/26**. THEN the QUERY INSTRUCTION — a one-line string that had been
+  invented on the spot — was swept, and it was worth more than any of the machinery:
+  `"Retrieve the source code that implements the behaviour described"` gives **12/26 & 20/26**
+  alone, and **11/26 & 21/26** fused. The word carrying it is `implements` (dropping it costs
+  1 top-1 and 2 top-5); Qwen's own canonical web-search instruction is the WORST of four tried.
+  Final: BM25 9/26 & 15/26 -> **+3 top-1 and +5-6 top-5**, three times the first spike's gain at a
+  quarter of its build cost. Embeddings alone now have the best top-1 and fusion the best top-5 —
+  BM25 has become the junior partner, kept because it is the fallback when no model is admitted.
   So embeddings alone LOSE; fused they win +1 top-1 and +2 top-5, because the two miss different
   questions — that is the whole argument for carrying both.
   Price: 336 MB model resident beside the frozen 4B (so under the residency-admission rules, with

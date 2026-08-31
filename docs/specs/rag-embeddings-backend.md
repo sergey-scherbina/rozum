@@ -20,8 +20,9 @@ head.
   BM25 (what ships, w/ slots)  9/26      15/26
   embeddings alone             7/26      15/26
   RRF fusion of the two       10/26      17/26
-  ...after distilling what is embedded and re-tuning fusion:
-  best fusion                 11/26      18/26   (or 10/26 & 19/26, see below)
+  ...after distilling what is embedded, tuning the query instruction, and re-tuning fusion:
+  embeddings alone            12/26      20/26
+  fused                       11/26      21/26
 ```
 
 **Embeddings alone LOSE to BM25.** Fused by reciprocal rank they win by +1 top-1 and +2 top-5,
@@ -53,7 +54,8 @@ confident, wrong "embeddings do not work here".
 - Every search needs the query embedded, so the model must be loadable at query time or the search
   falls back.
 
-**For +2 top-1 and +3–4 top-5 out of 26.** A real gain and a real price, close enough that this is a
+**For +3 top-1 and +5–6 top-5 out of 26** — three times the gain the first spike measured, at a
+quarter of its build cost. A real gain and a real price, close enough that this is a
 judgement call rather than an obvious yes — which is why the spike stops at the measurement rather
 than proceeding into the plumbing. The build cost was the loudest argument against and batching
 halved it (718 s -> 330 s), with incremental refresh making it a once-per-project cost rather than
@@ -84,16 +86,46 @@ because the doc's words were already in the chunk and boosting merely scaled exi
 every chunk equally. Here the text the model sees is REPLACED, so the syntax is not competing at
 all — a different bet, not a retry of a losing one.
 
+### The query instruction is worth more than any of the machinery
+
+Qwen3-Embedding wraps the QUERY in an instruction. The one used until now was invented on the spot
+(`"Given a question about a codebase, retrieve the code or document that answers it"`). It is a
+string, and the model is sensitive to it — so it was swept. Cheap, once corpus vectors are cached:
+the instruction only affects queries, so each variant costs 26 embeddings rather than a 276 s pass.
+
+```text
+  invented (what the numbers above used)                        10/26   16/26
+  none at all                                                    9/26   17/26
+  Qwen's canonical "web search query / relevant passages"       10/26   14/26
+  "Retrieve the source code that implements the behaviour described"
+                                                                12/26   20/26
+```
+
+A one-line string, worth +2 top-1 and +4 top-5 — more than distillation, batching or fusion
+weights bought. The neighbourhood is stable rather than a lucky draw (11–12 and 18–20 across five
+nearby wordings), and the word that carries it is **implements**: dropping it falls back to 11/18,
+while swapping "source code" for "function" or adding "or document" moves nothing. The canonical
+web-search instruction is the WORST of the four — a recipe written for passage retrieval, applied
+to code, actively misleads.
+
 ### Fusion weights
 
 With the distilled vectors, re-tuned (free — the rankings are already computed):
 
+Re-tuned on the best embedding configuration:
+
 ```text
-  k=60  BM25 1 : emb 1     10/26   18/26
-  k=60  BM25 1 : emb 2     10/26   19/26
-  k=10  BM25 1 : emb 3     11/26   18/26
-  k=60  BM25 2 : emb 1      9/26   17/26
+  BM25 alone                        9/26   15/26
+  embeddings alone                 12/26   20/26
+  fused  k=10  BM25 1 : emb 2      11/26   21/26
+  fused  k=60  BM25 1 : emb 1       9/26   19/26
+  fused  k=60  BM25 2 : emb 1       9/26   17/26   (favouring BM25: worse)
 ```
+
+The inversion is worth noticing: **embeddings alone now have the best top-1 (12) and fusion the
+best top-5 (21)** — BM25 has become the weaker partner and drags top-1 down when weighted equally.
+Fusion is still the right shape, because BM25 must remain the fallback for when the model cannot
+be admitted at all, but it is no longer the senior source.
 
 Embeddings deserve the HIGHER weight even though they were the weaker source alone, because in a
 fusion what pays is not average quality but finding something the other misses. Boosting BM25
