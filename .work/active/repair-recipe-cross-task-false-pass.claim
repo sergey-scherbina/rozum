@@ -1,6 +1,0 @@
-feature/repair-recipe-cross-task-false-pass 2026-08-31T13:27:25Z
-agent: claude-code
-heartbeat: 2026-08-31T13:27:25Z
-status: in-progress
-done-so-far: verified live — mathlib recipe guard matches debug+multibug+apportion; recipe rewrites lib.rs wholesale so cargo test goes green on a task never solved
-next: narrow the guard to debug's unique phrase; add a test asserting no recipe fires for the other tasks
