@@ -1,5 +1,45 @@
 # Bugs
 
+## BUG-065 — the benchmark repair recipe for `debug` also fires for `multibug` and `apportion`, manufacturing FALSE PASSES in the model matrix
+
+FIXED 2026-08-31. Severity is about the NUMBERS, not the hint: this one credited models with
+solving tasks they never touched, in the boards used to compare them.
+
+`benchmark_repair_recipe` in `src/main.rs` gives weak local executors a whole-file rewrite instead
+of letting them line-patch a corrupt 20-line file. The mathlib arm was guarded by
+
+```
+("there is a rust library" && "cargo test" && "src/lib.rs") || <the debug tool_hint>
+```
+
+and that first clause is the OPENING LINE of three prompts in `scripts/bench/tasks.json`: `debug`
+(difficulty 5), `multibug` (8) and `apportion` (10). Only `debug` is mathlib.
+
+Why it is not merely a wrong hint. The recipe says to *replace `src/lib.rs` with EXACTLY this
+content*, and that content carries its own passing `adds` test. For `multibug` and `apportion` it
+therefore deletes the functions under test AND the tests that graded them, leaving one trivially
+green test — and `agentic.sh` verifies both tasks with plain `cargo test -q` exit status. So a
+repair round that followed the recipe scored PASS on the two hardest library tasks in the set.
+The `.rozum-seed` / `workdir_untouched` guard does not catch it either: it detects an agent that
+wrote NOTHING, not one that overwrote everything.
+
+Fix: key the arm on `fix the bug so the test passes`, which is unique to `debug` (verified against
+all prompts in `tasks.json`; `multibug`'s hint says "without changing the tests", plural, and never
+the contiguous debug phrase).
+
+The gate is the part worth keeping. `benchmark_repair_recipe_matches_only_matrix_prompts` already
+existed and passed throughout — it asserts recipes FIRE for prompts that have one and never that
+they stay SILENT for prompts that do not, so its name promised "only" and its body could only ever
+fail in one direction. The new
+`benchmark_repair_recipe_never_fires_for_a_foreign_task` drives every prompt in the real
+`tasks.json` (via `include_str!`, not a copy — a copy would drift out of the very collision it
+detects) and names the offenders; reverting the guard makes it report exactly
+`multibug` and `apportion`.
+
+Found while releasing a 12-day-stale claim (`repair-diagnostic-wrong-task`, agent gone, worktree
+empty). The claim recorded the symptom in one line; the code still had it. Verifying a stale
+claim against the code before discarding it is what turned a bookkeeping chore into this.
+
 ## BUG-064 — a `content`-shaped tool-arg whose raw text is itself valid JSON parses as an object/array and still triggers "Invalid tool parameters"
 
 - **Status:** FIXED (`crates/rozum-core/src/serving.rs::coerce_args_to_declared_schema`).

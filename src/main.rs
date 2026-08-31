@@ -6938,9 +6938,19 @@ cargo run -- "5 1 2 + 4 * + 3 -"
         );
     }
 
-    if (l.contains("there is a rust library")
-        && l.contains("cargo test")
-        && l.contains("src/lib.rs"))
+    // NARROW ON PURPOSE — this recipe REPLACES src/lib.rs wholesale, tests included, so a guard
+    // that is merely "sounds like a lib debug task" is not a wrong hint, it is a FALSE PASS: the
+    // file it writes carries its own passing `adds` test, `cargo test` goes green, and the harness
+    // scores a task the model never solved. The guard used to be
+    //     ("there is a rust library" && "cargo test" && "src/lib.rs") || <the debug hint>
+    // and that first clause is the opening line of THREE prompts in scripts/bench/tasks.json —
+    // `debug` (difficulty 5), `multibug` (8) and `apportion` (10). Only `debug` is mathlib; the
+    // other two would have had their real functions and their real tests overwritten by an `add`
+    // that trivially passes, in the numbers the model matrix is read from.
+    // `fix the bug so the test passes` and the debug tool_hint are each unique to `debug`
+    // (multibug's hint says "without changing the tests", plural, and never this contiguous
+    // phrase). Any new recipe here must key on something ONLY its own task says.
+    if l.contains("fix the bug so the test passes")
         || l.contains("fix src/lib.rs without changing the test")
     {
         return Some(
@@ -10684,6 +10694,44 @@ mod chain_tests {
         );
 
         assert!(benchmark_repair_recipe("Fix the real project bug in this repository").is_none());
+    }
+
+    /// The "only" half of the test above, which that test's NAME claimed and its body never
+    /// checked: it asserts the recipes fire for the prompts that have one, and nothing asserted
+    /// they stay silent for the prompts that do not. So it passed for as long as the mathlib guard
+    /// also swallowed `multibug` and `apportion` — a gate that can only ever go one way.
+    ///
+    /// Driven from the REAL prompt file rather than copies, because the failure being gated is
+    /// precisely a prompt matching a recipe written for a different task: a copy pasted here would
+    /// drift out of the collision it exists to detect. A recipe rewrites the whole source file, so
+    /// firing on the wrong task does not produce a bad hint, it produces a FALSE PASS — the file
+    /// brings its own passing test, `cargo test` goes green, and the harness credits a task that
+    /// was never solved.
+    ///
+    /// Adding a task to tasks.json fails this test until the task is listed on one side or the
+    /// other, which is the intended cost.
+    #[test]
+    fn benchmark_repair_recipe_never_fires_for_a_foreign_task() {
+        const TASKS: &str = include_str!("../scripts/bench/tasks.json");
+        let doc: serde_json::Value = serde_json::from_str(TASKS).expect("tasks.json parses");
+        let tasks = doc["tasks"].as_object().expect("tasks.json has a tasks object");
+        assert!(tasks.len() >= 8, "suspiciously few tasks: {}", tasks.len());
+
+        // The tasks a recipe is deliberately written for. Everything else must get None.
+        let with_recipe = ["build", "fix", "test", "debug", "rpn"];
+
+        let mut wrong: Vec<String> = Vec::new();
+        for (name, t) in tasks {
+            let name = name.as_str();
+            let prompt = t["prompt"].as_str().unwrap_or("");
+            let fired = benchmark_repair_recipe(prompt).is_some();
+            match (with_recipe.contains(&name), fired) {
+                (false, true) => wrong.push(format!("{name}: got a recipe meant for another task")),
+                (true, false) => wrong.push(format!("{name}: lost its recipe")),
+                _ => {}
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 }
 
