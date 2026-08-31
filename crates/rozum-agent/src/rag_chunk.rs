@@ -409,27 +409,35 @@ const SKIP_DIRS: &[&str] =
 /// Cost tracks BYTES, not block count — 16 KB as 682 sections (25.5 s) and as 8 sections
 /// (22.8 s) cost the same — so nothing about how a document is structured avoids it.
 ///
-/// **Raised to 1 MB on 2026-08-31 — above every real document, and the cap now exists only as
-/// a guard against a pathological non-ASCII input.** The parse became LINEAR in file size over a
-/// series of fixes in scalascript's Rust backend and uniML (self-append/self-extend to `push`/
-/// `extend`, read-only `Vec` parameters and captures by reference, `take`/`drop`/`slice`
-/// borrowing instead of cloning their receiver, and the two index-based string scanners hoisting
-/// one `toVector`): 256 KB 173.4 s → 0.28 s, ~615×, at ~2× per doubling.
+/// **Raised to 1 MB on 2026-08-31, when the parse became LINEAR — on non-ASCII too.** A series of
+/// fixes in scalascript's Rust backend and uniML got there: self-append/self-extend lowered to
+/// `push`/`extend`, read-only `Vec` parameters and captures passed by reference, `take`/`drop`/
+/// `slice` borrowing instead of cloning their receiver, the index-based string scanners hoisting
+/// one `toVector`, and finally `MdLine.split` slicing that code-unit vector rather than calling
+/// `substring` on the whole document. 256 KB went 173.4 s → 0.108 s, roughly 1600×.
 ///
-/// Measured on this repo's OWN largest documents, which is what the cap has to survive:
+/// Re-measured 2026-08-31 against the regenerated crate, on this repo's own largest documents and
+/// on synthetic worst cases, best of 3:
 ///
-///     SPRINT.md      503 KB   2.1% non-ASCII   5.26 s
-///     CHANGELOG.md   443 KB   1.4% non-ASCII   2.82 s
-///     BACKLOG.md     140 KB   1.4% non-ASCII   0.75 s
+/// ```text
+///   SPRINT.md      503 KB   0.8% non-ASCII   3.244 s
+///   CHANGELOG.md   451 KB   0.5% non-ASCII   1.096 s
+///   BACKLOG.md     142 KB   0.5% non-ASCII   0.564 s
 ///
-/// SPRINT.md is the file that started this: it once extrapolated to ~7 HOURS and forced a 16 KB
-/// cap that left 12% of the docs unparsed.
+///   Cyrillic  83% non-ASCII      32 KB 0.087   64 KB 0.170   128 KB 0.340   512 KB 1.301
+///   emoji     74% non-ASCII      32 KB 0.204   64 KB 0.402   128 KB 0.814   512 KB 3.193
+/// ```
 ///
-/// WHY A CAP AT ALL, STILL: linearity holds on ASCII. Non-ASCII is measurably NOT linear yet —
-/// ~×3.1–3.8 per doubling for Cyrillic and for emoji — because `charAt(i)` costs O(i) whenever the
-/// ASCII fast path does not apply, and only two scanners were hoisted. 1 MB bounds the worst case
-/// at roughly ten seconds for one file while covering every document anyone here writes. Removing
-/// the cap outright is `ssc-rust-string-repr`'s payoff, not this one's.
+/// Every doubling costs ~2× (×1.93–2.02 across both non-ASCII series), so cost is now predictable
+/// at roughly 6.5 s/MB in the worst case measured — emoji-dense text and, separately, ASCII
+/// SPRINT.md, which land at the same rate for different reasons.
+///
+/// WHY A CAP AT ALL, STILL: not super-linearity any more — that is fixed — but LATENCY. A linear
+/// parser still owes ~6.5 s for a 1 MB file, and [`MAX_FILE_BYTES`] admits documents up to 4 MB, so
+/// without a cap one file could hold indexing for half a minute. 1 MB sits above every document
+/// anyone here writes (the largest is SPRINT.md at 503 KB) while bounding a single file's tree
+/// parse. Raise it only with a measurement, not an estimate: the last two raises on synthetic
+/// reasoning both had to be reverted.
 pub const MAX_MARKDOWN_TREE_BYTES: usize = 1024 * 1024;
 
 /// Files larger than this are skipped outright — a multi-megabyte blob is generated output or
@@ -839,8 +847,8 @@ mod tests {
     }
 
     // Behavior: a markdown file past the size cap is still INDEXED, just via the paragraph
-    // path — the quadratic parser (see MAX_MARKDOWN_TREE_BYTES) must never make a big file
-    // simply vanish from the index.
+    // path — the cap (see MAX_MARKDOWN_TREE_BYTES) bounds one file's parse latency and must
+    // never make a big file simply vanish from the index.
     #[test]
     fn oversized_markdown_degrades_to_text_but_is_indexed() {
         let dir = tempfile::tempdir().unwrap();

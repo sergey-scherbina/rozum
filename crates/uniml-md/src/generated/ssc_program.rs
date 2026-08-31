@@ -805,8 +805,8 @@ impl LiteralProcessor {
         while (index < crate::runtime::_str_length(&text)) {
             let char = crate::runtime::_str_char_at(&text, index);
             if ((isHighSurrogate((char.clone()).0) && ((index + 1i64) < crate::runtime::_str_length(&text))) && isLowSurrogate((crate::runtime::_str_char_at(&text, (index + 1i64))).0)) { emit(format!("{}{}", char, crate::runtime::_str_char_at(&text, (index + 1i64))), true, &mut nextTokenId, &mut out, &mut position, source.clone());
-            (index += 2i64); } else { if (isHighSurrogate((char.clone()).0) || isLowSurrogate((char.clone()).0)) { emit(format!("{}", char), false, &mut nextTokenId, &mut out, &mut position, source.clone());
-            (index += 1i64); } else { emit(format!("{}", char), true, &mut nextTokenId, &mut out, &mut position, source.clone());
+            (index += 2i64); } else { if (isHighSurrogate((char.clone()).0) || isLowSurrogate((char.clone()).0)) { emit((char).to_string(), false, &mut nextTokenId, &mut out, &mut position, source.clone());
+            (index += 1i64); } else { emit((char).to_string(), true, &mut nextTokenId, &mut out, &mut position, source.clone());
             (index += 1i64); } }
         };
         ProcessBatch { values: out.clone(), diagnostics: Vec::new() }
@@ -1495,7 +1495,7 @@ impl MarkdownBlocks {
         let mut i = 0i64;
         while (i < crate::runtime::_str_length(&lexeme)) {
             let c = crate::runtime::_str_char_at(&lexeme, i);
-            out.push(format!("{}", c));
+            out.push((c).to_string());
             if (c == 10i64) { (k += 1i64);
             if (k < ((*segs).len() as i64)) { out.push(segs[(k.clone()) as usize].clone().prefix); } else { (); } } else { (); }
             (i += 1i64);
@@ -2884,17 +2884,17 @@ pub fn split(text: String) -> Vec<MdLine> {
     while (index < (chars.len() as i64)) {
         let char = chars[(index) as usize].clone();
         match (char).clone() {
-            10i64 => { lines.push(MdLine { content: crate::runtime::_str_substring(&text, lineStart, index), ending: "\n".to_string() });
+            10i64 => { lines.push(MdLine { content: ((chars)[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(""), ending: "\n".to_string() });
             (index += 1i64);
             lineStart = index; },
-            13i64 => { if (((index + 1i64) < (chars.len() as i64)) && (chars[((index + 1i64)) as usize].clone() == 10i64)) { lines.push(MdLine { content: crate::runtime::_str_substring(&text, lineStart, index), ending: "\r\n".to_string() });
-            (index += 2i64); } else { lines.push(MdLine { content: crate::runtime::_str_substring(&text, lineStart, index), ending: "\r".to_string() });
+            13i64 => { if (((index + 1i64) < (chars.len() as i64)) && (chars[((index + 1i64)) as usize].clone() == 10i64)) { lines.push(MdLine { content: ((chars)[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(""), ending: "\r\n".to_string() });
+            (index += 2i64); } else { lines.push(MdLine { content: ((chars)[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(""), ending: "\r".to_string() });
             (index += 1i64); }
             lineStart = index; },
             _ => { (index += 1i64); },
         }
     };
-    if (lineStart < (chars.len() as i64)) { lines.push(MdLine { content: crate::runtime::_str_substring_from(&text, lineStart), ending: "".to_string() }); } else { (); }
+    if (lineStart < (chars.len() as i64)) { lines.push(MdLine { content: ((chars).iter().cloned().skip(lineStart as usize).collect::<Vec<_>>()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(""), ending: "".to_string() }); } else { (); }
     lines
 }
 

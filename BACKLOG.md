@@ -131,12 +131,19 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
 
   If a future workload genuinely needs O(1) code-unit indexing, the design is still recorded in
   `docs/specs/ssc-rust-string-representation.md` — but nothing measured today asks for it.
-- [ ] **uniml-nonascii-residual-superlinear** — after the `_str_substring` fix, non-ASCII parse
-  TIME still grows ~×3.25 per doubling while ASCII is ~×2.1. It is NOT allocation (bytes are
-  linear now, measured) and NOT `charAt` (calls and walk work both linear, measured), so one
-  compute-side term remains unaccounted for. Cheap to chase with the tools this series built:
-  the counting allocator, the sampling allocator with backtraces, and comparing two input sizes to
-  separate a quadratic site from a linear one by number rather than by argument.
+- [x] **uniml-nonascii-residual-superlinear** — DONE 2026-08-31 (scalascript `60d824c9a`, vendored
+  here). The residual term was `MdLine.split`, and it was introduced by an earlier commit in this
+  same series: replacing per-character `substring` with one slice per line was a real improvement,
+  but `substring` counts from the START of the string, so on a backend where that mapping is a walk
+  it costs O(index) — growing with position in the file. Quadratic again with a smaller constant,
+  invisible on ASCII because the fast path is a vectorised prefix check. `chars` is already the
+  code-unit vector the loop indexes, so slicing THAT is O(line length) and needs no mapping at all.
+  Found by the method this entry proposed — instrumenting every string helper at two input sizes:
+  `substring` calls grew ×4.00 with the input while its walk distance grew ×15.20 and the longest
+  string handed to it was the whole document, whereas `code_at`/`length`/`substring_from` were
+  ×4.00 on both counts. Non-ASCII 256 KB 0.970 s → 0.108 s; both curves now ~2× per doubling
+  (Cyrillic ×1.93–2.00, emoji ×1.97–2.02). `MAX_MARKDOWN_TREE_BYTES` re-justified as a LATENCY
+  bound rather than a super-linearity guard.
 
 - [ ] **rag-uniml-unenforced-limits** — smaller uniML finding from the same run: `maxBlocks` and
   `maxLineCodePoints` are ACCEPTED by `MarkdownLimits` and then silently not enforced (a document
