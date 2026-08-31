@@ -1,6 +1,0 @@
-feature/rag-expose-to-agents 2026-08-31T15:24:11Z
-agent: claude-code
-heartbeat: 2026-08-31T15:24:11Z
-status: in-progress
-done-so-far: baseline measured — search_documents (rag_lite.rs:143) registered nowhere; 46,733 chunks / 31.4 MB / 33 s build / 0.35 s per search is a disk reload
-next: spec first (docs/specs/rag-expose-to-agents.md), then the MCP tool on mcp_server.rs with the index held in memory, then the in-process CallbackToolSource registration
