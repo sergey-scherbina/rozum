@@ -313,6 +313,18 @@ async fn main() {
     // half its tools produces a confidently wrong answer (`nadia:SPEC.md` §2.1).
     let servers = connect_mcp(&opts, &root).await;
     let mut sources = MultiToolSource::new().with(tool_source(sandbox));
+    // Project retrieval, when this project HAS an index — the in-process half of
+    // `docs/specs/rag-expose-to-agents.md`. `project_retrieval_tools` was written for exactly
+    // this and had no callers; nadia is the local agent that benefits most, because it is the one
+    // whose model cannot fall back on a large context window.
+    //
+    // Silent when there is no index, and that is deliberate here (unlike the MCP tool, which is
+    // ASKED a question and must answer why it cannot): a tool that is absent costs the model
+    // nothing, while one that is present and always answers "no index" burns schema tokens on
+    // every request to say so.
+    if let Some(rag) = rozum_agent::rag_chunk::project_retrieval_tools(&root) {
+        sources = sources.with(rag);
+    }
     for s in servers {
         println!("{}", nadia::mcp::connected_line(&s));
         sources = sources.with(s);

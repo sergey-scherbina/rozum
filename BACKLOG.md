@@ -153,6 +153,13 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   exists the tool should report the index's age with its results, so a stale answer is visibly
   stale rather than quietly wrong. Lands with or immediately behind P0.
 
+- [ ] **rag-index-scope (P2, cheap)** — the index carries material that can only mislead. Found
+  while probing `rag.search` live: `"how does the proxy forward a tool call"` ranked
+  `scripts/bench/results/_archive-…/…t5-code-easy.txt#p1` in its top 3 — archived benchmark
+  OUTPUT, indexed as if it were project prose. Bench results, `_archive-*`, and generated
+  artefacts are not things an agent asks about, and they dilute the df statistics BM25 ranks on,
+  so excluding them helps precision twice. Smaller and independent of the ranking work below;
+  do it first and re-measure, so the ranking change is judged on a clean corpus.
 - [ ] **rag-code-retrieval-quality (P2)** — the sharp end of the "beat grep" bar, and where
   `rag-embeddings-backend` actually belongs. Measured today: BM25 ranks prose correctly and code
   by word overlap, which for code is close to useless (a query about parameter passing returned a

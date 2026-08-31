@@ -23,6 +23,10 @@ mcp-http = [
 [dependencies]
 # Where this user keeps files — one rule for the workspace (docs/specs/windows-user-paths.md).
 rozum-paths = { path = "../rozum-paths" }
+# `rag.search` on the stdio proxy (docs/specs/rag-expose-to-agents.md). Weighed before adding:
+# rozum-agent pulls rozum-core, rozum-models, uniml-md, tokio, rmcp and serde — no MLX and no
+# engine — and three of those are already here, so this edge costs build time, not runtime weight.
+rozum-agent = { path = "../rozum-agent" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 futures-util = "0.3"

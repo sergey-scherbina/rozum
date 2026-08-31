@@ -49,19 +49,19 @@ later one:
 
 ## Behavior
 
-- [ ] `rag.search` appears in the proxy's `tools/list` next to `rooms.list`, and an agent that
+- [x] `rag.search` appears in the proxy's `tools/list` next to `rooms.list`, and an agent that
       already has the rozum MCP server configured gets it with no client-side change.
-- [ ] A query returns hits whose `id` names both file and item (`crates/…/rag_chunk.rs#fn
+- [x] A query returns hits whose `id` names both file and item (`crates/…/rag_chunk.rs#fn
       chunk_code`), so the result is directly openable.
-- [ ] The index is loaded lazily, ONCE per proxy process, and reused across calls — the CLI's
+- [x] The index is loaded lazily, ONCE per proxy process, and reused across calls — the CLI's
       0.35 s per search is a 31 MB disk reload, not a search, and must not be paid per call.
-- [ ] No index → a clear, actionable answer naming `rozum rag index`, never an error or an
+- [x] No index → a clear, actionable answer naming `rozum rag index`, never an error or an
       empty list that reads as "nothing matches".
-- [ ] Every response carries `index_age_secs`; `stale` is true past a threshold, and the
+- [x] Every response carries `index_age_secs`; `stale` is true past a threshold, and the
       threshold is stated in the tool description so the model can weigh it.
-- [ ] The project is resolved with the proxy's existing `detect_project()` (nearest ancestor
+- [x] The project is resolved with the proxy's existing `detect_project()` (nearest ancestor
       with `.git`, else cwd) — the same project the agent's room belongs to.
-- [ ] `top_k` is capped so one call cannot flood the context window it is meant to save.
+- [x] `top_k` is capped so one call cannot flood the context window it is meant to save.
 
 ## Design
 
@@ -77,6 +77,35 @@ not runtime weight. The alternative considered was the `OnceLock<fn>` register-h
 workspace already uses (`rozum-core::obs`), keeping the edge out; rejected for P0 because it
 buys nothing here — the hook's only registrant would be the same binary — and it hides a
 direct call behind indirection. Revisit if `rozum-meet` build time becomes a problem.
+
+## Results
+
+Verified 2026-08-31 through a real MCP handshake against `rozum-meet mcp-proxy` (not only unit
+tests): `tools/list` returns `rag.search` alongside `rooms.*`/`meeting.*`, and a call answers
+`chunks: 46733, index_age_secs: 0, stale: false` with three hits. The plumbing this spec is
+about works.
+
+**And the same probe measured the thing that decides whether it gets USED, so it is recorded
+here rather than discovered again later.** Two code queries returned each other's answers:
+
+```text
+"the function that decides whether a model may become resident"
+   35.82  crates/rozum-meeting/src/meeting/daemon_proxy.rs#fn forward      <- wrong
+"how does the proxy forward a tool call to the daemon"
+   21.51  docs/specs/cpu-uma-offload.md#risks-open-questions               <- wrong
+   20.53  scripts/bench/results/_archive-…/…t5-code-easy.txt#p1            <- noise
+```
+
+BM25 is word overlap with no notion of meaning: "resident"/"model" matched `forward`'s prose,
+while the answer to the second question was handed to the first. Against this spec's own bar —
+retrieval must beat grep or be correctly ignored — **code retrieval does not clear it yet**.
+That makes `rag-code-retrieval-quality` (P2) not polish but the item that makes this one pay,
+and it gives that work a starting eval pair. Prose retrieval does clear the bar (`"residency
+admission queue"` → the right spec, top hit), so the tool is useful today for docs.
+
+Second finding from the same probe: archived benchmark output under
+`scripts/bench/results/_archive-*/` is indexed and ranks. Retrieval scope is a cheap, separate
+lever on the same problem — filed as `rag-index-scope`.
 
 ## Out of scope
 

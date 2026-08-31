@@ -66,6 +66,14 @@ const PROXY_INSTRUCTIONS: &str =
      `rozum meetings inbox --as <your-handle>` anytime to see messages addressed to you.";
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RagSearchParams {
+    /// What you are looking for, in your own words — a concept, a symptom, a behaviour.
+    pub query: String,
+    /// How many chunks to return. Default 5, capped at 20.
+    pub top_k: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct JoinParams {
     /// Room name (from rooms.list). Switches the session to this room.
     pub name: String,
@@ -109,9 +117,27 @@ struct State {
     presence_announced: bool,
 }
 
+/// The project's RAG index, loaded at most once per proxy process.
+///
+/// In its OWN lock, deliberately not a `State` field: `State` is taken on every forward and by
+/// the background wakeup task, and a 31 MB index has no business on that path. `tried` is what
+/// makes a MISSING index cheap — without it every call would re-stat and re-parse a file that is
+/// not there, and "no index yet" is the common case in a fresh checkout.
+#[derive(Default)]
+struct RagCache {
+    index: Option<Arc<dyn rozum_agent::rag_lite::Retriever>>,
+    chunks: usize,
+    /// The index file's mtime when we loaded it. Reported to the caller as an age, and compared
+    /// on each call so an index rebuilt underneath a long-lived agent session is picked up
+    /// instead of served stale until the agent restarts.
+    indexed_at: Option<SystemTime>,
+    tried: bool,
+}
+
 #[derive(Clone)]
 pub struct DaemonProxy {
     state: Arc<Mutex<State>>,
+    rag: Arc<Mutex<RagCache>>,
     tool_router: ToolRouter<Self>,
     /// Epoch-seconds of the agent's last MCP request, updated in `forward_raw`. The idle
     /// watchdog reaps a proxy whose agent has gone silent (abandoned it on reconfig) so it
@@ -229,6 +255,7 @@ impl DaemonProxy {
                 wakeup_task: None,
                 presence_announced: false,
             })),
+            rag: Arc::new(Mutex::new(RagCache::default())),
             tool_router: Self::tool_router(),
             last_active: Arc::new(AtomicU64::new(now_epoch())),
         }
@@ -569,6 +596,90 @@ impl DaemonProxy {
     #[tool(name = "meeting.status", description = "Current room status.")]
     pub async fn status(&self) -> CallToolResult {
         self.forward("meeting.status", json!({})).await
+    }
+
+    /// The description is load-bearing, not decoration. This tool competes with grep, glob and
+    /// Read, which are exact, instant and never stale — so it has to say when NOT to reach for
+    /// it, or a model will call it for lookups grep answers better and learn to distrust it.
+    #[tool(
+        name = "rag.search",
+        description = "Search THIS project's code and docs by meaning, over syntactic chunks \
+         (a markdown section, a Rust `fn`/`impl`/`struct`). Use it when you do NOT know the exact \
+         token to grep for: a concept (\"where is admission decided\"), a symptom, or an \
+         unfamiliar area whose shape you need before the detail. Do NOT use it when you already \
+         know the string, the symbol, or the path — grep and Read are exact, instant and always \
+         current, and this index can be stale (every result reports its age). Results name \
+         `path#item`, so treat a hit as a pointer to open, not as the answer."
+    )]
+    pub async fn rag_search(&self, params: Parameters<RagSearchParams>) -> CallToolResult {
+        let RagSearchParams { query, top_k } = params.0;
+        if query.trim().is_empty() {
+            return tool_text(&json!({ "error": "`query` must not be empty" }));
+        }
+        // Capped: this tool exists to SAVE context, and an uncapped top_k spends more of the
+        // window than the reading it replaces.
+        let k = top_k.unwrap_or(5).clamp(1, 20) as usize;
+
+        let Some(root) = self.state.lock().await.project.clone().map(PathBuf::from) else {
+            return tool_text(&json!({
+                "error": "no project detected for this session; run the agent from inside a repo"
+            }));
+        };
+
+        let (index, chunks, age) = {
+            let mut cache = self.rag.lock().await;
+            let path = rozum_agent::rag_chunk::index_path(&root);
+            let disk_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            // Reload when the file changed under us — an agent session outlives a reindex, and
+            // serving the pre-reindex snapshot until restart is the worst kind of stale: silent.
+            if !cache.tried || (disk_mtime.is_some() && disk_mtime != cache.indexed_at) {
+                cache.tried = true;
+                cache.indexed_at = disk_mtime;
+                match rozum_agent::rag_chunk::load_project_index(&root) {
+                    Some(ix) => {
+                        cache.chunks = ix.len();
+                        cache.index = Some(Arc::new(ix));
+                    }
+                    None => {
+                        cache.chunks = 0;
+                        cache.index = None;
+                    }
+                }
+            }
+            let age = cache
+                .indexed_at
+                .and_then(|t| SystemTime::now().duration_since(t).ok())
+                .map(|d| d.as_secs());
+            (cache.index.clone(), cache.chunks, age)
+        };
+
+        // Not an error and not an empty result list: both read as "nothing matches your query",
+        // which is a different and much more misleading answer than "nobody has built the index".
+        let Some(index) = index else {
+            return tool_text(&json!({
+                "results": [],
+                "no_index": true,
+                "hint": format!(
+                    "no RAG index for {} yet — build it with `rozum rag index` (about 30 s for \
+                     this repo), then call again. Until then use grep/Read.",
+                    root.display()
+                ),
+            }));
+        };
+
+        let results: Vec<Value> = index
+            .search(&query, k)
+            .into_iter()
+            .map(|h| json!({ "id": h.id, "score": h.score, "text": h.text }))
+            .collect();
+        tool_text(&json!({
+            "results": results,
+            "chunks": chunks,
+            "index_age_secs": age,
+            // Freshness is `rag-index-freshness` (P1) and is NOT solved here. What IS solved is
+            // that a stale answer says so instead of passing for current.
+            "stale": age.map(|a| a > RAG_STALE_AFTER_SECS).unwrap_or(true),
+        }))
     }
 
     #[tool(name = "meeting.leave", description = "Leave the current room.")]
@@ -918,6 +1029,17 @@ fn current_uid() -> Option<u32> {
         .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
 }
 
+/// A tool result carrying one JSON text block — the shape `rag.search` answers in, and the same
+/// shape the forwarded room tools arrive in, so a client parses both the same way.
+fn tool_text(v: &Value) -> CallToolResult {
+    CallToolResult::success(vec![Content::text(v.to_string())])
+}
+
+/// How old an index may be before `rag.search` flags it. A working tree changes under an agent
+/// on every edit it makes itself, so this is deliberately short — an hour, not a day. It is a
+/// REPORT, not a refusal: a stale index still answers, it just says it is stale.
+const RAG_STALE_AFTER_SECS: u64 = 3600;
+
 fn value_to_call_result(v: &Value) -> CallToolResult {
     let is_error = v.get("isError").and_then(Value::as_bool).unwrap_or(false);
     let text = v
@@ -1212,6 +1334,117 @@ mod tests {
             envs.get(std::ffi::OsStr::new("UNRELATED_SETTING")),
             Some(&Some(std::ffi::OsString::from("preserved")))
         );
+    }
+
+    /// The defect this whole feature exists to fix, asserted directly: `search_documents` was
+    /// BUILT (`rag_lite.rs`) and served by nothing, so no agent could ever call it. A test that
+    /// only exercised the search would have passed the entire time it was unreachable — the thing
+    /// worth gating is that the tool is in the router the agent's `tools/list` reads.
+    #[test]
+    fn rag_search_is_registered_in_the_tool_router() {
+        let names: Vec<String> = DaemonProxy::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "rag.search"),
+            "rag.search must be served next to the room tools; got {names:?}"
+        );
+        assert!(names.iter().any(|n| n == "rooms.list"), "sanity: {names:?}");
+    }
+
+    /// A missing index must not read as "nothing matches". Those are opposite answers: one says
+    /// the corpus was searched and is silent, the other says nobody built the corpus. An agent
+    /// that cannot tell them apart concludes the code does not exist.
+    #[tokio::test]
+    async fn no_index_says_so_and_names_the_fix() {
+        let project = tempdir().unwrap();
+        let proxy = DaemonProxy::build(
+            project.path().join("meeting.sock"),
+            Some(project.path().to_string_lossy().into_owned()),
+            "claude".into(),
+            false,
+        );
+        let r = proxy
+            .rag_search(Parameters(RagSearchParams { query: "admission".into(), top_k: None }))
+            .await;
+        assert_ne!(r.is_error, Some(true), "a missing index is not an error");
+        let v = tool_result_json(&r);
+        assert_eq!(v["no_index"], true, "got {v}");
+        let hint = v["hint"].as_str().unwrap_or_default();
+        assert!(hint.contains("rozum rag index"), "the hint must name the fix: {hint}");
+    }
+
+    /// The end an agent actually sees: a hit that names `path#item` so it can open the file, and
+    /// the index's age alongside, so a stale answer is visibly stale rather than quietly wrong.
+    #[tokio::test]
+    async fn a_hit_names_the_file_and_the_item_and_reports_index_age() {
+        let project = tempdir().unwrap();
+        let root = project.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/admit.rs"),
+            "/// Decide whether a model may become resident.\n\
+             pub fn admit_model(footprint: u64) -> bool { footprint < 1000 }\n",
+        )
+        .unwrap();
+        let (stats, _) = rozum_agent::rag_chunk::index_and_save(root).unwrap();
+        assert!(stats.chunks > 0, "fixture must produce chunks");
+
+        let proxy = DaemonProxy::build(
+            root.join("meeting.sock"),
+            Some(root.to_string_lossy().into_owned()),
+            "claude".into(),
+            false,
+        );
+        let r = proxy
+            .rag_search(Parameters(RagSearchParams {
+                query: "resident model admission".into(),
+                top_k: Some(3),
+            }))
+            .await;
+        let v = tool_result_json(&r);
+        let results = v["results"].as_array().expect("results array");
+        assert!(!results.is_empty(), "the seeded chunk should rank: {v}");
+        let id = results[0]["id"].as_str().unwrap_or_default();
+        assert!(
+            id.contains("admit.rs") && id.contains('#'),
+            "a hit names file AND item so the agent can open it: {id}"
+        );
+        assert!(v["index_age_secs"].is_number(), "age is always reported: {v}");
+        assert_eq!(v["stale"], false, "a just-built index is not stale: {v}");
+        assert!(v["chunks"].as_u64().unwrap_or(0) > 0, "{v}");
+    }
+
+    /// `top_k` is capped because this tool exists to SAVE context: an uncapped k spends more of
+    /// the window than the reading it replaces.
+    #[tokio::test]
+    async fn top_k_is_capped() {
+        let project = tempdir().unwrap();
+        let root = project.path();
+        for i in 0..50 {
+            std::fs::write(
+                root.join(format!("doc{i}.md")),
+                "# Admission\n\nadmission residency model footprint\n",
+            )
+            .unwrap();
+        }
+        rozum_agent::rag_chunk::index_and_save(root).unwrap();
+        let proxy = DaemonProxy::build(
+            root.join("meeting.sock"),
+            Some(root.to_string_lossy().into_owned()),
+            "claude".into(),
+            false,
+        );
+        let r = proxy
+            .rag_search(Parameters(RagSearchParams {
+                query: "admission".into(),
+                top_k: Some(9999),
+            }))
+            .await;
+        let v = tool_result_json(&r);
+        assert!(v["results"].as_array().unwrap().len() <= 20, "capped at 20: {v}");
     }
 
     /// Extract a tool result's text payload as JSON (the proxy returns the

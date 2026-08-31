@@ -5354,6 +5354,7 @@ dependencies = [
  "ratatui",
  "reqwest 0.12.28",
  "rmcp",
+ "rozum-agent",
  "rozum-confine",
  "rozum-paths",
  "schemars 1.2.1",
