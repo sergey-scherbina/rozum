@@ -1,0 +1,7 @@
+feature/ssc-rust-persistent-vector 2026-08-31T08:43:20Z
+agent: claude-opus-5 (fable)
+heartbeat: 2026-08-31T08:43:20Z
+status: in-progress
+done-so-far:
+next: phase 1 = MEASUREMENT ONLY — Vec vs persistent RRB vs copy-on-write Rc<Vec> under the parser operation mix; deliverable is the table, "no candidate wins" is a valid outcome
+spec: docs/specs/ssc-rust-persistent-vector.md
