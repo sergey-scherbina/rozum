@@ -165,6 +165,174 @@ pub fn chunk_markdown_with_limits(path: &str, text: &str, limits: u::MarkdownLim
     chunks
 }
 
+/// Split a Rust file into item-sized chunks: one per `fn`, `struct`, `impl` member, and so on.
+///
+/// Boundaries come from uniML's `uniml.rust` dialect — a STRUCTURAL dialect, not a Rust parser:
+/// it matches braces while knowing where strings, chars and comments are, which is exactly what
+/// a chunker needs and nothing more. The spans are exact source offsets, so every chunk is a
+/// byte-exact slice of `text` and a `{` inside a string can never end an item early.
+///
+/// `impl` and `mod` members are chunked individually, with the `impl` HEADER folded into the
+/// first member rather than emitted as a chunk of its own that repeats all of them.
+///
+/// A parse that reports Error/Fatal diagnostics, or does not complete, falls back to
+/// [`chunk_text`] — indexing never fails a file, it only degrades granularity. Same rule as
+/// markdown.
+pub fn chunk_code(path: &str, text: &str) -> Vec<Chunk> {
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    let input = u::SourceInput {
+        source: u::SourceId { value: path.to_string() },
+        chunks: vec![u::SourceChunk { text: text.to_string() }],
+    };
+    let result = u::UniML_parse(input, std::rc::Rc::new(u::RustDialect), core_limits());
+    let broken = result
+        .diagnostics
+        .iter()
+        .any(|d| matches!(d.severity, u::Severity::Error | u::Severity::Fatal))
+        || !matches!(result.status, u::CompletionStatus::Complete);
+    if broken {
+        return chunk_text(path, text);
+    }
+
+    // uniML offsets count CODE POINTS; map them to byte offsets once, as chunk_markdown does.
+    let cp_to_byte: Vec<usize> = {
+        let mut v: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+        v.push(text.len());
+        v
+    };
+    let byte_at = |cp: i64| -> usize { *cp_to_byte.get(cp.max(0) as usize).unwrap_or(&text.len()) };
+
+    // (start byte, id fragment) for every chunk this file yields, in source order. Only the
+    // START is recorded: each chunk runs to the NEXT one's start and the last to end of file, so
+    // the chunks TILE the source and nothing — a trailing comment after the last item, a blank
+    // line between two — is ever dropped. Recording explicit ends lost exactly that, which an
+    // existing index_project test caught.
+    let mut items: Vec<(usize, String)> = Vec::new();
+    for root in &result.roots {
+        if let u::UniNode::Branch { kind, edges, span, .. } = root {
+            if !kind.starts_with("rust.") {
+                continue;
+            }
+            let outer_start = byte_at(span.start.offset);
+            // An `impl`/`mod` body: chunk the MEMBERS, folding the header into the first, so a
+            // method is retrievable on its own and the header is not duplicated across all of them.
+            let members: Vec<&u::UniNode> = edges
+                .iter()
+                .map(|e| &e.child)
+                .filter(|c| matches!(c, u::UniNode::Branch { kind, .. } if kind.starts_with("rust.")))
+                .collect();
+            if members.is_empty() {
+                items.push((outer_start, item_frag(kind.as_str(), root)));
+            } else {
+                for (i, mnode) in members.iter().enumerate() {
+                    if let u::UniNode::Branch { kind: mkind, span: mspan, .. } = mnode {
+                        // The first member carries everything from the parent's start, which is
+                        // the `impl Foo {` header (and its doc comment) the reader needs to make
+                        // sense of the method.
+                        let start =
+                            if i == 0 { outer_start } else { byte_at(mspan.start.offset) };
+                        items.push((start, item_frag(mkind.as_str(), mnode)));
+                    }
+                }
+            }
+        }
+    }
+    if items.is_empty() {
+        return vec![Chunk { id: format!("{path}#file"), text: text.to_string() }];
+    }
+
+    let mut chunks: Vec<Chunk> = Vec::new();
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    let mut push = |id_frag: String, slice: &str| {
+        if slice.trim().is_empty() {
+            return;
+        }
+        let mut id = format!("{path}#{id_frag}");
+        let mut n = 1;
+        while !used.insert(id.clone()) {
+            n += 1;
+            id = format!("{path}#{id_frag}-{n}");
+        }
+        chunks.push(Chunk { id, text: slice.to_string() });
+    };
+
+    // Everything before the first item — the module doc comment and the `use` block a reader
+    // needs to resolve the names below.
+    push("preamble".to_string(), &text[..items[0].0]);
+    for i in 0..items.len() {
+        let start = items[i].0;
+        let end = items.get(i + 1).map(|(s, _)| *s).unwrap_or(text.len());
+        push(items[i].1.clone(), &text[start..end.min(text.len())]);
+    }
+    chunks
+}
+
+/// The uniML core limits, restated once (the generated crate inlines its own `Limits.default`
+/// as a topval rather than exporting it, exactly as `default_limits` explains for markdown).
+fn core_limits() -> u::Limits {
+    u::Limits {
+        maxDepth: 512,
+        maxNodes: 10_000_000,
+        maxTokenCodePoints: 16 * 1024 * 1024,
+        maxDiagnostics: 10_000,
+    }
+}
+
+/// A citation fragment for one item: `"fn parse_header"`, `"struct Chunk"`.
+///
+/// The NAME is recovered from the branch's own tokens rather than carried on the instruction:
+/// `Open`'s role lands on the edge attaching a closed frame to its PARENT, so a top-level item —
+/// the case that matters most here — would lose it. Best-effort by design: the first identifier
+/// after the item keyword, skipping a generic parameter list. A wrong name is a worse label,
+/// never a wrong boundary.
+fn item_frag(kind: &str, node: &u::UniNode) -> String {
+    let short = kind.strip_prefix("rust.").unwrap_or(kind);
+    let mut idents: Vec<String> = Vec::new();
+    if let u::UniNode::Branch { edges, .. } = node {
+        let mut depth = 0i32;
+        let mut seen_keyword = false;
+        for e in edges.iter() {
+            if let u::UniNode::Token { value } = &e.child {
+                let lx = value.lexeme.as_str();
+                if value.kind == "rust.punct" {
+                    // Step over `<…>` so `impl<T> Foo` names Foo, not T.
+                    if lx == "<" {
+                        depth += 1;
+                    } else if lx == ">" {
+                        depth -= 1;
+                    }
+                    continue;
+                }
+                if value.kind != "rust.ident" || depth > 0 {
+                    continue;
+                }
+                if !seen_keyword {
+                    if is_item_keyword(lx) {
+                        seen_keyword = true;
+                    }
+                    continue;
+                }
+                idents.push(lx.to_string());
+                break;
+            }
+        }
+    }
+    match idents.first() {
+        Some(name) => format!("{short} {name}"),
+        None => short.to_string(),
+    }
+}
+
+fn is_item_keyword(w: &str) -> bool {
+    matches!(
+        w,
+        "fn" | "struct" | "enum" | "trait" | "impl" | "mod" | "use" | "const" | "static"
+            | "type" | "union" | "macro_rules"
+    )
+}
+
 /// Every token lexeme under a node, in order (nested inline branches inside a heading title).
 fn collect_lexemes(node: &u::UniNode) -> String {
     match node {
@@ -354,11 +522,19 @@ fn collect_project_chunks(
             }
         };
         let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
-        let tree_path = ext == "md" && text.len() <= MAX_MARKDOWN_TREE_BYTES;
+        // `.rs` goes through the uniml.rust dialect (RAG phase 2). It shares markdown's size cap:
+        // the cap exists because a non-ASCII document is still super-linear, and while code is
+        // ASCII in practice a generated .rs file can be enormous, so the same bound applies.
+        let tree_path = (ext == "md" || ext == "rs") && text.len() <= MAX_MARKDOWN_TREE_BYTES;
         progress(&rel, text.len(), tree_path);
-        let file_chunks =
-            if tree_path { chunk_markdown(&rel, &text) } else { chunk_text(&rel, &text) };
-        if ext == "md" && !tree_path {
+        let file_chunks = if tree_path && ext == "md" {
+            chunk_markdown(&rel, &text)
+        } else if tree_path {
+            chunk_code(&rel, &text)
+        } else {
+            chunk_text(&rel, &text)
+        };
+        if (ext == "md" || ext == "rs") && !tree_path {
             stats.degraded += 1;
         }
         if !file_chunks.is_empty() {
@@ -433,6 +609,126 @@ pub fn project_retrieval_tools(root: &Path) -> Option<crate::agent::CallbackTool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── RAG phase 2: code chunking (docs/specs/rag-rust-dialect.md) ──────────────────
+
+    // Behavior: a fn with a doc comment and attributes is ONE chunk containing all three, and
+    // the next item's chunk starts after it — disjoint, as in phase 1.
+    #[test]
+    fn code_items_carry_their_docs_and_are_disjoint() {
+        let src = "/// Doc line.\n#[inline]\npub fn f() {}\nfn g() {}\n";
+        let cs = chunk_code("a.rs", src);
+        let f = cs.iter().find(|c| c.id.contains("fn f")).expect(&format!("{cs:?}"));
+        assert!(f.text.contains("/// Doc line."), "{}", f.text);
+        assert!(f.text.contains("#[inline]"), "{}", f.text);
+        assert!(!f.text.contains("fn g"), "sections must be disjoint: {}", f.text);
+        assert!(cs.iter().any(|c| c.id.contains("fn g")), "{cs:?}");
+    }
+
+    // Behavior: a brace inside a string, a char or a comment does not open or close an item.
+    // This is the whole reason the dialect lexes instead of matching braces with a regex.
+    #[test]
+    fn braces_hidden_in_literals_do_not_split_items() {
+        let src = concat!(
+            "fn f() {\n",
+            "    let a = \"{\";\n",
+            "    let b = '}';\n",
+            "    // }\n",
+            "    let c = r#\"} still raw {\"#;\n",
+            "}\n",
+            "fn g() {}\n",
+        );
+        let cs = chunk_code("a.rs", src);
+        let f = cs.iter().find(|c| c.id.contains("fn f")).expect(&format!("{cs:?}"));
+        assert!(f.text.contains("still raw"), "f must span its whole body: {}", f.text);
+        assert!(cs.iter().any(|c| c.id.contains("fn g")), "{cs:?}");
+    }
+
+    // Behavior: methods inside an impl are their own chunks; the impl header is folded into the
+    // first one rather than becoming a chunk that duplicates all of them.
+    #[test]
+    fn impl_members_are_their_own_chunks() {
+        let src = "impl Foo {\n    pub fn a(&self) {}\n    fn b(&self) {}\n}\n";
+        let cs = chunk_code("a.rs", src);
+        let a = cs.iter().find(|c| c.id.contains("fn a")).expect(&format!("{cs:?}"));
+        let b = cs.iter().find(|c| c.id.contains("fn b")).expect(&format!("{cs:?}"));
+        assert!(a.text.contains("impl Foo"), "the header belongs to the first member: {}", a.text);
+        assert!(!b.text.contains("impl Foo"), "and is not repeated: {}", b.text);
+        assert!(!a.text.contains("fn b"), "members are disjoint: {}", a.text);
+    }
+
+    // Behavior: a file with no items still yields a chunk, not zero.
+    #[test]
+    fn a_file_with_no_items_still_yields_one_chunk() {
+        let cs = chunk_code("a.rs", "// just a note\n/* and another */\n");
+        assert_eq!(cs.len(), 1, "{cs:?}");
+        assert!(cs[0].text.contains("just a note"), "{cs:?}");
+    }
+
+    // Behavior: a syntactically broken file falls back to chunk_text and never fails the run.
+    #[test]
+    fn a_broken_file_falls_back_to_text() {
+        let src = "fn f() { let a = \"unterminated;\nfn g() {}\n";
+        let cs = chunk_code("a.rs", src);
+        assert!(!cs.is_empty(), "a broken file must still be indexed");
+        // Whole content preserved either way — nothing is silently dropped.
+        let joined: String = cs.iter().map(|c| c.text.as_str()).collect();
+        assert!(joined.contains("unterminated"), "{cs:?}");
+    }
+
+    // Behavior: LOSSLESS over this repo's own crates/ — every chunk is a byte-exact slice, so
+    // concatenating a file's chunks reproduces it apart from whitespace between items.
+    #[test]
+    fn code_chunks_are_byte_exact_slices_of_the_source() {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        if !crates.is_dir() {
+            return;
+        }
+        let mut files = 0usize;
+        let mut chunks = 0usize;
+        for entry in walk_rs(&crates).into_iter().take(60) {
+            let text = match fs::read_to_string(&entry) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if text.len() > MAX_MARKDOWN_TREE_BYTES {
+                continue;
+            }
+            let cs = chunk_code("f.rs", &text);
+            // Stronger than "each chunk is a substring": the chunks TILE the file, so
+            // concatenating them in order reproduces it exactly.
+            let joined: String = cs.iter().map(|c| c.text.as_str()).collect();
+            assert_eq!(joined, text, "chunks do not tile {entry:?}");
+            files += 1;
+            chunks += cs.len();
+        }
+        assert!(files > 10, "expected to have checked real files, saw {files}");
+        assert!(chunks > files, "expected several items per file, {chunks} over {files}");
+    }
+
+    fn walk_rs(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let rd = match fs::read_dir(&d) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    if name != "target" && !name.starts_with('.') {
+                        stack.push(p);
+                    }
+                } else if p.extension().map(|x| x == "rs").unwrap_or(false) {
+                    out.push(p);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
 
     // Behavior: heading-bounded, disjoint sections; headingless doc = one chunk.
     #[test]
@@ -534,7 +830,10 @@ mod tests {
         let stats = index_project(root, &mut index);
         assert_eq!(stats.files, 3, "{stats:?}"); // README.md, docs/a.md, main.rs
         assert_eq!(stats.skipped, 1, "{stats:?}"); // logo.png
-        assert_eq!(stats.chunks, 1 + 2 + 2, "{stats:?}");
+        // README.md 1 + docs/a.md 2 + main.rs 1. `main.rs` used to be split into two PARAGRAPH
+        // chunks; it is now chunked by ITEM (RAG phase 2), and `fn main() {}` plus the trailing
+        // comment is one item — which is the point of chunking code structurally.
+        assert_eq!(stats.chunks, 1 + 2 + 1, "{stats:?}");
         let hits = index.search("alpha body", 3);
         assert_eq!(hits[0].id, "docs/a.md#alpha");
     }
