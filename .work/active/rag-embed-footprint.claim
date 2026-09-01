@@ -1,0 +1,6 @@
+feature/rag-embed-footprint 2026-09-01T07:53:16Z
+agent: claude-code
+heartbeat: 2026-09-01T07:53:16Z
+status: in-progress
+done-so-far: embed model (~400MB active) guarded only by the gateway generic preflight
+next: measure active-memory delta at embed-model load, bill it via share::update_own_footprint; then uniml-remaining-dead-limits in scalascript
