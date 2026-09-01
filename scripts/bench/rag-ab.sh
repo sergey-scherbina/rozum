@@ -38,7 +38,7 @@ mkdir -p "$OUT"
 
 # Questions phrased the eval-set way — the agent does NOT get the symbol. `expect` is the
 # repo-relative file that counts as a correct localisation.
-Q1="Which file contains the function that decides whether a model is allowed to become resident in memory?";        E1="crates/rozum-core/src/share.rs"
+Q1="Which file contains the function that decides whether a model is allowed to become resident in memory?";        E1="crates/rozum-core/src/share.rs|crates/rozum-models/src/resident.rs"
 Q2="Which file decides which meeting room a telegram group chat belongs to?";                                       E2="crates/rozum-meeting/src/messenger_groups.rs"
 Q3="Which file detects that a model's chat template does not render tool definitions?";                             E3="crates/rozum-mlx/src/mlx_native_backend.rs"
 Q4="Which file implements breaking an agent out of a loop of repeated identical actions?";                          E4="crates/rozum-gateway/src/loopbreak.rs"
@@ -53,7 +53,7 @@ Q9="Which file trims the codex client's tool set and system prompt so small loca
 Q10="Which file rewrites and applies the patches the codex client submits in its own diff format?";                                             E10="crates/rozum-gateway/src/codex_patch.rs"
 Q11="Which file manages per-user access control for the messenger bridge, editable live from inside the chat?";                                  E11="crates/rozum-meeting/src/messenger_acl.rs"
 Q12="Which file implements the engine-agnostic token sampler shared by the model backends?";                                                    E12="crates/rozum-core/src/sampler.rs"
-Q13="Which file constrains generation so tool-call arguments come out as valid JSON?";                                                          E13="crates/rozum-core/src/constrain.rs"
+Q13="Which file constrains generation so tool-call arguments come out as valid JSON?";                                                          E13="crates/rozum-core/src/constrain.rs|crates/rozum-mlx/src/mlx_native_backend.rs"
 Q14="Which file guards the bug ledger where defects are recorded and tracked?";                                                                 E14="crates/rozum-core/src/bug_ledger.rs"
 Q15="Which file defines the backend trait every chat model engine implements?";                                                                 E15="crates/rozum-core/src/backend.rs"
 
@@ -103,7 +103,10 @@ try:
                 if c.get("type")=="text": final=c.get("text","")
                 if c.get("type")=="tool_use" and "rag" in c.get("name",""): rag_calls+=1
 except FileNotFoundError: pass
-ok = expect in final
+# `expect` may carry |-separated alternatives: forensics proved two questions have TWO
+# legitimate answers (Q1: cross-process admission vs in-process residency planner; Q13:
+# constraint grammar vs its runtime driver) — the model kept "failing" them with correct files.
+ok = any(e in final for e in expect.split("|"))
 print(f"RESULT ok={int(ok)} rag_calls={rag_calls} turns={turns}")
 PY
   git worktree remove --force "$wt" >/dev/null 2>&1

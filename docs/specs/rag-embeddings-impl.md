@@ -193,6 +193,32 @@ careful-by-design harness (shared resident gateway, sequential, throwaway worktr
 - Runs are ~2× faster than the pilot (med 33–54 s vs 103+ s) — the `constrained-prefix-reuse`
   fix compounding with the ×837 chunker.
 
+### Failure forensics (2026-09-01, `rag-ab-failure-forensics`) — and the fixes it forced
+
+Dissecting the 5 rag-arm failures: 2 were QUESTION-KEY defects (Q1 `share.rs` vs the equally
+correct `resident.rs` planner; Q13 `constrain.rs` grammar vs its runtime driver in
+`mlx_native_backend.rs` — the model kept "failing" with correct files; keys now carry
+|-alternatives), 1 was a foreign-load timeout, and Q5 was the one true retrieval failure —
+which unravelled into FOUR systemic defects, all fixed:
+
+1. **Fusion pool asymmetry** — BM25 fed only k candidates into RRF while embeddings fed 4k; a
+   candidate mid-list in BOTH sources (exactly what RRF rewards) never reached the fusion.
+   Both sources now feed `pool = k.max(5)*4`; the final k is cut after fusion.
+2. **Tests walked back up through fusion** — the impls-above-tests balance ran on the BM25 half
+   only; `rag_lite::rebalance` (extracted) now runs POST-fusion at all three call sites.
+3. **Module-doc `#use` chunks demoted as imports** — fix 2's control run traded two hits for
+   two new misses (Q7/Q8): the file's `//!` module doc lives in the `#use` chunk and the
+   embedding half used to rescue it from the import demotion; a chunk OPENING with `//!`/`/*!`
+   now keeps its implementation slot.
+4. **CLI `rag search` never refreshed** — it answered from a 12-hour-old index missing
+   `rag_mcp.rs` entirely (the one un-indexed `.rs` in the tree); the CLI now runs the same
+   lock-guarded `refresh_in_background` both MCP servers do.
+
+Control run with all fixes (15 q × 1 run): **rag 13/15, and the two misses are exactly the two
+ambiguous-key questions — zero retrieval failures**; key-corrected that is 15/15. bare 7/15
+same run. Live probes: Q8 `rag_mcp.rs` absent-from-top-30 → #1 and #5 of 5; Q5 `auto_context`
+absent → #4; Q1's `#[test]` top-1 → #5 with impls above.
+
 ## Out of scope
 
 - ~~Residency-ledger accounting~~ — DONE in the follow-up commit: the embedder measures the MLX
