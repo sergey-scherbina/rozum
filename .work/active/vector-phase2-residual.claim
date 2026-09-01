@@ -1,6 +1,0 @@
-feature/vector-phase2-residual 2026-09-01T13:28:27Z
-agent: claude-code
-heartbeat: 2026-09-01T13:28:27Z
-status: in-progress
-done-so-far: picking up ssc-rust-persistent-vector phase 2 = re-measure + the single-frame residual (x3.8/doubling)
-next: reproduce with mdbench, isolate ONE structural variable, profile, fix where it lives
