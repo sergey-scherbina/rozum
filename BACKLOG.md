@@ -76,7 +76,14 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   the next measurement should establish whether the REMAINING clones cost anything before more
   machinery is built for them. `uniml-single-frame-residual-superlinear` is the one shape still
   above ×2 and is the honest place to look first.
-- [ ] **ssc-rust-lifted-def-return-types** — small backend gap, found twice now: `.isDefined` /
+- [x] **ssc-rust-lifted-def-return-types — DONE 2026-09-01, and the entry was one-third stale.**
+  Verified against code first: the `.isDefined` symptom was ALREADY patched around locally
+  (`isOptionExpr`'s `nestedLocalDefDecltpe`); the LIVE halves were Vec (`picked.nonEmpty` refused
+  as "collection member, not a field") and String (`tag.length` silently took byte-len). Fix =
+  nested defs join `_returnTypes` under the existing bare-name collision discipline +
+  `defReturnsString` additive fallback (scalascript `726d07176`). 517/517 goldens (1 new), zero
+  churn; vendored uniml-md byte-identical — purely enabling for future .ssc sources.
+  Original entry: small backend gap, found twice now: `.isDefined` /
   `.get` (and any other return-type-driven lowering) do not resolve on a call to a LIFTED LOCAL
   def, because its declared return type never reaches the global `_returnTypes` table — the
   emitted code says `no field isDefined on type Option<T>`. Both times the workaround was to
