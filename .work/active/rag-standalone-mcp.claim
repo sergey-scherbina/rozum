@@ -1,6 +1,0 @@
-feature/rag-standalone-mcp 2026-09-01T08:44:37Z
-agent: claude-code
-heartbeat: 2026-09-01T08:44:37Z
-status: in-progress
-done-so-far: operator wants RAG as its OWN MCP, meetings-free; existing proxy stays
-next: rag_mcp server module in rozum-agent (tool rag.search), `rozum rag mcp` subcommand in the engine binary — fully self-contained via the in-process embedder
