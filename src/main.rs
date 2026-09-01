@@ -1391,6 +1391,10 @@ async fn main() {
     // engine). A no-op when the corresponding feature is off.
     rozum::gguf::register_engine();
     rozum::mlx_native_backend::register_telemetry();
+    // Embedding SPI (docs/specs/rag-embeddings-impl.md): the gateway's /v1/embeddings reaches
+    // rozum-mlx through this hook, never through a crate edge. cfg'd like the engines above.
+    #[cfg(feature = "mlx-native")]
+    rozum_core::embedding::register_embedder(rozum::embedder::embed);
 
     let cli = Cli::parse_from(reorder_launch_args(std::env::args().collect()));
 

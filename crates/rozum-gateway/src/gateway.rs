@@ -387,6 +387,71 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
 /// reads this to learn the daemon's free window and decide whether to forward a
 /// queued request now or hold it at the edge. Ungated backends report a generous
 /// always-free window so the proxy fails open. (`shared-gateway.md`.)
+/// `/v1/embeddings` — OpenAI-shaped, plus a `"query": true` extension that applies the model's
+/// query-side instruction wrapper (corpus texts and queries are embedded DIFFERENTLY by the
+/// recipe; a caller that ignores the extension gets corpus-side vectors, which is the safe
+/// default). Runs through the `rozum_core::embedding` register-hook: a build without the native
+/// runtime has no embedder, and answers 501 rather than 500 so the proxy's fallback logic can
+/// tell "never possible here" from "broke this time".
+async fn embeddings_handler(
+    State(state): State<GatewayState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    state.activity.last_active.store(now_secs(), Ordering::SeqCst);
+    if !rozum_core::embedding::available() {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            axum::Json(json!({"error": "no embedding backend in this build"})),
+        )
+            .into_response();
+    }
+    let texts: Vec<String> = match body.get("input") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(a)) => {
+            a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()
+        }
+        _ => Vec::new(),
+    };
+    if texts.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "`input` must be a string or array of strings"})),
+        )
+            .into_response();
+    }
+    let is_query = body.get("query").and_then(|v| v.as_bool()).unwrap_or(false);
+    // The embedder blocks on its own worker thread; hop off the async runtime for the wait.
+    let out = tokio::task::spawn_blocking(move || {
+        rozum_core::embedding::embed(&texts, is_query)
+    })
+    .await;
+    match out {
+        Ok(Some(Ok(vecs))) => axum::Json(json!({
+            "object": "list",
+            "data": vecs
+                .iter()
+                .enumerate()
+                .map(|(i, v)| json!({"object": "embedding", "index": i, "embedding": v}))
+                .collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Ok(Some(Err(e))) => {
+            (StatusCode::BAD_GATEWAY, axum::Json(json!({"error": e}))).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_IMPLEMENTED,
+            axum::Json(json!({"error": "no embedding backend in this build"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({"error": format!("embed task: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
 async fn admit_handler(State(state): State<GatewayState>) -> impl IntoResponse {
     // While a switch/unload is in progress (draining or model dropped), advertise
     // no free window so proxies hold their queued requests at the edge — that's
@@ -1581,6 +1646,7 @@ pub async fn serve_on(
         .route("/v1/models", get(models_handler))
         .route("/v1/admit", get(admit_handler))
         .route("/stats", get(stats_handler))
+        .route("/v1/embeddings", post(embeddings_handler))
         .route("/v1/chat/completions", post(oai_chat_handler))
         .route("/v1/responses", post(responses_handler))
         .route("/v1/messages", post(anthropic_handler))

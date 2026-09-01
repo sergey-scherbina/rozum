@@ -297,51 +297,23 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   boost multiplies existing signal rather than adding new — for every code chunk equally,
   competitors included. Nothing is discriminated; the field is just scaled. Recorded because the
   idea is obvious and the story behind it is plausible, so it will be proposed again.
-- [ ] **rag-embeddings-backend — SPIKED 2026-08-31, and the trade is now visible. Needs a call.**
-  Measured before building anything, on the same 26 questions:
-  BM25 (ships) **9/26 & 15/26**, embeddings ALONE **7/26 & 15/26**, **RRF fusion 10/26 & 17/26**.
-  THEN improved twice more, both free of extra machinery: embedding a DISTILLED text (path + item
-  name + doc comment, falling back to source when undocumented) instead of the raw source slice
-  took embeddings alone to **10/26 & 16/26** and the build DOWN to 276 s — better and cheaper,
-  since there is less text; and re-tuning the fusion weights (embeddings deserve the higher weight
-  even though they are weaker alone — in a fusion what pays is finding what the other misses) took
-  the pair to **~11/26 & ~18-19/26**. THEN the QUERY INSTRUCTION — a one-line string that had been
-  invented on the spot — was swept, and it was worth more than any of the machinery:
-  `"Retrieve the source code that implements the behaviour described"` gives **12/26 & 20/26**
-  alone, and **11/26 & 21/26** fused. The word carrying it is `implements` (dropping it costs
-  1 top-1 and 2 top-5); Qwen's own canonical web-search instruction is the WORST of four tried.
-  Final: BM25 9/26 & 15/26 -> **+3 top-1 and +5-6 top-5**, three times the first spike's gain at a
-  quarter of its build cost. TRUNCATION, flagged as a possible loss, turned out to be the opposite:
-  quality is FLAT from 191 to 2047 tokens (12/26 & 20/26) while build time falls 45%, so the 511
-  default was paying for context the model never used — 255 gives the same numbers in 181 s instead
-  of 276 s, and only 2.9% of distilled chunks were being cut at all.
-  Embeddings alone now have the best top-1 and fusion the best top-5 —
-  BM25 has become the junior partner, kept because it is the fallback when no model is admitted.
-  So embeddings alone LOSE; fused they win +1 top-1 and +2 top-5, because the two miss different
-  questions — that is the whole argument for carrying both.
-  Price: 336 MB model resident beside the frozen 4B (so under the residency-admission rules, with
-  a BM25 fallback when admission is refused), 41 MB of vectors on top of the 9.3 MB index,
-  **330 s to embed this repo's 10,551 chunks** (15x the 22 s BM25 build, on the GPU the resident 4B
-  is using; 718 s before batching), once per project since incremental refresh carries vectors
-  forward, and a query-time forward pass per search.
-  BATCHING NEEDS TWO LIMITS, neither sufficient alone: a TOKEN budget (rows are the wrong unit —
-  cost is rows x width, and a fixed 16 rows was SIGKILLed at chunk 3008) and an MLX CACHE limit
-  (a 4096-token budget alone was still SIGKILLed at 6009, with ~16 GB free — the cache was growing
-  across batches, and it is the only bounded term). Quality is identical batched, which is the
-  check that right-padding with last-real-token pooling is numerically sound.
-  **+1 and +2 out of 26 for that is close enough to be a judgement call, not an obvious yes** —
-  which is why the spike stopped at the measurement. Spec: `docs/specs/rag-embeddings-backend.md`;
-  spike kept at `crates/rozum-mlx/examples/embed_spike.rs`.
-  WHY NOT THE RESIDENT 4B (asked, and measured): taking hidden states from the already-resident
-  chat model would remove the second model entirely. It does not work — **0/26 and 0/26** against
-  the 0.6B's 7/26 and 15/26 through the IDENTICAL code path, with non-degenerate but meaningless
-  vectors (CI yaml, CHANGELOG, testdata as top hits). A causal LM's last-token state predicts the
-  next token; contrastive training is what makes a metric space, and a chat model has not had it.
-  Cost runs the wrong way too: 2333 s vs 330 s, on the model the operator is talking to.
-  METHOD NOTE that nearly cost the answer: the first spike used mean pooling and scored **0/26 and
-  6/26**, which reads as a decisive verdict against embeddings. Qwen3-Embedding wants LAST-token
-  pooling with `<|endoftext|>` appended and an instruction-wrapped query; its own recipe moved the
-  same model on the same corpus to 7/26 and 15/26. A model measured off-recipe measures nothing.
+- [x] **rag-embeddings-backend — BUILT AND SHIPPED 2026-09-01** (operator decided build after the
+  spike series took the trade from +1/+2 at 12 min to +3/+5-6 at 4.6 min). Design:
+  `docs/specs/rag-embeddings-impl.md`. The MODEL runs in the GATEWAY (`rozum-mlx::embedder`, own
+  thread, lazy; reached via new `/v1/embeddings`, OpenAI-shaped + `"query":true` extension),
+  wired through a `rozum_core::embedding` OnceLock hook so no gateway→mlx crate edge; the proxy's
+  warmup embeds missing vectors through it (batch 64, partial saves = interruptible) and
+  `rag.search` fuses (RRF k=10, emb weight 2) with per-call fallback to BM25, reported as
+  `"fused": true|false`. Vectors in `.rozum/rag-vectors.bin` (binary: JSON floats measured 128 MB
+  vs ~45 MB), pruned+carried by chunk id, dimension change = model change = discard.
+  E2E VERIFIED with the real model through the real binaries: fresh project → warmup builds
+  index + vectors → next session's FIRST rag.search answers fused:true with `notes.md#storage`
+  and `fn append` top for "how does a room transcript get written to disk" — the exact
+  transcript↔append gap that justified the whole item. Two in-process rules that MUST hold:
+  embedder never calls `apply_retain_env` (keyed to the CHAT family, process-wide) and never
+  `set_cache_limit` (the gateway owns cache policy; the spike's own 512 MB limit would throttle
+  the chat model). `ROZUM_EMBED_MODEL` overrides the checkpoint; `ROZUM_RAG_EMBED=0` disables.
+  Follow-up (small): fold the embed model's ~400 MB into `update_own_footprint` ledger billing.
 - [ ] **teach-collect** — phase 0, independently shippable and FIRST (SFT under ~100
   quality pairs overfits — the dataset must accumulate ahead of any trainer): teach-mode
   toggles, 👍/👎/correction affordances on Telegram (`/teach on|off`) + UCC + CLI/TUI, one

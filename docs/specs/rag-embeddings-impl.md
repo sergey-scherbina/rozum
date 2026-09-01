@@ -38,19 +38,35 @@ finds it.
 
 ## Behavior
 
-- [ ] With no gateway running (or no embedder registered), `rag.search` answers exactly as
+- [x] With no gateway running (or no embedder registered), `rag.search` answers exactly as
       today — BM25 with `"fused": false` — and the warmup skips vectors silently.
-- [ ] With vectors present and the gateway up, `rag.search` fuses and reports `"fused": true`.
-- [ ] The vector store round-trips (write → read → same vectors), tolerates a missing file, and
+- [x] With vectors present and the gateway up, `rag.search` fuses and reports `"fused": true`.
+- [x] The vector store round-trips (write → read → same vectors), tolerates a missing file, and
       rejects a dimension mismatch by discarding (a model change invalidates vectors).
-- [ ] An incremental refresh re-embeds ONLY chunks whose ids are new; unchanged ids keep their
+- [x] An incremental refresh re-embeds ONLY chunks whose ids are new; unchanged ids keep their
       vectors; ids gone from the index are dropped from the store.
-- [ ] The distilled text of a documented item is `path frag\ndoc sentence(s)`; of an
+- [x] The distilled text of a documented item is `path frag\ndoc sentence(s)`; of an
       undocumented one it falls back to the source (a bare name would lose every undocumented
       chunk).
-- [ ] `/v1/embeddings` with no registered embedder answers 501, never 500.
-- [ ] Query embedding failures (timeout, refused) degrade to BM25 within the same call — an
+- [x] `/v1/embeddings` with no registered embedder answers 501, never 500.
+- [x] Query embedding failures (timeout, refused) degrade to BM25 within the same call — an
       agent never sees an error because an optional model was absent.
+
+## Results
+
+Verified end to end 2026-09-01 with the real model through the real binaries, not only unit
+tests: a fresh gateway (`gateway --port 8499 --model /tmp/qwen3-emb`) served `/v1/embeddings`
+(dim 1024, unit norm, 0.4 s cold); a fresh project's proxy warmup built the index, embedded the
+vectors through that gateway, and the FIRST `rag.search` of the next session answered
+`fused: true` with `notes.md#storage` and `fn append` ranked first for "how does a room
+transcript get written to disk" — the exact `transcript`↔`append` vocabulary gap that motivated
+embeddings, closed through the production path.
+
+Two deployment notes discovered live: the embed model needs its `chat_template.jinja` present
+only if the SAME directory is also used as a chat model (the embedder itself never uses it);
+and the warmup's embedding pass runs inside the proxy's async task, so it survives only as long
+as the proxy — a session that exits immediately after one call leaves the vectors to the NEXT
+session's warmup, which is correct but worth knowing when testing.
 
 ## Out of scope
 

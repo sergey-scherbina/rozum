@@ -167,6 +167,13 @@ impl LexicalIndex {
         self.docs.push(Doc { id: id.into(), text, tf, len });
     }
 
+    /// The stored text of a chunk id — for filling in a fusion hit that only the embedding
+    /// ranking carried (BM25 hits arrive with their text; embedding rankings are id-only).
+    /// Linear scan: called for at most `k` ids per search against ~10k docs.
+    pub fn text_of(&self, id: &str) -> Option<&str> {
+        self.docs.iter().find(|d| d.id == id).map(|d| d.text.as_str())
+    }
+
     pub fn len(&self) -> usize {
         self.docs.len()
     }

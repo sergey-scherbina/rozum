@@ -125,13 +125,17 @@ struct State {
 /// not there, and "no index yet" is the common case in a fresh checkout.
 #[derive(Default)]
 struct RagCache {
-    index: Option<Arc<dyn rozum_agent::rag_lite::Retriever>>,
+    index: Option<Arc<rozum_agent::rag_lite::LexicalIndex>>,
     chunks: usize,
     /// The index file's mtime when we loaded it. Reported to the caller as an age, and compared
     /// on each call so an index rebuilt underneath a long-lived agent session is picked up
     /// instead of served stale until the agent restarts.
     indexed_at: Option<SystemTime>,
     tried: bool,
+    /// Chunk vectors, loaded beside the index and reloaded on ITS mtime — kept separate because
+    /// the vectors file is written by the embedding warmup, later than the index itself.
+    vecs: Option<Arc<rozum_agent::rag_embed::VecStore>>,
+    vecs_at: Option<SystemTime>,
 }
 
 #[derive(Clone)]
@@ -653,7 +657,7 @@ impl DaemonProxy {
             }
         }
 
-        let (index, chunks, age) = {
+        let (index, vecs, chunks, age) = {
             let mut cache = self.rag.lock().await;
             let path = rozum_agent::rag_chunk::index_path(&root);
             let disk_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
@@ -673,11 +677,18 @@ impl DaemonProxy {
                     }
                 }
             }
+            let vpath = rozum_agent::rag_embed::vectors_path(&root);
+            let v_mtime = std::fs::metadata(&vpath).and_then(|m| m.modified()).ok();
+            if v_mtime.is_some() && v_mtime != cache.vecs_at {
+                cache.vecs_at = v_mtime;
+                cache.vecs =
+                    rozum_agent::rag_embed::VecStore::load(&vpath, None).map(Arc::new);
+            }
             let age = cache
                 .indexed_at
                 .and_then(|t| SystemTime::now().duration_since(t).ok())
                 .map(|d| d.as_secs());
-            (cache.index.clone(), cache.chunks, age)
+            (cache.index.clone(), cache.vecs.clone(), cache.chunks, age)
         };
 
         // Not an error and not an empty result list: both read as "nothing matches your query",
@@ -711,13 +722,37 @@ impl DaemonProxy {
         };
 
         // Code gets reserved slots — see `rag_lite::search_balanced`.
-        let picked = rozum_agent::rag_lite::search_balanced(index.as_ref(), &query, k);
+        let bm25 = rozum_agent::rag_lite::search_balanced(index.as_ref(), &query, k);
+        // Fusion (docs/specs/rag-embeddings-impl.md): vectors on disk + a gateway that answers =
+        // fuse; anything missing or failing = BM25 exactly as before, visibly marked. The query
+        // embed is one short HTTP call; its failure must never fail the search.
+        let mut fused = false;
+        let picked = match (&vecs, rag_embed_enabled()) {
+            (Some(vs), true) => match embed_query_via_gateway(&query).await {
+                Some(qv) if qv.len() == vs.dim => {
+                    let ranked = vs.rank(&qv, k.max(5) * 4);
+                    let mut hits = rozum_agent::rag_embed::fuse(&bm25, &ranked, k);
+                    for h in &mut hits {
+                        if h.text.is_empty()
+                            && let Some(t) = index.text_of(&h.id)
+                        {
+                            h.text = t.to_string();
+                        }
+                    }
+                    fused = true;
+                    hits
+                }
+                _ => bm25,
+            },
+            _ => bm25,
+        };
         let results: Vec<Value> = picked
             .into_iter()
             .map(|h| json!({ "id": h.id, "score": h.score, "text": h.text }))
             .collect();
         tool_text(&json!({
             "results": results,
+            "fused": fused,
             "chunks": chunks,
             "index_age_secs": age,
             // Freshness is `rag-index-freshness` (P1) and is NOT solved here. What IS solved is
@@ -1095,14 +1130,28 @@ fn spawn_index_warmup() {
     let Some(root) = detect_project().map(PathBuf::from) else {
         return;
     };
-    tokio::task::spawn_blocking(move || {
-        match rozum_agent::rag_chunk::refresh_in_background(&root, &mut |_, _, _| {}) {
-            Ok(Some((stats, _))) if stats.rechunked > 0 || stats.removed > 0 => proxy_log(&format!(
-                "rag warmup: {} chunks ({} re-parsed, {} reused, {} removed)",
-                stats.chunks, stats.rechunked, stats.reused, stats.removed
-            )),
-            Ok(_) => {}
-            Err(e) => proxy_log(&format!("rag warmup skipped: {e}")),
+    tokio::spawn(async move {
+        let refresh_root = root.clone();
+        let refreshed = tokio::task::spawn_blocking(move || {
+            rozum_agent::rag_chunk::refresh_in_background(&refresh_root, &mut |_, _, _| {})
+        })
+        .await;
+        match refreshed {
+            Ok(Ok(Some((stats, _)))) => {
+                if stats.rechunked > 0 || stats.removed > 0 {
+                    proxy_log(&format!(
+                        "rag warmup: {} chunks ({} re-parsed, {} reused, {} removed)",
+                        stats.chunks, stats.rechunked, stats.reused, stats.removed
+                    ));
+                }
+                // The lexical index is fresh; now the slow, optional half. BM25 already serves.
+                embed_missing_vectors(&root).await;
+            }
+            Ok(Ok(None)) => {
+                // A sibling holds the build lock — it will do the embedding pass too.
+            }
+            Ok(Err(e)) => proxy_log(&format!("rag warmup skipped: {e}")),
+            Err(e) => proxy_log(&format!("rag warmup task: {e}")),
         }
     });
 }
@@ -1111,6 +1160,102 @@ fn spawn_index_warmup() {
 /// shape the forwarded room tools arrive in, so a client parses both the same way.
 fn tool_text(v: &Value) -> CallToolResult {
     CallToolResult::success(vec![Content::text(v.to_string())])
+}
+
+/// Whether the embedding half of retrieval is on. Default on; `ROZUM_RAG_EMBED=0` turns it off
+/// (a session that wants zero background GPU work). BM25 continues either way.
+fn rag_embed_enabled() -> bool {
+    !std::env::var("ROZUM_RAG_EMBED").is_ok_and(|v| v == "0")
+}
+
+/// Embed one QUERY through the gateway's `/v1/embeddings`. `None` on any failure — no gateway
+/// in the registry, connection refused, 501 from a build without the model, timeout — because
+/// every one of those means the same thing to a search: fuse with nothing, answer from BM25.
+async fn embed_query_via_gateway(query: &str) -> Option<Vec<f32>> {
+    let url = rozum_agent::rag_embed::gateway_url()?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .ok()?;
+    let resp = client
+        .post(format!("{url}/v1/embeddings"))
+        .json(&json!({ "input": [query], "query": true }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: Value = resp.json().await.ok()?;
+    let emb = v["data"].get(0)?.get("embedding")?.as_array()?;
+    Some(emb.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
+}
+
+/// Embed every chunk the vector store is missing, through the gateway, and prune vectors whose
+/// chunks are gone. Runs inside the background warmup, AFTER the lexical index is fresh — BM25
+/// serves throughout, and the store only ever improves the answers.
+///
+/// Batches of 64 texts per call: the gateway's embedder batches internally by token budget, so
+/// this size only bounds the HTTP payload, not the GPU shape.
+async fn embed_missing_vectors(root: &std::path::Path) {
+    if !rag_embed_enabled() {
+        return;
+    }
+    let Some(url) = rozum_agent::rag_embed::gateway_url() else { return };
+    let chunks = rozum_agent::rag_chunk::saved_chunk_texts(root);
+    if chunks.is_empty() {
+        return;
+    }
+    let vpath = rozum_agent::rag_embed::vectors_path(root);
+    let mut store = rozum_agent::rag_embed::VecStore::load(&vpath, None)
+        .unwrap_or_else(|| rozum_agent::rag_embed::VecStore::new(0));
+    let (pruned, missing) = rozum_agent::rag_embed::plan_embedding(&chunks, &mut store);
+    if missing.is_empty() && pruned == 0 {
+        return;
+    }
+    let client = match reqwest::Client::builder().timeout(Duration::from_secs(300)).build() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let mut embedded = 0usize;
+    for group in missing.chunks(64) {
+        let texts: Vec<String> =
+            group.iter().map(|(id, t)| rozum_agent::rag_embed::distill(id, t)).collect();
+        let resp = client
+            .post(format!("{url}/v1/embeddings"))
+            .json(&json!({ "input": texts }))
+            .send()
+            .await;
+        let Ok(resp) = resp else { break };
+        if resp.status() == reqwest::StatusCode::NOT_IMPLEMENTED {
+            // A build without the model: permanent for this gateway, stop asking.
+            return;
+        }
+        if !resp.status().is_success() {
+            break;
+        }
+        let Ok(v) = resp.json::<Value>().await else { break };
+        let Some(data) = v["data"].as_array() else { break };
+        for (row, (id, _)) in data.iter().zip(group.iter()) {
+            let Some(emb) = row.get("embedding").and_then(|e| e.as_array()) else { continue };
+            let vec: Vec<f32> = emb.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect();
+            if store.dim == 0 {
+                store.dim = vec.len();
+            }
+            if vec.len() == store.dim && store.dim > 0 {
+                store.vecs.insert(id.clone(), vec);
+                embedded += 1;
+            }
+        }
+        // Partial progress is saved as it happens: a killed warmup resumes where it stopped
+        // instead of starting over, which is what makes the first build interruptible.
+        if store.dim > 0 {
+            let _ = store.save(&vpath);
+        }
+    }
+    if embedded > 0 || pruned > 0 {
+        proxy_log(&format!("rag embed: +{embedded} vectors, -{pruned} pruned, {} total", store.vecs.len()));
+    }
 }
 
 /// How old an index may be before `rag.search` flags it. A working tree changes under an agent

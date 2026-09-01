@@ -16,6 +16,7 @@ pub mod engine;
 pub mod footprint;
 pub mod harmony;
 pub mod door;
+pub mod embedding;
 pub mod obs;
 pub mod prefetch;
 pub mod sampler;

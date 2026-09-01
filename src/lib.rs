@@ -45,6 +45,8 @@ pub use rozum_models::{hf_hub, model_source, models, modelscope, resident};
 pub use rozum_gguf::gguf;
 pub use rozum_mistralrs::mistralrs_backend;
 pub use rozum_mlx::{mlx_native_backend, specdecode, specdecode_backend};
+#[cfg(feature = "mlx-native")]
+pub use rozum_mlx::embedder;
 pub use rozum_x86::x86;
 
 #[cfg(feature = "local-models")]

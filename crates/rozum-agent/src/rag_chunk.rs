@@ -840,6 +840,16 @@ fn ignore_own_dir(dir: &Path) {
     }
 }
 
+/// Every chunk `(id, text)` in the persisted index — the corpus the embedding warmup walks.
+/// v2 manifests only: a v1 index carries no per-file grouping and will be rebuilt on the next
+/// refresh anyway, so vectors for it would be discarded within minutes.
+pub fn saved_chunk_texts(root: &Path) -> Vec<(String, String)> {
+    load_manifest(root)
+        .into_values()
+        .flat_map(|f| f.chunks.into_iter().map(|c| (c.id, c.text)))
+        .collect()
+}
+
 /// The previous build's per-file manifest, keyed by project-relative path. Empty for a missing
 /// index or a v1 one.
 fn load_manifest(root: &Path) -> HashMap<String, FileChunks> {

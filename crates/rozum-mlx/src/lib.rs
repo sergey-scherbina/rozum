@@ -4,6 +4,7 @@
 // internal `crate::specdecode::…` paths resolve unchanged) and the upstream
 // `rozum-core` / `rozum-models` modules these use are re-exported into this crate's
 // root so `crate::backend::…` / `crate::model_source::…` etc. resolve unchanged.
+pub mod embedder;
 pub mod mlx_native_backend;
 pub mod specdecode;
 pub mod specdecode_backend;
