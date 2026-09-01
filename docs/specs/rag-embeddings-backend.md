@@ -23,6 +23,7 @@ head.
   ...after distilling what is embedded, tuning the query instruction, and re-tuning fusion:
   embeddings alone            12/26      20/26
   fused                       11/26      21/26
+  ...and the same at a 255-token cut, in 181 s instead of 276 s
 ```
 
 **Embeddings alone LOSE to BM25.** Fused by reciprocal rank they win by +1 top-1 and +2 top-5,
@@ -76,6 +77,7 @@ would become a bare name and be lost):
                               top-1     top-5     build
   raw source slice             7/26      15/26     330 s
   distilled                   10/26      16/26     276 s
+  distilled, 255-token cut    12/26      20/26     181 s   (with the tuned instruction)
 ```
 
 Better AND cheaper — there is less text to embed. This is the first configuration in which
@@ -107,6 +109,33 @@ nearby wordings), and the word that carries it is **implements**: dropping it fa
 while swapping "source code" for "function" or adding "or document" moves nothing. The canonical
 web-search instruction is the WORST of the four — a recipe written for passage retrieval, applied
 to code, actively misleads.
+
+### Truncation was not a loss — the limit was simply too generous
+
+The 511-token cut was flagged as a possible loss. It is not one, and the sweep points the other
+way:
+
+```text
+  max tokens   top-1   top-5   build
+      2047      12      20     266 s
+       511      12      20     276 s     <- the default that was in place
+       255      12      20     181 s
+       191      12      20     153 s
+       127      13      18     131 s
+        63      10      19      79 s
+```
+
+Quality is FLAT from 191 to 2047 while build time falls by 45%, so the default was paying for
+context the model was not using. Only 2.9% of distilled chunks exceeded 511 in the first place —
+distillation had already removed most of the exposure, since a documented item becomes path, name
+and one sentence.
+
+`191`–`255` is the defensible setting: identical on both metrics, ~40% cheaper. The `13` at 127 is
+one question on a 26-question set and comes with `-2` on top-5, so it is inside the noise this set
+can resolve and is NOT claimed as an improvement.
+
+Best fusion at 255: **11/26 top-1, 21/26 top-5**, unchanged from 511 — cutting the context does not
+cost the pair anything either.
 
 ### Fusion weights
 

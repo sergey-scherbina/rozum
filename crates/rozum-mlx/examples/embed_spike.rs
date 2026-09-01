@@ -144,7 +144,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         };
         let mut ids: Vec<i32> =
             tok.encode(text.as_str(), false)?.get_ids().iter().map(|&i| i as i32).collect();
-        ids.truncate(511);
+        // Truncation limit as a variable: 2.9% of this corpus's distilled chunks exceed 511
+        // tokens, which is small enough that the cost of cutting them has to be measured rather
+        // than assumed either way.
+        let cap: usize =
+            std::env::var("EMB_MAXTOK").ok().and_then(|v| v.parse().ok()).unwrap_or(511);
+        ids.truncate(cap);
         ids.push(eos);
         toks.push((i, ids));
     }

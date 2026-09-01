@@ -311,7 +311,11 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   alone, and **11/26 & 21/26** fused. The word carrying it is `implements` (dropping it costs
   1 top-1 and 2 top-5); Qwen's own canonical web-search instruction is the WORST of four tried.
   Final: BM25 9/26 & 15/26 -> **+3 top-1 and +5-6 top-5**, three times the first spike's gain at a
-  quarter of its build cost. Embeddings alone now have the best top-1 and fusion the best top-5 —
+  quarter of its build cost. TRUNCATION, flagged as a possible loss, turned out to be the opposite:
+  quality is FLAT from 191 to 2047 tokens (12/26 & 20/26) while build time falls 45%, so the 511
+  default was paying for context the model never used — 255 gives the same numbers in 181 s instead
+  of 276 s, and only 2.9% of distilled chunks were being cut at all.
+  Embeddings alone now have the best top-1 and fusion the best top-5 —
   BM25 has become the junior partner, kept because it is the fallback when no model is admitted.
   So embeddings alone LOSE; fused they win +1 top-1 and +2 top-5, because the two miss different
   questions — that is the whole argument for carrying both.
