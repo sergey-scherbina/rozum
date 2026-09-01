@@ -106,7 +106,7 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   (blocks-per-document, then line-length-within-a-block), which is what separated this from the
   filed-but-wrong `TreeVm` theory; `crates/rozum-agent/examples/mdbench.rs` is the instrument, and
   `TreeVm.addTop`'s per-token frame rebuild is still a real O(k²) shape that simply was not this.
-- [ ] **constrained-path-prefix-reuse — THE agent-latency fix, fully diagnosed 2026-09-01.**
+- [x] **constrained-path-prefix-reuse — SHIPPED 2026-09-01** (docs/specs/constrained-prefix-reuse.md; measured ×11: ttft 4.7 s → 410 ms on a 5.6k-token continuation turn, live service). Diagnosis trail below.
   Every agent turn on this machine re-prefills its whole conversation: ~1.2 ms/token, ttft 5–10 s
   per turn at 6–8k prompt tokens, growing with history — this is what made every RAG A/B run hit
   its 240 s timeout in both arms, and it taxes every claude/codex session all day. The diagnosis
