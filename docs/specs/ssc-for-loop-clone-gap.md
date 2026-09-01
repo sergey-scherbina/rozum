@@ -25,14 +25,14 @@ No language-surface change. Backend-internal:
 
 ## Behavior
 
-- [ ] A non-Copy outer local read by value inside a `for … do` body is cloned (the E0382 repro
+- [x] A non-Copy outer local read by value inside a `for … do` body is cloned (the E0382 repro
   golden compiles and pins the clone).
-- [ ] Names the `for` body declares or reassigns, and the generator variable itself, stay
+- [x] Names the `for` body declares or reassigns, and the generator variable itself, stay
   exempt — no needless clones (the `loopExempt` semantics, verbatim).
-- [ ] A non-Copy capture read by value inside a `for … yield` body is cloned at the use.
-- [ ] All existing backend goldens stay green modulo reviewed diffs where a clone legitimately
+- [x] A non-Copy capture read by value inside a `for … yield` body is cloned at the use.
+- [x] All existing backend goldens stay green modulo reviewed diffs where a clone legitimately
   appears; the regenerated vendored `uniml-md` builds, rozum-agent suite green.
-- [ ] No performance regression: the parser doubling series and worst-case numbers hold
+- [x] No performance regression: the parser doubling series and worst-case numbers hold
   (loop-local and reassigned names are exempt, so the hot paths gain no clones).
 
 ## Out of scope
@@ -51,4 +51,16 @@ No language-surface change. Backend-internal:
 
 ## Results
 
-_To be filled at verify time._
+Landed as scalascript `1e62d064e` on `feature/treevm-top-edges-prestage10`.
+
+- Backend goldens **516/516** (3 new: the E0382 repro now clones; a loop-declared local gains
+  NO clone; a for-yield non-Copy capture clones at the use) — and **zero churn** in existing
+  expected texts: `loopExempt` (declared + reassigned + generator variable) kept every
+  hot-path name clone-free.
+- The regenerated vendored `uniml-md` is **byte-identical** to the previous build (only the
+  provenance SHA lines changed): every for-body read in the parser was already exempt —
+  declared/reassigned locals, borrows, or Copy values — so the fix is purely protective and
+  the ×837 campaign numbers stand untouched. rozum-agent 164/164.
+- What it protects: the first future `.ssc` source whose for-do body reads an outer non-Copy
+  local by value (or whose for-yield captures one) now compiles instead of failing E0382 at
+  crate build.
