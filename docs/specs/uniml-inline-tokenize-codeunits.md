@@ -59,7 +59,7 @@ signature and converts at the boundary (`tokenize(content.toVector, …)`). Inte
 
 ## Results
 
-Landed as scalascript `4aaeb385c` (uniml source) + `<charseq-param>` backend fix on
+Landed as scalascript `4aaeb385c` (uniml source) + `f987fb16d` backend fix (charseq params) on
 `feature/treevm-top-edges-prestage10`; vendored crate regenerated.
 
 **The curve is LINEAR.** Doubling series (short-line worst case, min-of-3):
