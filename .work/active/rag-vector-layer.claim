@@ -1,0 +1,6 @@
+feature/rag-vector-layer 2026-09-01T08:15:37Z
+agent: claude-code
+heartbeat: 2026-09-01T08:15:37Z
+status: in-progress
+done-so-far: operator asks about vector search/storage/DBs; measuring before answering
+next: e2e latency, exact-search cost, quantization eval, stale-vector gap fix, tool discoverability
