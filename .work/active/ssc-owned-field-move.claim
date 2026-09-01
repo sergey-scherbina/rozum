@@ -1,0 +1,6 @@
+feature/ssc-owned-field-move 2026-09-01T15:55:31Z
+agent: claude-code
+heartbeat: 2026-09-01T15:55:31Z
+status: in-progress
+done-so-far: quadratic #2 diagnosed (generated step deep-clones state.topEdges per token); taking the backend fix
+next: RustCodeWalk — move an owned by-value params field at its last read instead of cloning; measure mdbench again
