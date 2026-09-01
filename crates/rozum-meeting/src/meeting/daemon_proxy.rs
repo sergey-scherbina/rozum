@@ -1233,6 +1233,11 @@ async fn embed_missing_vectors(root: &std::path::Path) {
         return;
     }
     let Some(url) = rozum_agent::rag_embed::gateway_url() else { return };
+    // Same cross-process embed lock as the standalone server's warmup: two servers per project
+    // is a supported configuration now, and without this both would embed the same chunks —
+    // double GPU work on the machine's busiest resource. Skip, not wait: the holder's results
+    // land on disk for everyone.
+    let Ok(Some(_lock)) = rozum_agent::rag_embed::try_embed_lock(root) else { return };
     let chunks = rozum_agent::rag_chunk::saved_chunk_texts(root);
     if chunks.is_empty() {
         return;

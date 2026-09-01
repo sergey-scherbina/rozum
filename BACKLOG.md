@@ -106,6 +106,13 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   (blocks-per-document, then line-length-within-a-block), which is what separated this from the
   filed-but-wrong `TreeVm` theory; `crates/rozum-agent/examples/mdbench.rs` is the instrument, and
   `TreeVm.addTop`'s per-token frame rebuild is still a real O(k²) shape that simply was not this.
+- [x] **rag-coexistence — DONE 2026-09-01.** The operator asked whether two servers on one store
+  coordinate; the audit found two real gaps. Index writes were a plain overwrite — a reader
+  during a sibling's refresh could see a torn file; now temp+rename like the vector store.
+  Embedding ran OUTSIDE any lock (the build lock releases before the embed phase), so two
+  servers both warming up meant double GPU work; both paths now share `rag-embed.lock`,
+  try-and-skip, with a test at the lock. Registering both MCP servers with one agent is
+  non-conflicting (clients namespace by server) but redundant — guidance is either/or.
 - [x] **rag-standalone-mcp — DONE 2026-09-01.** `rozum rag mcp` = retrieval as its own stdio MCP
   server, meetings-free, for `{ "command": "rozum", "args": ["rag", "mcp"] }`. Self-contained in
   the engine binary via the in-process embedding hook — chunk, embed and serve in ONE process, no

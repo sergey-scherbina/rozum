@@ -250,6 +250,9 @@ pub fn gateway_less_warmup(root: &Path) -> std::io::Result<usize> {
     if !rozum_core::embedding::available() {
         return Ok(0);
     }
+    let Some(_lock) = try_embed_lock(root)? else {
+        return Ok(0); // a sibling is embedding this project right now
+    };
     let chunks = crate::rag_chunk::saved_chunk_texts(root);
     if chunks.is_empty() {
         return Ok(0);
@@ -278,6 +281,29 @@ pub fn gateway_less_warmup(root: &Path) -> std::io::Result<usize> {
         let _ = store.save(&vpath);
     }
     Ok(added)
+}
+
+/// The cross-process embed lock. The BUILD lock covers only the chunking inside
+/// `refresh_in_background` and is released before any embedding starts — which was fine with one
+/// server per project and stopped being fine the day a project can have TWO (the meeting proxy
+/// and `rozum rag mcp`, both warming up at startup and both re-embedding after an edit). Vectors
+/// were never at risk — the store's temp+rename means last-writer-wins on identical content —
+/// the waste was DOUBLE GPU WORK on the machine's busiest resource. `try_lock` + skip, not
+/// blocking: when the holder finishes, the vectors are on disk for everyone, same argument as
+/// the build lock. `None` = a sibling holds it.
+pub fn try_embed_lock(root: &Path) -> std::io::Result<Option<std::fs::File>> {
+    let dir = root.join(".rozum");
+    std::fs::create_dir_all(&dir)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("rag-embed.lock"))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    }
 }
 
 /// RRF fusion of the BM25 ranking and the embedding ranking.
@@ -374,6 +400,20 @@ mod tests {
         fs::write(&lp, legacy).unwrap();
         let old = VecStore::load(&lp, Some(2)).expect("v1 loads");
         assert_eq!(old.vecs["a#fn"], vec![0.6, 0.8]);
+    }
+
+    /// Two servers per project must not embed the same chunks twice. Asserted at the lock,
+    /// which is the coordination point both warmup paths share.
+    #[test]
+    fn a_second_embedder_skips_while_the_first_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = try_embed_lock(dir.path()).unwrap().expect("first takes it");
+        assert!(
+            try_embed_lock(dir.path()).unwrap().is_none(),
+            "second must skip while the first holds it"
+        );
+        drop(first);
+        assert!(try_embed_lock(dir.path()).unwrap().is_some(), "free again after drop");
     }
 
     #[test]

@@ -824,7 +824,12 @@ fn write_index(
         files,
         chunks: Vec::new(),
     };
-    fs::write(&file, serde_json::to_vec(&saved)?)?;
+    // Write-temp + rename, same as the vector store: TWO servers can serve one project (the
+    // meeting proxy and `rozum rag mcp`), and both refresh before searching — a reader must see
+    // the old complete index or the new complete one, never a prefix of a plain overwrite.
+    let tmp = file.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec(&saved)?)?;
+    fs::rename(&tmp, &file)?;
     Ok((stats, file))
 }
 

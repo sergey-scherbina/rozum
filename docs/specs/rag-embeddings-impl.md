@@ -128,6 +128,30 @@ repo with neither running: the server built the index, embedded the vectors and 
 untouched — this is the meetings-free OPTION, not a replacement — and the gate pins that the
 standalone server serves `rag.search` and NOTHING else, so meeting tools cannot quietly leak in.
 
+## Two servers, one store (operator question, 2026-09-01)
+
+Registering BOTH the meeting proxy and `rozum rag mcp` for one project is supported, and the
+audit the question prompted found two real gaps, both fixed:
+
+- **The index was written with a plain overwrite.** One server refreshing while the other read
+  could hand the reader a prefix of the file. Now write-temp + rename, like the vector store: a
+  reader sees the old complete index or the new complete one, never a torn one.
+- **Embedding ran outside any lock.** The build lock covers only the chunking inside
+  `refresh_in_background` and is released before embedding starts — fine with one server per
+  project, double GPU work with two (both warm up at startup, both re-embed after an edit).
+  Correctness was never at risk (the store's temp+rename means last-writer-wins on identical
+  content); the waste was the machine's busiest resource. Both warmup paths now take a shared
+  `rag-embed.lock` with try-and-skip semantics, gated by a test at the lock itself.
+
+What was already safe, for the record: all state is derived (index from the tree, vectors from
+the index), every writer converges on the same content, and readers reload by mtime — so the
+worst pre-fix outcome was waste and a transiently unreadable index, not wrong answers.
+
+**Registering both with one agent** does not conflict: MCP clients namespace tools by server
+name (`mcp__rozum__rag_search` vs `mcp__rozum-rag__rag_search`). It IS redundant — the agent
+sees two identical tools and pays schema tokens for both — so the guidance is either/or: the
+meeting proxy if you use meetings (retrieval rides along free), `rozum rag mcp` if you do not.
+
 ## Out of scope
 
 - ~~Residency-ledger accounting~~ — DONE in the follow-up commit: the embedder measures the MLX
