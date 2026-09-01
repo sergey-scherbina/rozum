@@ -2281,7 +2281,7 @@ pub fn normalizeLabel(raw: String) -> String {
 }
 
 pub fn MarkdownInlines_parse(content: String, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> Vec<InlinePiece> {
-    let atoms = tokenize(&content, refs, profile);
+    let atoms = tokenize(&content.encode_utf16().map(|__u| __u as i64).collect::<Vec<i64>>(), refs, profile);
     let processed = processEmphasis(&atoms);
     processed.iter().cloned().flat_map(flatten).collect::<Vec<_>>().clone().into_iter().collect::<Vec<_>>()
 }
@@ -2300,7 +2300,7 @@ pub fn text(lexeme: String) -> WNode {
     WNode::WFixed { pieces: vec![InlinePiece::Tok { kind: Text.clone(), lexeme: lexeme, role: None, channel: TokenChannel::Syntax }] }
 }
 
-pub fn tokenize(content: &String, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> Vec<WNode> {
+pub fn tokenize(content: &Vec<i64>, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> Vec<WNode> {
     let empty = DialectRegistry { byName: std::collections::HashMap::new() };
     let CodeContent = "markdown.code-content".to_string();
     let Html = "markdown.html".to_string();
@@ -2322,13 +2322,13 @@ pub fn tokenize(content: &String, refs: std::collections::HashMap<String, LinkRe
     let mut nodes: Vec<WNode> = Vec::new();
     let mut pending: Vec<String> = Vec::new();
     let mut i = 0i64;
-    let n = crate::runtime::_str_length(&(*content));
+    let n = ((*content).len() as i64);
     let gfm = (profile == MarkdownProfile::Gfm);
     let scala = (profile == MarkdownProfile::ScalaScript);
     while (i < n) {
-        let c = crate::runtime::_str_char_at(&(*content), i);
-        match (c).0 {
-            10i64 | 13i64 => { let ending = if (((c == 13i64) && ((i + 1i64) < n)) && (crate::runtime::_str_char_at(&(*content), (i + 1i64)) == 10i64)) { "\r\n".to_string() } else { crate::runtime::_str_substring(&(*content), i, (i + 1i64)) };
+        let c = content[(i) as usize].clone();
+        match (c).clone() {
+            10i64 | 13i64 => { let ending = if (((c == 13i64) && ((i + 1i64) < n)) && (content[((i + 1i64)) as usize].clone() == 10i64)) { "\r\n".to_string() } else { (((*content))[(i as usize)..((i + 1i64) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()) };
             let pend = (pending).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(("".to_string()).as_str());
             let hard = (pend.ends_with("  ") || pend.ends_with("\\"));
             if (hard && pend.ends_with("\\")) { pending = { let __v = (pending).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() };
@@ -2336,29 +2336,29 @@ pub fn tokenize(content: &String, refs: std::collections::HashMap<String, LinkRe
             nodes.push(WNode::WFixed { pieces: vec![InlinePiece::Tok { kind: HardBreak.clone(), lexeme: format!("{}{}", "\\".to_string(), ending), role: None.clone(), channel: TokenChannel::Syntax.clone() }] }); } else { flushText(&mut nodes, &mut pending);
             nodes.push(WNode::WFixed { pieces: vec![InlinePiece::Tok { kind: if hard { HardBreak.clone() } else { SoftBreak.clone() }, lexeme: ending.clone(), role: None.clone(), channel: if hard { TokenChannel::Syntax.clone() } else { TokenChannel::Trivia.clone() } }] }); }
             (i += crate::runtime::_str_length(&ending)); },
-            92i64 => { if (((i + 1i64) < n) && isAsciiPunctuation((crate::runtime::_str_char_at(&(*content), (i + 1i64))).0)) { flushText(&mut nodes, &mut pending);
-            nodes.push(WNode::WFixed { pieces: vec![InlinePiece::Tok { kind: Escape.clone(), lexeme: crate::runtime::_str_substring(&(*content), i, (i + 2i64)), role: None.clone(), channel: TokenChannel::Syntax.clone() }] });
+            92i64 => { if (((i + 1i64) < n) && isAsciiPunctuation(content[((i + 1i64)) as usize].clone())) { flushText(&mut nodes, &mut pending);
+            nodes.push(WNode::WFixed { pieces: vec![InlinePiece::Tok { kind: Escape.clone(), lexeme: (((*content))[(i as usize)..((i + 2i64) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), role: None.clone(), channel: TokenChannel::Syntax.clone() }] });
             (i += 2i64); } else { pending.push("\\".to_string());
             (i += 1i64); } },
             96i64 => { let runLen = runLength(content, i, 96i64);
             let closeAt = findBacktickClose(content, (i + runLen), runLen.clone());
             match (closeAt).clone() {
                 Some(start) => { flushText(&mut nodes, &mut pending);
-                let openLex = crate::runtime::_str_substring(&(*content), i, (i + runLen));
-                let inner = crate::runtime::_str_substring(&(*content), (i + runLen), start);
-                let closeLex = crate::runtime::_str_substring(&(*content), start, (start + runLen));
+                let openLex = (((*content))[(i as usize)..((i + runLen) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
+                let inner = (((*content))[((i + runLen) as usize)..(start as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
+                let closeLex = (((*content))[(start as usize)..((start + runLen) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
                 let mut pieces: Vec<InlinePiece> = Vec::new();
                 pieces.push(InlinePiece::Open { branch: CodeSpan.clone(), kind: BacktickRun.clone(), lexeme: openLex, role: Some("delimiter.open".to_string()) });
                 if !inner.is_empty() { pieces.push(InlinePiece::Tok { kind: CodeContent.clone(), lexeme: inner.clone(), role: Some("code".to_string()), channel: TokenChannel::Embedded.clone() }); } else { (); }
                 pieces.push(InlinePiece::Close { branch: CodeSpan.clone(), kind: BacktickRun.clone(), lexeme: closeLex, role: Some("delimiter.close".to_string()) });
                 nodes.push(WNode::WFixed { pieces: pieces.clone() });
                 i = (start + runLen); },
-                None => { pending.push(crate::runtime::_str_substring(&(*content), i, (i + runLen)));
+                None => { pending.push((((*content))[(i as usize)..((i + runLen) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()));
                 (i += runLen); },
             } },
             60i64 => { match (scanAngle(content, i)).clone() {
                 Some((kind, endEx)) => { flushText(&mut nodes, &mut pending);
-                let lex = crate::runtime::_str_substring(&(*content), i, endEx);
+                let lex = (((*content))[(i as usize)..(endEx as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
                 let (mdKind, role, channel) = match (kind).clone() {
                     AngleKind::Autolink => (Autolink.clone(), Some("autolink".to_string()), TokenChannel::Syntax.clone()),
                     AngleKind::Html => (Html.clone(), Some("html".to_string()), TokenChannel::Embedded.clone()),
@@ -2370,16 +2370,16 @@ pub fn tokenize(content: &String, refs: std::collections::HashMap<String, LinkRe
             } },
             38i64 => { match scanEntity(content, i) {
                 Some(endEx) => { flushText(&mut nodes, &mut pending);
-                nodes.push(WNode::WFixed { pieces: vec![InlinePiece::Tok { kind: Entity.clone(), lexeme: crate::runtime::_str_substring(&(*content), i, endEx), role: Some("entity".to_string()), channel: TokenChannel::Syntax.clone() }] });
+                nodes.push(WNode::WFixed { pieces: vec![InlinePiece::Tok { kind: Entity.clone(), lexeme: (((*content))[(i as usize)..(endEx as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), role: Some("entity".to_string()), channel: TokenChannel::Syntax.clone() }] });
                 i = endEx.clone(); },
                 None => { pending.push("&".to_string());
                 (i += 1i64); },
             } },
-            36i64 if ((scala && ((i + 1i64) < n)) && (crate::runtime::_str_char_at(&(*content), (i + 1i64)) == 123i64)) => { match scanExpression(content, i) {
+            36i64 if ((scala && ((i + 1i64) < n)) && (content[((i + 1i64)) as usize].clone() == 123i64)) => { match scanExpression(content, i) {
                 Some(endEx) => { flushText(&mut nodes, &mut pending);
-                let open = crate::runtime::_str_substring(&(*content), i, (i + 2i64));
-                let inner = crate::runtime::_str_substring(&(*content), (i + 2i64), (endEx - 1i64));
-                let close = crate::runtime::_str_substring(&(*content), (endEx - 1i64), endEx);
+                let open = (((*content))[(i as usize)..((i + 2i64) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
+                let inner = (((*content))[((i + 2i64) as usize)..((endEx - 1i64) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
+                let close = (((*content))[((endEx - 1i64) as usize)..(endEx as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
                 let mut pieces: Vec<InlinePiece> = Vec::new();
                 pieces.push(InlinePiece::Open { branch: Expression.clone(), kind: ExpressionOpen.clone(), lexeme: open, role: Some("delimiter.open".to_string()) });
                 if !inner.is_empty() { pieces.push(InlinePiece::Tok { kind: ExpressionContent.clone(), lexeme: inner.clone(), role: Some("expression".to_string()), channel: TokenChannel::Embedded.clone() }); } else { (); }
@@ -2389,7 +2389,7 @@ pub fn tokenize(content: &String, refs: std::collections::HashMap<String, LinkRe
                 None => { pending.push("$".to_string());
                 (i += 1i64); },
             } },
-            33i64 if (((i + 1i64) < n) && (crate::runtime::_str_char_at(&(*content), (i + 1i64)) == 91i64)) => { match (tryLink(content, i, true, refs.clone(), profile.clone())).clone() {
+            33i64 if (((i + 1i64) < n) && (content[((i + 1i64)) as usize].clone() == 91i64)) => { match (tryLink(content, i, true, refs.clone(), profile.clone())).clone() {
                 Some((node, endEx)) => { flushText(&mut nodes, &mut pending);
                 nodes.push(node.clone());
                 i = endEx.clone(); },
@@ -2404,22 +2404,22 @@ pub fn tokenize(content: &String, refs: std::collections::HashMap<String, LinkRe
                 (i += 1i64); },
             } },
             42i64 | 95i64 => { flushText(&mut nodes, &mut pending);
-            nodes.push(delimiterRun(content, i, (c.clone()).0));
-            (i += runLength(content, i, (c.clone()).0)); },
+            nodes.push(delimiterRun(content, i, c.clone()));
+            (i += runLength(content, i, c.clone())); },
             126i64 if gfm => { flushText(&mut nodes, &mut pending);
-            nodes.push(delimiterRun(content, i, (c.clone()).0));
-            (i += runLength(content, i, (c.clone()).0)); },
-            _ if (gfm && isExtendedAutolinkStart(content, i, &pending)) => { let (dropNodes, keepText, localPart) = if (crate::runtime::_str_char_at(&(*content), i) == 64i64) { emailLocalBackscan(&nodes, &pending) } else { (0i64, "".to_string(), "".to_string()) };
+            nodes.push(delimiterRun(content, i, c.clone()));
+            (i += runLength(content, i, c.clone())); },
+            _ if (gfm && isExtendedAutolinkStart(content, i, &pending)) => { let (dropNodes, keepText, localPart) = if (content[(i) as usize].clone() == 64i64) { emailLocalBackscan(&nodes, &pending) } else { (0i64, "".to_string(), "".to_string()) };
             match (extendedAutolink(content, i, &localPart)).clone() {
                 Some((backtrack, lexeme, _)) => { if (backtrack > 0i64) { if (dropNodes > 0i64) { nodes = { let __v = (nodes).clone(); let __k = (dropNodes) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() }; } else { (); }
                 pending = if keepText.is_empty() { Vec::new() } else { vec![keepText.clone()] }; } else { (); }
                 flushText(&mut nodes, &mut pending);
                 nodes.push(WNode::WFixed { pieces: vec![InlinePiece::Tok { kind: Autolink.clone(), lexeme: lexeme.clone(), role: Some("extended".to_string()), channel: TokenChannel::Syntax.clone() }] });
                 i = ((i - backtrack) + (lexeme.len() as i64)); },
-                None => { pending.push(crate::runtime::_str_substring(&(*content), i, (i + 1i64)));
+                None => { pending.push((((*content))[(i as usize)..((i + 1i64) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()));
                 (i += 1i64); },
             } },
-            _ => { pending.push(crate::runtime::_str_substring(&(*content), i, (i + 1i64)));
+            _ => { pending.push((((*content))[(i as usize)..((i + 1i64) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()));
             (i += 1i64); },
         }
     };
@@ -2427,36 +2427,36 @@ pub fn tokenize(content: &String, refs: std::collections::HashMap<String, LinkRe
     nodes
 }
 
-pub fn isExtendedAutolinkStart(content: &String, i: i64, pending: &Vec<String>) -> bool {
-    match (crate::runtime::_str_char_at(&(*content), i)).0 {
+pub fn isExtendedAutolinkStart(content: &Vec<i64>, i: i64, pending: &Vec<String>) -> bool {
+    match content[(i) as usize].clone() {
         119i64 | 104i64 | 102i64 => validAutolinkPredecessor(content, i),
         64i64 => !(*pending).is_empty(),
         _ => false,
     }
 }
 
-pub fn validAutolinkPredecessor(content: &String, i: i64) -> bool {
-    if (i == 0i64) { true } else { { let p = crate::runtime::_str_char_at(&(*content), (i - 1i64));
-    ((((isUnicodeWhitespace((p.clone()).0) || (p == 42i64)) || (p == 95i64)) || (p == 126i64)) || (p == 40i64)) } }
+pub fn validAutolinkPredecessor(content: &Vec<i64>, i: i64) -> bool {
+    if (i == 0i64) { true } else { { let p = content[((i - 1i64)) as usize].clone();
+    ((((isUnicodeWhitespace(p.clone()) || (p == 42i64)) || (p == 95i64)) || (p == 126i64)) || (p == 40i64)) } }
 }
 
-pub fn extendedAutolink(content: &String, i: i64, localPart: &String) -> Option<(i64, String, String)> {
-    if (crate::runtime::_str_char_at(&(*content), i) == 64i64) { emailAutolink(content, i, localPart) } else { { let schemes = vec!["http://".to_string(), "https://".to_string(), "ftp://".to_string()];
-    let scheme = schemes.iter().cloned().find(|__f| { let s = __f.clone(); crate::runtime::_str_region_matches(&(*content), true, i, &(s), 0i64, (s.len() as i64)) });
-    if scheme.is_some() { domainAndPath(content, (i + (scheme.clone().unwrap().len() as i64))).map({ { let content = content; let trimAutolinkTail = trimAutolinkTail.clone(); move |end| { { let lexeme = trimAutolinkTail(&crate::runtime::_str_substring(&(*content), i, end));
-    (0i64, lexeme.clone(), lexeme.clone()) } } } }).filter(|__p0| { ((__p0.1.len() as i64) > (scheme.clone().unwrap().len() as i64)) }) } else { if crate::runtime::_str_region_matches(&(*content), true, i, &("www.".to_string()), 0i64, 4i64) { domainAndPath(content, i).map({ { let content = content; let trimAutolinkTail = trimAutolinkTail.clone(); move |end| { { let lexeme = trimAutolinkTail(&crate::runtime::_str_substring(&(*content), i, end));
+pub fn extendedAutolink(content: &Vec<i64>, i: i64, localPart: &String) -> Option<(i64, String, String)> {
+    if (content[(i) as usize].clone() == 64i64) { emailAutolink(content, i, localPart) } else { { let schemes = vec!["http://".to_string(), "https://".to_string(), "ftp://".to_string()];
+    let scheme = schemes.iter().cloned().find(|__f| { let s = __f.clone(); vecRegionMatchesIgnoreCase(content, i.clone(), &s) });
+    if scheme.is_some() { domainAndPath(content, (i + (scheme.clone().unwrap().len() as i64))).map({ { let content = content; let trimAutolinkTail = trimAutolinkTail.clone(); move |end| { { let lexeme = trimAutolinkTail(&(((*content))[(i as usize)..(end as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()));
+    (0i64, lexeme.clone(), lexeme.clone()) } } } }).filter(|__p0| { ((__p0.1.len() as i64) > (scheme.clone().unwrap().len() as i64)) }) } else { if vecRegionMatchesIgnoreCase(content, i, &"www.".to_string()) { domainAndPath(content, i).map({ { let content = content; let trimAutolinkTail = trimAutolinkTail.clone(); move |end| { { let lexeme = trimAutolinkTail(&(((*content))[(i as usize)..(end as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()));
     (0i64, lexeme.clone(), format!("{}{}", "http://".to_string(), lexeme)) } } } }).filter(|__p0| { ((__p0.1.len() as i64) > 4i64) }) } else { None } } } }
 }
 
-pub fn emailAutolink(content: &String, at: i64, local: &String) -> Option<(i64, String, String)> {
+pub fn emailAutolink(content: &Vec<i64>, at: i64, local: &String) -> Option<(i64, String, String)> {
     if (*local).is_empty() { None } else { { let mut j = (at + 1i64);
-    while ((j < crate::runtime::_str_length(&(*content))) && isEmailDomainChar((crate::runtime::_str_char_at(&(*content), j)).0)) {
+    while ((j < ((*content).len() as i64)) && isEmailDomainChar(content[(j) as usize].clone())) {
         (j += 1i64);
     };
-    while ((j > (at + 1i64)) && (crate::runtime::_str_char_at(&(*content), (j - 1i64)) == 46i64)) {
+    while ((j > (at + 1i64)) && (content[((j - 1i64)) as usize].clone() == 46i64)) {
         (j -= 1i64);
     };
-    let domain = crate::runtime::_str_substring(&(*content), (at + 1i64), j);
+    let domain = (((*content))[((at + 1i64) as usize)..(j as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
     if !(validEmailDomain(&domain)) { None } else { { let lexeme = format!("{}{}{}", (*local), "@".to_string(), domain);
     Some((crate::runtime::_str_length(&(*local)), lexeme.clone(), format!("{}{}", "mailto:".to_string(), lexeme))) } } } }
 }
@@ -2517,14 +2517,14 @@ pub fn validEmailDomain(domain: &String) -> bool {
     ((((((segments.len() as i64) >= 2i64) && segments.iter().cloned().all(|__p0| { !__p0.is_empty() })) && { let __v = (segments).clone(); let __k = (2i64) as usize; __v[__v.len().saturating_sub(__k)..].to_vec() }.iter().cloned().all(|__p0| { !(__p0.contains("_")) })) && (last != 45i64)) && (last != 95i64))
 }
 
-pub fn domainAndPath(content: &String, from: i64) -> Option<i64> {
+pub fn domainAndPath(content: &Vec<i64>, from: i64) -> Option<i64> {
     let mut j = from;
-    while ((j < crate::runtime::_str_length(&(*content))) && isEmailDomainChar((crate::runtime::_str_char_at(&(*content), j)).0)) {
+    while ((j < ((*content).len() as i64)) && isEmailDomainChar(content[(j.clone()) as usize].clone())) {
         (j += 1i64);
     };
-    let domain = crate::runtime::_str_substring(&(*content), from, j);
+    let domain = (((*content))[(from as usize)..(j as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
     let segments = domain.splitn(-1i64 as usize, "\\.").map(|p| p.to_string()).collect::<Vec<String>>().clone().into_iter().collect::<Vec<_>>();
-    if (((segments.len() as i64) < 2i64) || (segments).iter().cloned().take(((segments.len() as i64) - 1i64) as usize).collect::<Vec<_>>().iter().cloned().any(|__p0| { __p0.is_empty() })) { None } else { { while (((j < crate::runtime::_str_length(&(*content))) && !(isUnicodeWhitespace((crate::runtime::_str_char_at(&(*content), j)).0))) && (crate::runtime::_str_char_at(&(*content), j) != 60i64)) {
+    if (((segments.len() as i64) < 2i64) || (segments).iter().cloned().take(((segments.len() as i64) - 1i64) as usize).collect::<Vec<_>>().iter().cloned().any(|__p0| { __p0.is_empty() })) { None } else { { while (((j < ((*content).len() as i64)) && !(isUnicodeWhitespace(content[(j.clone()) as usize].clone()))) && (content[(j.clone()) as usize].clone() != 60i64)) {
         (j += 1i64);
     };
     Some(j) } }
@@ -2555,54 +2555,54 @@ pub fn trimAutolinkTail(raw: &String) -> String {
     s
 }
 
-pub fn delimiterRun(content: &String, start: i64, ch: i64) -> WNode {
+pub fn delimiterRun(content: &Vec<i64>, start: i64, ch: i64) -> WNode {
     let len = runLength(content, start, ch);
-    let before = if (start == 0i64) { 32i64 } else { (crate::runtime::_str_char_at(&(*content), (start - 1i64))).0 };
-    let after = if ((start + len) >= crate::runtime::_str_length(&(*content))) { 32i64 } else { (crate::runtime::_str_char_at(&(*content), (start + len))).0 };
+    let before = if (start == 0i64) { 32i64 } else { content[((start - 1i64)) as usize].clone() };
+    let after = if ((start + len) >= ((*content).len() as i64)) { 32i64 } else { content[((start + len)) as usize].clone() };
     let leftFlanking = (!(isUnicodeWhitespace(after.clone())) && ((!(isPunctuation(after.clone())) || isUnicodeWhitespace(before.clone())) || isPunctuation(before.clone())));
     let rightFlanking = (!(isUnicodeWhitespace(before.clone())) && ((!(isPunctuation(before.clone())) || isUnicodeWhitespace(after.clone())) || isPunctuation(after.clone())));
     let (canOpen, canClose) = if (ch == 95i64) { ((leftFlanking && (!(rightFlanking) || isPunctuation(before))), (rightFlanking && (!(leftFlanking) || isPunctuation(after)))) } else { (leftFlanking, rightFlanking) };
-    WNode::WDelim { lexeme: crate::runtime::_str_substring(&(*content), start, (start + len)), ch: ch, canOpen: canOpen, canClose: canClose }
+    WNode::WDelim { lexeme: (((*content))[(start as usize)..((start + len) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ch: ch, canOpen: canOpen, canClose: canClose }
 }
 
-pub fn runLength(content: &String, start: i64, ch: i64) -> i64 {
+pub fn runLength(content: &Vec<i64>, start: i64, ch: i64) -> i64 {
     let mut i = start;
-    while ((i < crate::runtime::_str_length(&(*content))) && (crate::runtime::_str_char_at(&(*content), i) == ch)) {
+    while ((i < ((*content).len() as i64)) && (content[(i.clone()) as usize].clone() == ch)) {
         (i += 1i64);
     };
     (i - start)
 }
 
-pub fn findBacktickClose(content: &String, from: i64, runLen: i64) -> Option<i64> {
+pub fn findBacktickClose(content: &Vec<i64>, from: i64, runLen: i64) -> Option<i64> {
     let mut i = from;
-    while (i < crate::runtime::_str_length(&(*content))) {
-        if (crate::runtime::_str_char_at(&(*content), i) == 96i64) { let len = runLength(content, i.clone(), 96i64);
+    while (i < ((*content).len() as i64)) {
+        if (content[(i.clone()) as usize].clone() == 96i64) { let len = runLength(content, i.clone(), 96i64);
         if (len == runLen) { return Some(i.clone()); } else { (); }
         (i += len); } else { (i += 1i64); }
     };
     None
 }
 
-pub fn tryLink(content: &String, start: i64, image: bool, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> Option<(WNode, i64)> {
+pub fn tryLink(content: &Vec<i64>, start: i64, image: bool, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> Option<(WNode, i64)> {
     let openLen = if image { 2i64 } else { 1i64 };
     let textStart = (start + openLen);
     let closeBracket = matchBracket(content, textStart);
     match closeBracket {
         None => None.clone(),
-        Some(labelEnd) => { let labelText = crate::runtime::_str_substring(&(*content), textStart, labelEnd);
+        Some(labelEnd) => { let labelText = (((*content))[(textStart as usize)..(labelEnd as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
         if (!(image) && containsLink(&MarkdownInlines_parse(labelText.clone(), refs.clone(), profile.clone()))) { return None; } else { (); }
         let cursor = (labelEnd + 1i64);
-        if ((cursor < crate::runtime::_str_length(&(*content))) && (crate::runtime::_str_char_at(&(*content), cursor) == 40i64)) { match (parseInlineDestination(content, cursor)).clone() {
+        if ((cursor < ((*content).len() as i64)) && (content[(cursor) as usize].clone() == 40i64)) { match (parseInlineDestination(content, cursor)).clone() {
             Some((_, _, destTitleSpans, endEx)) => Some((buildLink(content, start, textStart, labelEnd.clone(), &labelText, image, destTitleSpans, endEx.clone(), refs.clone(), profile.clone()), endEx.clone())),
             None => tryReference(content, start, textStart, labelEnd.clone(), &labelText, image, refs.clone(), profile.clone()),
         } } else { tryReference(content, start, textStart, labelEnd.clone(), &labelText, image, refs.clone(), profile.clone()) } },
     }
 }
 
-pub fn tryReference(content: &String, start: i64, labelStart: i64, labelEnd: i64, labelText: &String, image: bool, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> Option<(WNode, i64)> {
+pub fn tryReference(content: &Vec<i64>, start: i64, labelStart: i64, labelEnd: i64, labelText: &String, image: bool, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> Option<(WNode, i64)> {
     let cursor = (labelEnd + 1i64);
-    if ((cursor < crate::runtime::_str_length(&(*content))) && (crate::runtime::_str_char_at(&(*content), cursor) == 91i64)) { match matchBracket(content, (cursor + 1i64)) {
-        Some(refEnd) => { let refLabel = crate::runtime::_str_substring(&(*content), (cursor + 1i64), refEnd);
+    if ((cursor < ((*content).len() as i64)) && (content[(cursor) as usize].clone() == 91i64)) { match matchBracket(content, (cursor + 1i64)) {
+        Some(refEnd) => { let refLabel = (((*content))[((cursor + 1i64) as usize)..(refEnd as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
         let label = if refLabel.trim().to_string().is_empty() { (*labelText).clone() } else { refLabel };
         resolveRef(&label, refs.clone()).map({ { let buildRefLink = buildRefLink.clone(); let content = content; let labelText = labelText; let profile = profile.clone(); let refEnd = refEnd.clone(); let refs = refs.clone(); move |_| { (buildRefLink(content, start.clone(), labelStart.clone(), labelEnd.clone(), labelText, image.clone(), (refEnd + 1i64), refs.clone(), profile.clone()), (refEnd + 1i64)) } } }) },
         None => None.clone(),
@@ -2623,7 +2623,7 @@ pub fn containsLink(pieces: &Vec<InlinePiece>) -> bool {
     })
 }
 
-pub fn buildLink(content: &String, start: i64, labelStart: i64, labelEnd: i64, labelText: &String, image: bool, spans: DestTitleSpans, endEx: i64, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> WNode {
+pub fn buildLink(content: &Vec<i64>, start: i64, labelStart: i64, labelEnd: i64, labelText: &String, image: bool, spans: DestTitleSpans, endEx: i64, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> WNode {
     let empty = DialectRegistry { byName: std::collections::HashMap::new() };
     let Indent = "markdown.indent".to_string();
     let LinkOpen = "markdown.link-open".to_string();
@@ -2634,24 +2634,24 @@ pub fn buildLink(content: &String, start: i64, labelStart: i64, labelEnd: i64, l
     let DestClose = "markdown.dest-close".to_string();
     let Link = "markdown.link".to_string();
     let Image = "markdown.image".to_string();
-    fn slice(kind: String, from: i64, to: i64, role: String, ch: TokenChannel, content: String, pieces: &mut Vec<InlinePiece>) {
-        if (from < to) { (*pieces).push(InlinePiece::Tok { kind: kind, lexeme: crate::runtime::_str_substring(&content, from, to), role: Some(role), channel: ch }); } else { (); }
+    fn piece(kind: String, text: String, role: String, ch: TokenChannel, pieces: &mut Vec<InlinePiece>) {
+        if !text.is_empty() { (*pieces).push(InlinePiece::Tok { kind: kind, lexeme: text.clone(), role: Some(role), channel: ch }); } else { (); }
     }
     let branch = if image { Image.clone() } else { Link.clone() };
     let mut pieces: Vec<InlinePiece> = Vec::new();
-    pieces.push(InlinePiece::Open { branch: branch.clone(), kind: LinkOpen.clone(), lexeme: crate::runtime::_str_substring(&(*content), start, labelStart), role: Some("delimiter.open".to_string()) });
+    pieces.push(InlinePiece::Open { branch: branch.clone(), kind: LinkOpen.clone(), lexeme: (((*content))[(start as usize)..(labelStart as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), role: Some("delimiter.open".to_string()) });
     pieces.extend((MarkdownInlines_parse((*labelText).clone(), refs, profile)).iter().cloned());
-    pieces.push(InlinePiece::Tok { kind: LinkClose.clone(), lexeme: crate::runtime::_str_substring(&(*content), labelEnd, (labelEnd + 1i64)), role: Some("label.close".to_string()), channel: TokenChannel::Syntax.clone() });
-    slice(DestOpen.clone(), (labelEnd + 1i64), spans.destStart.clone(), "dest.open".to_string(), TokenChannel::Syntax.clone(), (*content).clone(), &mut pieces);
-    slice(Destination.clone(), spans.destStart.clone(), spans.destEnd.clone(), "destination".to_string(), TokenChannel::Syntax.clone(), (*content).clone(), &mut pieces);
-    slice(Indent.clone(), spans.destEnd.clone(), spans.titleStart.clone(), "space".to_string(), TokenChannel::Trivia.clone(), (*content).clone(), &mut pieces);
-    slice(Title.clone(), spans.titleStart.clone(), spans.titleEnd.clone(), "title".to_string(), TokenChannel::Syntax.clone(), (*content).clone(), &mut pieces);
-    slice(Indent.clone(), spans.titleEnd.clone(), spans.closeStart.clone(), "space".to_string(), TokenChannel::Trivia.clone(), (*content).clone(), &mut pieces);
-    pieces.push(InlinePiece::Close { branch: branch, kind: DestClose.clone(), lexeme: crate::runtime::_str_substring(&(*content), spans.closeStart, endEx), role: Some("dest.close".to_string()) });
+    pieces.push(InlinePiece::Tok { kind: LinkClose.clone(), lexeme: (((*content))[(labelEnd as usize)..((labelEnd + 1i64) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), role: Some("label.close".to_string()), channel: TokenChannel::Syntax.clone() });
+    piece(DestOpen.clone(), (((*content))[((labelEnd + 1i64) as usize)..(spans.destStart as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), "dest.open".to_string(), TokenChannel::Syntax.clone(), &mut pieces);
+    piece(Destination.clone(), (((*content))[(spans.destStart as usize)..(spans.destEnd as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), "destination".to_string(), TokenChannel::Syntax.clone(), &mut pieces);
+    piece(Indent.clone(), (((*content))[(spans.destEnd as usize)..(spans.titleStart as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), "space".to_string(), TokenChannel::Trivia.clone(), &mut pieces);
+    piece(Title.clone(), (((*content))[(spans.titleStart as usize)..(spans.titleEnd as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), "title".to_string(), TokenChannel::Syntax.clone(), &mut pieces);
+    piece(Indent.clone(), (((*content))[(spans.titleEnd as usize)..(spans.closeStart as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), "space".to_string(), TokenChannel::Trivia.clone(), &mut pieces);
+    pieces.push(InlinePiece::Close { branch: branch, kind: DestClose.clone(), lexeme: (((*content))[(spans.closeStart as usize)..(endEx as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), role: Some("dest.close".to_string()) });
     WNode::WFixed { pieces: pieces }
 }
 
-pub fn buildRefLink(content: &String, start: i64, labelStart: i64, labelEnd: i64, labelText: &String, image: bool, endEx: i64, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> WNode {
+pub fn buildRefLink(content: &Vec<i64>, start: i64, labelStart: i64, labelEnd: i64, labelText: &String, image: bool, endEx: i64, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> WNode {
     let empty = DialectRegistry { byName: std::collections::HashMap::new() };
     let LinkOpen = "markdown.link-open".to_string();
     let ReferenceLabel = "markdown.reference-label".to_string();
@@ -2659,66 +2659,66 @@ pub fn buildRefLink(content: &String, start: i64, labelStart: i64, labelEnd: i64
     let Image = "markdown.image".to_string();
     let branch = if image { Image.clone() } else { Link.clone() };
     let mut pieces: Vec<InlinePiece> = Vec::new();
-    pieces.push(InlinePiece::Open { branch: branch.clone(), kind: LinkOpen.clone(), lexeme: crate::runtime::_str_substring(&(*content), start, labelStart), role: Some("delimiter.open".to_string()) });
+    pieces.push(InlinePiece::Open { branch: branch.clone(), kind: LinkOpen.clone(), lexeme: (((*content))[(start as usize)..(labelStart as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), role: Some("delimiter.open".to_string()) });
     pieces.extend((MarkdownInlines_parse((*labelText).clone(), refs, profile)).iter().cloned());
-    pieces.push(InlinePiece::Close { branch: branch, kind: ReferenceLabel.clone(), lexeme: crate::runtime::_str_substring(&(*content), labelEnd, endEx), role: Some("reference".to_string()) });
+    pieces.push(InlinePiece::Close { branch: branch, kind: ReferenceLabel.clone(), lexeme: (((*content))[(labelEnd as usize)..(endEx as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), role: Some("reference".to_string()) });
     WNode::WFixed { pieces: pieces }
 }
 
-pub fn parseInlineDestination(content: &String, open: i64) -> Option<(String, Option<String>, DestTitleSpans, i64)> {
+pub fn parseInlineDestination(content: &Vec<i64>, open: i64) -> Option<(String, Option<String>, DestTitleSpans, i64)> {
     let empty = DialectRegistry { byName: std::collections::HashMap::new() };
     let mut i = (open + 1i64);
-    let n = crate::runtime::_str_length(&(*content));
-    while ((i < n) && isUnicodeWhitespace((crate::runtime::_str_char_at(&(*content), i)).0)) {
+    let n = ((*content).len() as i64);
+    while ((i < n) && isUnicodeWhitespace(content[(i) as usize].clone())) {
         (i += 1i64);
     };
     let destStart = i;
     let mut dest = "".to_string();
-    if ((i < n) && (crate::runtime::_str_char_at(&(*content), i) == 60i64)) { let end = crate::runtime::_str_index_of_from(&(*content), &(char::from_u32((62i64) as u32).unwrap_or('\u{FFFD}').to_string()), (i + 1i64));
-    if ((end < 0i64) || crate::runtime::_str_substring(&(*content), (i + 1i64), end).contains(char::from_u32((10i64) as u32).unwrap_or('\u{FFFD}'))) { return None; } else { (); }
-    dest = crate::runtime::_str_substring(&(*content), (i + 1i64), end);
+    if ((i < n) && (content[(i) as usize].clone() == 60i64)) { let end = vecIndexOfChar(content, 62i64, (i + 1i64));
+    if ((end < 0i64) || (((*content))[((i + 1i64) as usize)..(end as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()).contains(char::from_u32((10i64) as u32).unwrap_or('\u{FFFD}'))) { return None; } else { (); }
+    dest = (((*content))[((i + 1i64) as usize)..(end as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
     i = (end + 1i64); } else { let mut depth = 0i64;
     let mut sb: Vec<String> = Vec::new();
     let mut done = false;
     while ((i < n) && !(done)) {
-        let c = crate::runtime::_str_char_at(&(*content), i);
-        if ((c == 92i64) && ((i + 1i64) < n)) { sb = [&([&(sb)[..], &[crate::runtime::_str_substring(&(*content), i, (i + 1i64))][..]].concat())[..], &[crate::runtime::_str_substring(&(*content), (i + 1i64), (i + 2i64))][..]].concat();
-        (i += 2i64); } else { if isUnicodeWhitespace((c.clone()).0) { done = true; } else { if (c == 40i64) { (depth += 1i64);
-        sb.push(crate::runtime::_str_substring(&(*content), i, (i + 1i64)));
+        let c = content[(i) as usize].clone();
+        if ((c == 92i64) && ((i + 1i64) < n)) { sb = [&([&(sb)[..], &[(((*content))[(i as usize)..((i + 1i64) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str())][..]].concat())[..], &[(((*content))[((i + 1i64) as usize)..((i + 2i64) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str())][..]].concat();
+        (i += 2i64); } else { if isUnicodeWhitespace(c.clone()) { done = true; } else { if (c == 40i64) { (depth += 1i64);
+        sb.push((((*content))[(i as usize)..((i + 1i64) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()));
         (i += 1i64); } else { if (c == 41i64) { if (depth == 0i64) { done = true; } else { (depth -= 1i64);
-        sb.push(crate::runtime::_str_substring(&(*content), i, (i + 1i64)));
-        (i += 1i64); } } else { sb.push(crate::runtime::_str_substring(&(*content), i, (i + 1i64)));
+        sb.push((((*content))[(i as usize)..((i + 1i64) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()));
+        (i += 1i64); } } else { sb.push((((*content))[(i as usize)..((i + 1i64) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()));
         (i += 1i64); } } } }
     };
     dest = (sb).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(("".to_string()).as_str()); }
     let destEnd = i;
-    while ((i < n) && isUnicodeWhitespace((crate::runtime::_str_char_at(&(*content), i)).0)) {
+    while ((i < n) && isUnicodeWhitespace(content[(i) as usize].clone())) {
         (i += 1i64);
     };
     let mut titleStart = i;
     let mut titleEnd = i;
     let mut title: Option<String> = None.clone();
-    if ((i < n) && (((crate::runtime::_str_char_at(&(*content), i) == 34i64) || (crate::runtime::_str_char_at(&(*content), i) == 39i64)) || (crate::runtime::_str_char_at(&(*content), i) == 40i64))) { let open2 = crate::runtime::_str_char_at(&(*content), i);
-    let close2 = if (open2 == 40i64) { 41i64 } else { (open2).0 };
-    let end = crate::runtime::_str_index_of_from(&(*content), &(char::from_u32((close2) as u32).unwrap_or('\u{FFFD}').to_string()), (i + 1i64));
+    if ((i < n) && (((content[(i) as usize].clone() == 34i64) || (content[(i) as usize].clone() == 39i64)) || (content[(i) as usize].clone() == 40i64))) { let open2 = content[(i) as usize].clone();
+    let close2 = if (open2 == 40i64) { 41i64 } else { open2 };
+    let end = vecIndexOfChar(content, close2, (i + 1i64));
     if (end < 0i64) { return None; } else { (); }
     titleStart = i;
     titleEnd = (end + 1i64);
-    title = Some(crate::runtime::_str_substring(&(*content), (i + 1i64), end));
+    title = Some((((*content))[((i + 1i64) as usize)..(end as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()));
     i = (end + 1i64); } else { (); }
-    while ((i < n) && isUnicodeWhitespace((crate::runtime::_str_char_at(&(*content), i)).0)) {
+    while ((i < n) && isUnicodeWhitespace(content[(i) as usize].clone())) {
         (i += 1i64);
     };
-    if ((i >= n) || (crate::runtime::_str_char_at(&(*content), i) != 41i64)) { None } else { Some((dest, title, DestTitleSpans { destStart: destStart, destEnd: destEnd, titleStart: titleStart, titleEnd: titleEnd, closeStart: i }, (i + 1i64))) }
+    if ((i >= n) || (content[(i) as usize].clone() != 41i64)) { None } else { Some((dest, title, DestTitleSpans { destStart: destStart, destEnd: destEnd, titleStart: titleStart, titleEnd: titleEnd, closeStart: i }, (i + 1i64))) }
 }
 
-pub fn matchBracket(content: &String, from: i64) -> Option<i64> {
+pub fn matchBracket(content: &Vec<i64>, from: i64) -> Option<i64> {
     let mut i = from;
     let mut depth = 0i64;
-    let n = crate::runtime::_str_length(&(*content));
+    let n = ((*content).len() as i64);
     while (i < n) {
-        let c = crate::runtime::_str_char_at(&(*content), i);
-        match (c).0 {
+        let c = content[(i.clone()) as usize].clone();
+        match (c).clone() {
             92i64 if ((i + 1i64) < n) => { (i += 2i64); },
             96i64 => { let len = runLength(content, i.clone(), 96i64);
             match findBacktickClose(content, (i + len), len.clone()) {
@@ -2735,17 +2735,17 @@ pub fn matchBracket(content: &String, from: i64) -> Option<i64> {
     None
 }
 
-pub fn scanAngle(content: &String, start: i64) -> Option<(AngleKind, i64)> {
+pub fn scanAngle(content: &Vec<i64>, start: i64) -> Option<(AngleKind, i64)> {
     let Html = "markdown.html".to_string();
     let Autolink = "markdown.autolink".to_string();
-    let n = crate::runtime::_str_length(&(*content));
+    let n = ((*content).len() as i64);
     if ((start + 1i64) >= n) { None } else { scanAutolink(content, start).map(move |end| { (AngleKind::Autolink.clone(), end.clone()) }).or_else(|| scanRawHtml(content, start).map(move |end| { (AngleKind::Html.clone(), end.clone()) })) }
 }
 
-pub fn scanAutolink(content: &String, start: i64) -> Option<i64> {
-    let close = crate::runtime::_str_index_of_from(&(*content), &(char::from_u32((62i64) as u32).unwrap_or('\u{FFFD}').to_string()), (start + 1i64));
+pub fn scanAutolink(content: &Vec<i64>, start: i64) -> Option<i64> {
+    let close = vecIndexOfChar(content, 62i64, (start + 1i64));
     if (close < 0i64) { return None; } else { (); }
-    let inner = crate::runtime::_str_substring(&(*content), (start + 1i64), close);
+    let inner = (((*content))[((start + 1i64) as usize)..(close as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str());
     if (inner.is_empty() || inner.chars().any(|__ch| { let c = (__ch as u32) as i64; (isUnicodeWhitespace(c.clone()) || (c == 60i64)) })) { return None; } else { (); }
     let colon = { let __h: &str = &inner; let __n: &str = &char::from_u32((58i64) as u32).unwrap_or('\u{FFFD}').to_string(); __h.find(__n).map(|__b| __h[..__b].encode_utf16().count() as i64).unwrap_or(-1) };
     let isUri = ((colon >= 2i64) && { let scheme = crate::runtime::_str_substring(&inner, 0i64, colon);
@@ -2755,100 +2755,100 @@ pub fn scanAutolink(content: &String, start: i64) -> Option<i64> {
     if (isUri || isEmail) { Some((close + 1i64)) } else { None }
 }
 
-pub fn scanRawHtml(content: &String, start: i64) -> Option<i64> {
-    let n = crate::runtime::_str_length(&(*content));
+pub fn scanRawHtml(content: &Vec<i64>, start: i64) -> Option<i64> {
+    let n = ((*content).len() as i64);
     if ((start + 1i64) >= n) { return None; } else { (); }
-    let c1 = crate::runtime::_str_char_at(&(*content), (start + 1i64));
-    if (c1 == 33i64) { if crate::runtime::_str_starts_with_at(&(*content), &("<!--".to_string()), start) { scanComment(content, start) } else { if crate::runtime::_str_starts_with_at(&(*content), &("<![CDATA[".to_string()), start) { { let end = crate::runtime::_str_index_of_from(&(*content), &("]]>".to_string()), (start + 9i64));
-    if (end >= 0i64) { Some((end + 3i64)) } else { None } } } else { { let end = crate::runtime::_str_index_of_from(&(*content), &(char::from_u32((62i64) as u32).unwrap_or('\u{FFFD}').to_string()), (start + 2i64));
-    if (end >= 0i64) { Some((end + 1i64)) } else { None } } } } } else { if (c1 == 63i64) { { let end = crate::runtime::_str_index_of_from(&(*content), &("?>".to_string()), (start + 2i64));
-    if (end >= 0i64) { Some((end + 2i64)) } else { None } } } else { if (c1 == 47i64) { scanClosingTag(content, start) } else { if MdChars_isAsciiLetter((c1).0) { scanOpenTag(content, start) } else { None } } } }
+    let c1 = content[((start + 1i64)) as usize].clone();
+    if (c1 == 33i64) { if vecStartsWith(content, &"<!--".to_string(), start) { scanComment(content, start) } else { if vecStartsWith(content, &"<![CDATA[".to_string(), start) { { let end = vecIndexOf(content, &"]]>".to_string(), (start + 9i64));
+    if (end >= 0i64) { Some((end + 3i64)) } else { None } } } else { { let end = vecIndexOfChar(content, 62i64, (start + 2i64));
+    if (end >= 0i64) { Some((end + 1i64)) } else { None } } } } } else { if (c1 == 63i64) { { let end = vecIndexOf(content, &"?>".to_string(), (start + 2i64));
+    if (end >= 0i64) { Some((end + 2i64)) } else { None } } } else { if (c1 == 47i64) { scanClosingTag(content, start) } else { if MdChars_isAsciiLetter(c1) { scanOpenTag(content, start) } else { None } } } }
 }
 
-pub fn scanComment(content: &String, start: i64) -> Option<i64> {
-    if crate::runtime::_str_starts_with_at(&(*content), &("<!-->".to_string()), start) { Some((start + 5i64)) } else { if crate::runtime::_str_starts_with_at(&(*content), &("<!--->".to_string()), start) { Some((start + 6i64)) } else { { let end = crate::runtime::_str_index_of_from(&(*content), &("-->".to_string()), (start + 4i64));
+pub fn scanComment(content: &Vec<i64>, start: i64) -> Option<i64> {
+    if vecStartsWith(content, &"<!-->".to_string(), start) { Some((start + 5i64)) } else { if vecStartsWith(content, &"<!--->".to_string(), start) { Some((start + 6i64)) } else { { let end = vecIndexOf(content, &"-->".to_string(), (start + 4i64));
     if (end >= 0i64) { Some((end + 3i64)) } else { None } } } }
 }
 
-pub fn scanClosingTag(content: &String, start: i64) -> Option<i64> {
-    let n = crate::runtime::_str_length(&(*content));
+pub fn scanClosingTag(content: &Vec<i64>, start: i64) -> Option<i64> {
+    let n = ((*content).len() as i64);
     let mut i = (start + 2i64);
-    if ((i >= n) || !(MdChars_isAsciiLetter((crate::runtime::_str_char_at(&(*content), i)).0))) { return None; } else { (); }
-    while ((i < n) && (MdChars_isAsciiAlnum((crate::runtime::_str_char_at(&(*content), i)).0) || (crate::runtime::_str_char_at(&(*content), i) == 45i64))) {
+    if ((i >= n) || !(MdChars_isAsciiLetter(content[(i) as usize].clone()))) { return None; } else { (); }
+    while ((i < n) && (MdChars_isAsciiAlnum(content[(i) as usize].clone()) || (content[(i) as usize].clone() == 45i64))) {
         (i += 1i64);
     };
-    while ((i < n) && isUnicodeWhitespace((crate::runtime::_str_char_at(&(*content), i)).0)) {
+    while ((i < n) && isUnicodeWhitespace(content[(i) as usize].clone())) {
         (i += 1i64);
     };
-    if ((i < n) && (crate::runtime::_str_char_at(&(*content), i) == 62i64)) { Some((i + 1i64)) } else { None }
+    if ((i < n) && (content[(i) as usize].clone() == 62i64)) { Some((i + 1i64)) } else { None }
 }
 
-pub fn scanOpenTag(content: &String, start: i64) -> Option<i64> {
-    let n = crate::runtime::_str_length(&(*content));
+pub fn scanOpenTag(content: &Vec<i64>, start: i64) -> Option<i64> {
+    let n = ((*content).len() as i64);
     let mut i = (start + 1i64);
-    if ((i >= n) || !(MdChars_isAsciiLetter((crate::runtime::_str_char_at(&(*content), i)).0))) { return None; } else { (); }
-    while ((i < n) && (MdChars_isAsciiAlnum((crate::runtime::_str_char_at(&(*content), i)).0) || (crate::runtime::_str_char_at(&(*content), i) == 45i64))) {
+    if ((i >= n) || !(MdChars_isAsciiLetter(content[(i) as usize].clone()))) { return None; } else { (); }
+    while ((i < n) && (MdChars_isAsciiAlnum(content[(i) as usize].clone()) || (content[(i) as usize].clone() == 45i64))) {
         (i += 1i64);
     };
     let mut ok = true;
     let mut done = false;
     while (!(done) && ok) {
         let wsStart = i;
-        while ((i < n) && isUnicodeWhitespace((crate::runtime::_str_char_at(&(*content), i)).0)) {
+        while ((i < n) && isUnicodeWhitespace(content[(i) as usize].clone())) {
             (i += 1i64);
         };
-        if ((i < n) && (crate::runtime::_str_char_at(&(*content), i) == 62i64)) { done = true; } else { if ((((i + 1i64) < n) && (crate::runtime::_str_char_at(&(*content), i) == 47i64)) && (crate::runtime::_str_char_at(&(*content), (i + 1i64)) == 62i64)) { (i += 1i64);
+        if ((i < n) && (content[(i) as usize].clone() == 62i64)) { done = true; } else { if ((((i + 1i64) < n) && (content[(i) as usize].clone() == 47i64)) && (content[((i + 1i64)) as usize].clone() == 62i64)) { (i += 1i64);
         done = true; } else { if (i == wsStart) { ok = false; } else { let nameStart = i;
-        if ((i < n) && ((MdChars_isAsciiLetter((crate::runtime::_str_char_at(&(*content), i)).0) || (crate::runtime::_str_char_at(&(*content), i) == 95i64)) || (crate::runtime::_str_char_at(&(*content), i) == 58i64))) { (i += 1i64);
-        while ((i < n) && (MdChars_isAsciiAlnum((crate::runtime::_str_char_at(&(*content), i)).0) || ({ let __h: &str = &"_.:-".to_string(); let __n: &str = &char::from_u32(((crate::runtime::_str_char_at(&(*content), i)).0) as u32).unwrap_or('\u{FFFD}').to_string(); __h.find(__n).map(|__b| __h[..__b].encode_utf16().count() as i64).unwrap_or(-1) } >= 0i64))) {
+        if ((i < n) && ((MdChars_isAsciiLetter(content[(i) as usize].clone()) || (content[(i) as usize].clone() == 95i64)) || (content[(i) as usize].clone() == 58i64))) { (i += 1i64);
+        while ((i < n) && ((((MdChars_isAsciiAlnum(content[(i) as usize].clone()) || (content[(i) as usize].clone() == 95i64)) || (content[(i) as usize].clone() == 46i64)) || (content[(i) as usize].clone() == 58i64)) || (content[(i) as usize].clone() == 45i64))) {
             (i += 1i64);
         }; } else { (); }
         if (i == nameStart) { ok = false; } else { let afterName = i;
-        while ((i < n) && isUnicodeWhitespace((crate::runtime::_str_char_at(&(*content), i)).0)) {
+        while ((i < n) && isUnicodeWhitespace(content[(i) as usize].clone())) {
             (i += 1i64);
         };
-        if ((i < n) && (crate::runtime::_str_char_at(&(*content), i) == 61i64)) { (i += 1i64);
-        while ((i < n) && isUnicodeWhitespace((crate::runtime::_str_char_at(&(*content), i)).0)) {
+        if ((i < n) && (content[(i) as usize].clone() == 61i64)) { (i += 1i64);
+        while ((i < n) && isUnicodeWhitespace(content[(i) as usize].clone())) {
             (i += 1i64);
         };
-        if (i >= n) { ok = false; } else { let q = crate::runtime::_str_char_at(&(*content), i);
-        if ((q == 39i64) || (q == 34i64)) { let close = crate::runtime::_str_index_of_from(&(*content), &(char::from_u32((crate::runtime::_to_int(&q)) as u32).unwrap_or('\u{FFFD}').to_string()), (i + 1i64));
+        if (i >= n) { ok = false; } else { let q = content[(i) as usize].clone();
+        if ((q == 39i64) || (q == 34i64)) { let close = vecIndexOfChar(content, q.clone(), (i + 1i64));
         if (close < 0i64) { ok = false; } else { i = (close + 1i64); } } else { let valStart = i;
-        while (((i < n) && !(isUnicodeWhitespace((crate::runtime::_str_char_at(&(*content), i)).0))) && ({ let __h: &str = &"\"'=<>`".to_string(); let __n: &str = &char::from_u32(((crate::runtime::_str_char_at(&(*content), i)).0) as u32).unwrap_or('\u{FFFD}').to_string(); __h.find(__n).map(|__b| __h[..__b].encode_utf16().count() as i64).unwrap_or(-1) } < 0i64)) {
+        while ((((((((i < n) && !(isUnicodeWhitespace(content[(i) as usize].clone()))) && (content[(i) as usize].clone() != 34i64)) && (content[(i) as usize].clone() != 39i64)) && (content[(i) as usize].clone() != 61i64)) && (content[(i) as usize].clone() != 60i64)) && (content[(i) as usize].clone() != 62i64)) && (content[(i) as usize].clone() != 96i64)) {
             (i += 1i64);
         };
         if (i == valStart) { ok = false; } else { (); } } } } else { i = afterName; } } } } }
         if (i >= n) { ok = false; } else { (); }
     };
-    if (((ok && done) && (i < n)) && (crate::runtime::_str_char_at(&(*content), i) == 62i64)) { Some((i + 1i64)) } else { None }
+    if (((ok && done) && (i < n)) && (content[(i) as usize].clone() == 62i64)) { Some((i + 1i64)) } else { None }
 }
 
-pub fn scanEntity(content: &String, start: i64) -> Option<i64> {
-    let n = crate::runtime::_str_length(&(*content));
+pub fn scanEntity(content: &Vec<i64>, start: i64) -> Option<i64> {
+    let n = ((*content).len() as i64);
     if ((start + 1i64) >= n) { return None; } else { (); }
-    if (crate::runtime::_str_char_at(&(*content), (start + 1i64)) == 35i64) { { let mut i = (start + 2i64);
-    if ((i < n) && ((crate::runtime::_str_char_at(&(*content), i) == 120i64) || (crate::runtime::_str_char_at(&(*content), i) == 88i64))) { { (i += 1i64);
+    if (content[((start + 1i64)) as usize].clone() == 35i64) { { let mut i = (start + 2i64);
+    if ((i < n) && ((content[(i) as usize].clone() == 120i64) || (content[(i) as usize].clone() == 88i64))) { { (i += 1i64);
     let hexStart = i;
-    while ((i < n) && isHex((crate::runtime::_str_char_at(&(*content), i)).0)) {
+    while ((i < n) && isHex(content[(i) as usize].clone())) {
         (i += 1i64);
     };
-    if ((((i > hexStart) && ((i - hexStart) <= 6i64)) && (i < n)) && (crate::runtime::_str_char_at(&(*content), i) == 59i64)) { Some((i + 1i64)) } else { None } } } else { { let decStart = i;
-    while ((i < n) && isAsciiDigit((crate::runtime::_str_char_at(&(*content), i)).0)) {
+    if ((((i > hexStart) && ((i - hexStart) <= 6i64)) && (i < n)) && (content[(i) as usize].clone() == 59i64)) { Some((i + 1i64)) } else { None } } } else { { let decStart = i;
+    while ((i < n) && isAsciiDigit(content[(i) as usize].clone())) {
         (i += 1i64);
     };
-    if ((((i > decStart) && ((i - decStart) <= 7i64)) && (i < n)) && (crate::runtime::_str_char_at(&(*content), i) == 59i64)) { Some((i + 1i64)) } else { None } } } } } else { { let mut i = (start + 1i64);
-    while ((i < n) && MdChars_isAsciiAlnum((crate::runtime::_str_char_at(&(*content), i)).0)) {
+    if ((((i > decStart) && ((i - decStart) <= 7i64)) && (i < n)) && (content[(i) as usize].clone() == 59i64)) { Some((i + 1i64)) } else { None } } } } } else { { let mut i = (start + 1i64);
+    while ((i < n) && MdChars_isAsciiAlnum(content[(i) as usize].clone())) {
         (i += 1i64);
     };
-    if (((i > (start + 1i64)) && (i < n)) && (crate::runtime::_str_char_at(&(*content), i) == 59i64)) { Some((i + 1i64)) } else { None } } }
+    if (((i > (start + 1i64)) && (i < n)) && (content[(i) as usize].clone() == 59i64)) { Some((i + 1i64)) } else { None } } }
 }
 
-pub fn scanExpression(content: &String, start: i64) -> Option<i64> {
+pub fn scanExpression(content: &Vec<i64>, start: i64) -> Option<i64> {
     let mut i = (start + 2i64);
     let mut depth = 1i64;
-    let n = crate::runtime::_str_length(&(*content));
+    let n = ((*content).len() as i64);
     while ((i < n) && (depth > 0i64)) {
-        match (crate::runtime::_str_char_at(&(*content), i)).0 {
+        match content[(i) as usize].clone() {
             123i64 => { (depth += 1i64);
             (i += 1i64); },
             125i64 => { (depth -= 1i64);
@@ -2861,6 +2861,40 @@ pub fn scanExpression(content: &String, start: i64) -> Option<i64> {
 
 pub fn isHex(c: i64) -> bool {
     ((isAsciiDigit(c) || ((c >= 97i64) && (c <= 102i64))) || ((c >= 65i64) && (c <= 70i64)))
+}
+
+pub fn vecStartsWith(content: &Vec<i64>, s: &String, from: i64) -> bool {
+    let mut k = 0i64;
+    let mut ok = ((from >= 0i64) && ((from + crate::runtime::_str_length(&(*s))) <= ((*content).len() as i64)));
+    while (ok && (k < crate::runtime::_str_length(&(*s)))) {
+        if (content[((from + k)) as usize].clone() != crate::runtime::_str_char_at(&(*s), k)) { ok = false; } else { (); }
+        (k += 1i64);
+    };
+    ok
+}
+
+pub fn vecIndexOfChar(content: &Vec<i64>, c: i64, from: i64) -> i64 {
+    let mut i = if (from > 0i64) { from } else { 0i64 };
+    let mut found = -1i64;
+    while ((found < 0i64) && (i < ((*content).len() as i64))) {
+        if (content[(i.clone()) as usize].clone() == c) { found = i.clone(); } else { (); }
+        (i += 1i64);
+    };
+    found
+}
+
+pub fn vecIndexOf(content: &Vec<i64>, s: &String, from: i64) -> i64 {
+    let mut i = if (from > 0i64) { from } else { 0i64 };
+    let mut found = -1i64;
+    while ((found < 0i64) && ((i + crate::runtime::_str_length(&(*s))) <= ((*content).len() as i64))) {
+        if vecStartsWith(content, s, i.clone()) { found = i.clone(); } else { (); }
+        (i += 1i64);
+    };
+    found
+}
+
+pub fn vecRegionMatchesIgnoreCase(content: &Vec<i64>, from: i64, s: &String) -> bool {
+    (((from >= 0i64) && ((from + crate::runtime::_str_length(&(*s))) <= ((*content).len() as i64))) && (asciiLower((((*content))[(from as usize)..((from + crate::runtime::_str_length(&(*s))) as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str())) == (*s)))
 }
 
 pub fn processEmphasis(input: &Vec<WNode>) -> Vec<WNode> {

@@ -447,7 +447,19 @@ mod tests {
             "second must skip while the first holds it"
         );
         drop(first);
-        assert!(try_embed_lock(dir.path()).unwrap().is_some(), "free again after drop");
+        // Not a single-shot assert: a PARALLEL test that spawns a process (fork+exec) can
+        // inherit our lock fd for the fork->exec window — O_CLOEXEC closes it only at exec —
+        // so for a few milliseconds the flock outlives our close. Production try+skip
+        // semantics tolerate that; the test states the same tolerance instead of flaking
+        // (~1 in 3 full-suite runs on a loaded machine, never under --test-threads=1).
+        let mut regained = try_embed_lock(dir.path()).unwrap();
+        let mut tries = 0;
+        while regained.is_none() && tries < 100 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            regained = try_embed_lock(dir.path()).unwrap();
+            tries += 1;
+        }
+        assert!(regained.is_some(), "free again after drop (and 1s of fork-window grace)");
     }
 
     #[test]

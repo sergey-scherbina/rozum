@@ -30,14 +30,14 @@ signature and converts at the boundary (`tokenize(content.toVector, …)`). Inte
 
 ## Behavior
 
-- [ ] `content.charAt(i)` → `content(i)`; `content.substring(a, b)` → `content.slice(a,
+- [x] `content.charAt(i)` → `content(i)`; `content.substring(a, b)` → `content.slice(a,
   b).mkString("")` — byte-identical output on the JVM (same code units, same joins), including
   surrogate pairs (two code units in, two out, concatenated in order).
-- [ ] `indexOf`/`startsWith`/`regionMatches` sites replaced by the vec helpers with identical
+- [x] `indexOf`/`startsWith`/`regionMatches` sites replaced by the vec helpers with identical
   match semantics (case-insensitive comparison is ASCII-only, matching the call sites' use).
-- [ ] JVM semantics suite green (unimlMarkdown), unchanged counts.
-- [ ] Rust lane: regenerated vendored crate builds; rozum-agent suite green.
-- [ ] The doubling curve on the blank-line-free worst case is at (or near) linear; no
+- [x] JVM semantics suite green (unimlMarkdown), unchanged counts.
+- [x] Rust lane: regenerated vendored crate builds; rozum-agent suite green.
+- [x] The doubling curve on the blank-line-free worst case is at (or near) linear; no
   regression on ordinary long-line documents (same-window comparison).
 
 ## Out of scope
@@ -59,4 +59,34 @@ signature and converts at the boundary (`tokenize(content.toVector, …)`). Inte
 
 ## Results
 
-_To be filled at verify time._
+Landed as scalascript `4aaeb385c` (uniml source) + `<charseq-param>` backend fix on
+`feature/treevm-top-edges-prestage10`; vendored crate regenerated.
+
+**The curve is LINEAR.** Doubling series (short-line worst case, min-of-3):
+
+| lines | KB | before (#3-#5 build) | after | ratio/doubling |
+|---|---|---|---|---|
+| 3 200 | 31 | 0.066 s | 0.019 s | — |
+| 6 400 | 62 | 0.232 s | 0.035 s | ×1.84 |
+| 12 800 | 124 | 0.853 s | 0.069 s | ×1.97 |
+| 25 600 | 249 | 3.296 s | 0.137 s | ×1.99 |
+
+Long-line docs also gained: 0.211 s → 0.012 s (their single paragraphs walked the same
+charAt path). Campaign total on 64 KB/6400 lines: **29.3 s → 0.035 s, ×837**.
+
+Two defects surfaced and fixed on the way:
+
+1. **Backend: a `Vector[Char]` PARAM was not a char-seq** — `collectLocalCharSeqs` only ever
+   scanned local `val chars = text.toVector` bindings, so `content.slice(a, b).mkString("")`
+   inside any helper RECEIVING the vector printed decimal code points ("Same" →
+   "8397109101"; caught by rozum's heading-slug chunker tests, 8 failures). Params declared
+   `Vector/Seq/IndexedSeq/List[Char]` now join `localCharSeqs` (the `StringBuilder`-params
+   precedent); backend goldens 513/513 (1 new).
+2. **Pre-existing test flake, mechanism found**: `a_second_embedder_skips_while_the_first_holds
+   _the_lock` failed ~1 in 3 PARALLEL suite runs (never single-threaded) — a concurrent test's
+   `Command::spawn` fork inherits the flock fd for the fork→exec window (O_CLOEXEC closes at
+   exec only), so the lock outlives our close by milliseconds. Production try+skip tolerates
+   it; the test now states the same tolerance (bounded 1 s retry). 4/4 stress runs green.
+
+Verification: unimlMarkdown JVM 52/52 (incl. 23 CommonMark corpus baselines), backend goldens
+513/513, rozum-agent 164/164 ×4 runs.
