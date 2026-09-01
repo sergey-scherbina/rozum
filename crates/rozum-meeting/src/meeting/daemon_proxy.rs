@@ -750,8 +750,13 @@ impl DaemonProxy {
             }));
         };
 
-        // Code gets reserved slots — see `rag_lite::search_balanced`.
-        let bm25 = rozum_agent::rag_lite::search_balanced(index.as_ref(), &query, k);
+        // Code gets reserved slots — see `rag_lite::search_balanced`. The fusion POOL is deeper
+        // than the answer (`rag-ab-failure-forensics`): RRF pays when a candidate sits mid-list
+        // in BOTH sources, and a BM25 pool of only k never hands such a candidate to the fusion
+        // at all. Both sources feed `pool`; the final k is rebalanced POST-fusion (the
+        // embedding half walks test chunks back up otherwise) after texts are filled in.
+        let pool = k.max(5) * 4;
+        let bm25 = rozum_agent::rag_lite::search_balanced(index.as_ref(), &query, pool);
         // Fusion (docs/specs/rag-embeddings-impl.md): vectors on disk + a gateway that answers =
         // fuse; anything missing or failing = BM25 exactly as before, visibly marked. The query
         // embed is one short HTTP call; its failure must never fail the search.
@@ -761,8 +766,8 @@ impl DaemonProxy {
                 // `vs` is used through the `VectorIndex` seam, so an external store slots in
                 // here without this call site changing.
                 Some(qv) if qv.len() == rozum_agent::rag_embed::VectorIndex::dim(vs.as_ref()) => {
-                    let ranked = rozum_agent::rag_embed::VectorIndex::search(vs.as_ref(), &qv, k.max(5) * 4);
-                    let mut hits = rozum_agent::rag_embed::fuse(&bm25, &ranked, k);
+                    let ranked = rozum_agent::rag_embed::VectorIndex::search(vs.as_ref(), &qv, pool);
+                    let mut hits = rozum_agent::rag_embed::fuse(&bm25, &ranked, pool);
                     for h in &mut hits {
                         if h.text.is_empty()
                             && let Some(t) = index.text_of(&h.id)
@@ -771,11 +776,11 @@ impl DaemonProxy {
                         }
                     }
                     fused = true;
-                    hits
+                    rozum_agent::rag_lite::rebalance(&hits, k)
                 }
-                _ => bm25,
+                _ => rozum_agent::rag_lite::rebalance(&bm25, k),
             },
-            _ => bm25,
+            _ => rozum_agent::rag_lite::rebalance(&bm25, k),
         };
         let results: Vec<Value> = picked
             .into_iter()

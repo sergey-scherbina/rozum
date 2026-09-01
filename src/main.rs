@@ -8769,15 +8769,18 @@ async fn run_rag(action: RagAction) {
             // carries the embedder in-process (the same hook the gateway serves over HTTP), so
             // the CLI fuses without a gateway when vectors exist; without them, or in a build
             // without the model, it is BM25 exactly as before.
-            let bm25 = rozum::rag_lite::search_balanced(&index, &query, k);
+            // Deep fusion pool + post-fusion rebalance — the same policy as both MCP servers
+            // (`rag-ab-failure-forensics`): see `rag_mcp.rs`'s comment for the two defects.
+            let pool = k.max(5) * 4;
+            let bm25 = rozum::rag_lite::search_balanced(&index, &query, pool);
             let vecs = rozum::rag_embed::VecStore::load(&rozum::rag_embed::vectors_path(&root), None);
             let hits = match vecs {
                 Some(vs) => {
                     use rozum::rag_embed::VectorIndex as _;
                     match rozum_core::embedding::embed(&[query.clone()], true) {
                         Some(Ok(qv)) if qv.first().is_some_and(|v| v.len() == vs.dim()) => {
-                            let ranked = vs.search(&qv[0], k.max(5) * 4);
-                            let mut fused = rozum::rag_embed::fuse(&bm25, &ranked, k);
+                            let ranked = vs.search(&qv[0], pool);
+                            let mut fused = rozum::rag_embed::fuse(&bm25, &ranked, pool);
                             for h in &mut fused {
                                 if h.text.is_empty()
                                     && let Some(t) = index.text_of(&h.id)
@@ -8786,12 +8789,12 @@ async fn run_rag(action: RagAction) {
                                 }
                             }
                             eprintln!("(fused: BM25 + embeddings)");
-                            fused
+                            rozum::rag_lite::rebalance(&fused, k)
                         }
-                        _ => bm25,
+                        _ => rozum::rag_lite::rebalance(&bm25, k),
                     }
                 }
-                None => bm25,
+                None => rozum::rag_lite::rebalance(&bm25, k),
             };
             if hits.is_empty() {
                 println!("no hits");

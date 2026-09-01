@@ -272,9 +272,22 @@ pub fn search_balanced(index: &dyn Retriever, query: &str, k: usize) -> Vec<Hit>
     }
     // Over-fetch: the implementation may sit well below k among tests and prose.
     let raw = index.search(query, k.saturating_mul(8).max(40));
+    rebalance(&raw, k)
+}
+
+/// The impls-above-tests apportioning, on an ALREADY-RANKED list — public because the FUSED
+/// ranking needs the same pass (`rag-ab-failure-forensics`): `search_balanced` demotes test
+/// chunks on the BM25 half only, and the embedding half then walks them straight back up
+/// through RRF — the Q1 forensics run's top-1 was a `#[test]` fn that the BM25 balance had
+/// already pushed down. Callers fuse over a DEEP pool, fill in embedding-only texts (the test
+/// detector reads the chunk text), and rebalance to the final k.
+pub fn rebalance(raw: &[Hit], k: usize) -> Vec<Hit> {
+    if k == 0 {
+        return Vec::new();
+    }
     let mut impls: Vec<&Hit> = Vec::new();
     let mut rest: Vec<&Hit> = Vec::new();
-    for h in &raw {
+    for h in raw {
         if is_code_chunk(&h.id) && !is_test_chunk(&h.id, &h.text) && !is_import_chunk(&h.id) {
             impls.push(h);
         } else {
@@ -397,6 +410,36 @@ mod tests {
         ix.add("d2", "Dogs are loyal companions and love long walks.");
         ix.add("d3", "A small kitten chased a ball across the room.");
         ix
+    }
+
+    /// The post-fusion half of `rag-ab-failure-forensics`: a `#[test]` chunk the embedding
+    /// ranking walked to the top of a FUSED list is demoted below implementations by
+    /// `rebalance`, exactly as `search_balanced` already does on the BM25 half — the Q1
+    /// forensics run's top-1 was a test fn for precisely this reason.
+    #[test]
+    fn rebalance_demotes_a_fused_test_chunk_below_impls() {
+        let hits = vec![
+            Hit {
+                id: "src/share.rs#fn residency_refuses_even_sole_model".into(),
+                score: 0.9,
+                text: "#[test]\n    fn residency_refuses_even_sole_model() { … }".into(),
+            },
+            Hit {
+                id: "src/share.rs#fn acquire_residency".into(),
+                score: 0.5,
+                text: "pub fn acquire_residency() { … }".into(),
+            },
+            Hit {
+                id: "src/serving.rs#fn admit".into(),
+                score: 0.4,
+                text: "fn admit() { … }".into(),
+            },
+        ];
+        let out = rebalance(&hits, 3);
+        assert_eq!(out[0].id, "src/share.rs#fn acquire_residency", "{out:?}");
+        assert_eq!(out[1].id, "src/serving.rs#fn admit", "{out:?}");
+        // Demoted, never dropped.
+        assert_eq!(out[2].id, "src/share.rs#fn residency_refuses_even_sole_model", "{out:?}");
     }
 
     #[test]

@@ -176,7 +176,15 @@ impl RagServer {
             }));
         };
 
-        let bm25 = rag_lite::search_balanced(index.as_ref(), &query, k);
+        // The fusion POOL is deeper than the answer (`rag-ab-failure-forensics`): RRF pays when
+        // a candidate sits mid-list in BOTH sources, and with a BM25 pool of only k such a
+        // candidate never reaches the fusion at all — the Q5 forensics run found the right file
+        // at rank 4 with a deep pool and absent entirely at the same query with pool=k. Both
+        // sources feed `pool` candidates; the final answer is rebalanced (impls above tests,
+        // now applied POST-fusion — the embedding half walks tests back up otherwise) and
+        // truncated to k.
+        let pool = k.max(5) * 4;
+        let bm25 = rag_lite::search_balanced(index.as_ref(), &query, pool);
         let mut fused = false;
         let picked = match &vecs {
             Some(vs) => {
@@ -199,8 +207,8 @@ impl RagServer {
                 };
                 match qv {
                     Some(qv) if qv.first().is_some_and(|v| v.len() == vs.dim()) => {
-                        let ranked = vs.search(&qv[0], k.max(5) * 4);
-                        let mut hits = rag_embed::fuse(&bm25, &ranked, k);
+                        let ranked = vs.search(&qv[0], pool);
+                        let mut hits = rag_embed::fuse(&bm25, &ranked, pool);
                         for h in &mut hits {
                             if h.text.is_empty()
                                 && let Some(t) = index.text_of(&h.id)
@@ -209,12 +217,14 @@ impl RagServer {
                             }
                         }
                         fused = true;
-                        hits
+                        // Texts first, THEN rebalance: the test detector reads the chunk text,
+                        // and an embedding-only hit arrives with an empty one.
+                        rag_lite::rebalance(&hits, k)
                     }
-                    _ => bm25,
+                    _ => rag_lite::rebalance(&bm25, k),
                 }
             }
-            None => bm25,
+            None => rag_lite::rebalance(&bm25, k),
         };
 
         let results: Vec<Value> = picked
