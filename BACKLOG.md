@@ -98,7 +98,18 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   separate fixes, each documented at its site — the sharpest being that the widened rewrite
   composed with `cloneIfMoved` into `&xs.clone()`, so the signature said `&Vec` while the call
   still copied and the optimisation read as applied while measuring as absent.
-- [ ] **uniml-single-frame-residual-superlinear — HALF-FIXED 2026-09-01, second half diagnosed.**
+- [ ] **uniml-single-frame-residual-superlinear — TWO of THREE quadratics fixed 2026-09-01.**
+  Worst case 64 KB (6400 short lines): 29.3 s → 12.9 s (hot-top, #1) → **8.7 s**
+  (ssc-owned-field-move, #2: the backend now MOVES a single-read field of an owned by-value
+  param when every bare use precedes it — scalascript `7a5551b99` on
+  feature/treevm-top-edges-prestage10; 507/507 backend goldens, incl. the position-ordered
+  QName pin). The curve is STILL ~×3.9 because of contributor #3, visible verbatim in the
+  generated `step`'s exit: `VmState { stack: stack.clone(), topEdges: topEdges.clone(), … }` —
+  last-use clones of LOCALS in the returned constructor. That needs a general liveness pass
+  (locals, not just param fields) — the next, bigger backend step. In-code note worth knowing:
+  `Map.collect { case ((k1, k2), 1) => … }` silently dropped the FIRST entry (Scala 3 corner,
+  verified against a plain filter) — spelled imperatively in `collectSingleReadOwnedFields`.
+  Original entry follows for the instrument and history.
   It was TWO quadratics stacked (spec § Phase 2 pass). #1, the per-token `addTop` frame rebuild
   (the shape the old entry suspected!): FIXED at the source with the hot-top invariant
   (`VmState.topEdges`; scalascript `feature/treevm-top-edges-prestage10`) — worst case 64 KB

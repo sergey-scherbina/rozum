@@ -758,7 +758,7 @@ impl ConfiguredMarkdownDialect {
     pub fn instructions(&self, source: SourceInput) -> std::rc::Rc<dyn Processor<String, SourceChunk, VmToken>> {
         let profile = self.profile.clone();
         let limits = self.limits.clone();
-        std::rc::Rc::new(MarkdownInstructionProcessor { source: source.source.clone(), profile: profile, limits: limits })
+        std::rc::Rc::new(MarkdownInstructionProcessor { source: source.source, profile: profile, limits: limits })
     }
 }
 impl DialectRegistry {
@@ -1835,12 +1835,12 @@ impl TreeVm {
             (*stack) = { let __v = ((*stack)).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() };
             attachClosed(branch.clone(), frame.role.clone(), roots, stack, topEdges);
         }
-        let mut stack = state.stack.clone();
-        let mut topEdges = state.topEdges.clone();
-        let mut nodeCount = state.nodeCount.clone();
-        let mut lastTokenId = state.lastTokenId.clone();
-        let mut diagCount = state.diagnosticCount.clone();
-        let mut diagLimitReported = state.diagnosticLimitReported.clone();
+        let mut stack = state.stack;
+        let mut topEdges = state.topEdges;
+        let mut nodeCount = state.nodeCount;
+        let mut lastTokenId = state.lastTokenId;
+        let mut diagCount = state.diagnosticCount;
+        let mut diagLimitReported = state.diagnosticLimitReported;
         let mut halted = state.halted.clone();
         let mut roots: Vec<UniNode> = Vec::new();
         let mut diags: Vec<Diagnostic> = Vec::new();
@@ -1904,10 +1904,10 @@ impl TreeVm {
             (*diags).push(d.clone()); } else { if !((*diagLimitReported)) { (*diagLimitReported) = true;
             (*diags).push(Diagnostic { code: "uniml.limit.diagnostics".to_string(), message: format!("diagnostic count exceeds the {} limit", limits.maxDiagnostics), severity: Severity::Fatal.clone(), span: d.span.clone(), dialect: None, details: Vec::new() }); } else { (); } }
         }
-        let mut stack = state.stack.clone();
-        let mut topEdges = state.topEdges.clone();
-        let mut diagCount = state.diagnosticCount.clone();
-        let mut diagLimitReported = state.diagnosticLimitReported.clone();
+        let mut stack = state.stack;
+        let mut topEdges = state.topEdges;
+        let mut diagCount = state.diagnosticCount;
+        let mut diagLimitReported = state.diagnosticLimitReported;
         let mut roots: Vec<UniNode> = Vec::new();
         let mut diags: Vec<Diagnostic> = Vec::new();
         while !stack.is_empty() {
@@ -1925,7 +1925,7 @@ impl TreeVm {
     pub fn preflight(&self, stack: &Vec<VmFrame>, nodeCount: i64, input: VmToken) -> Option<Diagnostic> {
         let limits = self.limits.clone();
         let reframeProblem = |__a0, __a1| self.reframeProblem(__a0, __a1);
-        let token = input.token.clone();
+        let token = input.token;
         if (codePointCount(token.lexeme.clone()) > limits.maxTokenCodePoints) { Some(Diagnostic { code: "uniml.limit.token".to_string(), message: format!("token exceeds the {} code-point limit", limits.maxTokenCodePoints), severity: Severity::Fatal.clone(), span: Some(token.span.clone()), dialect: None.clone(), details: Vec::new() }) } else { { let requiredNodes: i64 = match (input.instruction).clone() {
             _ => 2i64,
             ref r @ VmInstruction::Reframe { ref closeBefore, ref open, ref closeAfter, ref role } => match reframeProblem(stack, (*r).clone()) {
@@ -1947,9 +1947,9 @@ impl TreeVm {
 
     pub fn reframeProblem(&self, stack: &Vec<VmFrame>, instruction: VmInstruction) -> Option<Diagnostic> {
         let VmInstruction::Reframe { closeBefore: __dstruct_closeBefore, open: __dstruct_open, closeAfter: __dstruct_closeAfter, role } = instruction.clone() else { unreachable!() };
-        let closeBefore = __dstruct_closeBefore.clone();
-        let open = __dstruct_open.clone();
-        let closeAfter = __dstruct_closeAfter.clone();
+        let closeBefore = __dstruct_closeBefore;
+        let open = __dstruct_open;
+        let closeAfter = __dstruct_closeAfter;
         if ((closeBefore.iter().cloned().any(|__p0| { __p0.is_empty() }) || closeAfter.iter().cloned().any(|__p0| { __p0.is_empty() })) || open.iter().cloned().any(|__p0| { __p0.kind.is_empty() })) { Some(Diagnostic { code: "uniml.vm.invalid-reframe".to_string(), message: "reframe kinds must be non-empty".to_string(), severity: Severity::Error.clone(), span: None.clone(), dialect: None.clone(), details: Vec::new() }) } else { { fn close(expected: String, kinds: &mut Vec<String>, problem: &mut Option<Diagnostic>) {
             if (*problem).is_none() { if (*kinds).is_empty() { (*problem) = Some(Diagnostic { code: "uniml.vm.reframe-underflow".to_string(), message: format!("reframe cannot close '{}' because no frame is open", expected), severity: Severity::Error.clone(), span: None.clone(), dialect: None.clone(), details: Vec::new() }); } else { if ((*kinds)[(*kinds).len() - 1].clone() != expected) { (*problem) = Some(Diagnostic { code: "uniml.vm.mismatched-reframe".to_string(), message: format!("expected to reframe '{}' but current node is '{}'", expected, (*kinds)[(*kinds).len() - 1].clone()), severity: Severity::Error.clone(), span: None.clone(), dialect: None.clone(), details: vec![("expected".to_string(), expected.clone()), ("actual".to_string(), (*kinds)[(*kinds).len() - 1].clone())] }); } else { (*kinds) = { let __v = ((*kinds)).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() }; } } } else { (); }
         }
@@ -2114,9 +2114,9 @@ pub fn codePointCount(text: String) -> i64 {
 pub fn advance(position: SourcePosition, lexeme: String) -> SourcePosition {
     let chars = lexeme.encode_utf16().map(|__u| __u as i64).collect::<Vec<i64>>();
     let mut index = 0i64;
-    let mut offset = position.offset.clone();
-    let mut line = position.line.clone();
-    let mut column = position.column.clone();
+    let mut offset = position.offset;
+    let mut line = position.line;
+    let mut column = position.column;
     while (index < (chars.len() as i64)) {
         let char = chars[(index) as usize].clone();
         let width = if ((isHighSurrogate(char.clone()) && ((index + 1i64) < (chars.len() as i64))) && isLowSurrogate(chars[((index + 1i64)) as usize].clone())) { 2i64 } else { 1i64 };
@@ -2159,7 +2159,7 @@ pub fn apply(adapters: &Vec<std::rc::Rc<dyn DialectAdapter>>) -> Either<String, 
 }
 
 pub fn Literal_instructions(source: SourceInput) -> std::rc::Rc<dyn Processor<String, SourceChunk, VmToken>> {
-    std::rc::Rc::new(LiteralProcessor { source: source.source.clone() })
+    std::rc::Rc::new(LiteralProcessor { source: source.source })
 }
 
 pub fn buildBranch(frame: VmFrame, edges: Vec<UniEdge>, origin: Origin) -> UniNode {
@@ -2168,7 +2168,7 @@ pub fn buildBranch(frame: VmFrame, edges: Vec<UniEdge>, origin: Origin) -> UniNo
         Some(UniEdge { role: _, child: UniNode::Branch { kind: _, edges: _, span, origin: _ } }) => span.end.clone(),
         None => frame.openingSpan.end.clone(),
     };
-    UniNode::Branch { kind: frame.kind.clone(), edges: edges.clone(), span: SourceSpan { source: frame.openingSpan.source.clone(), start: frame.openingSpan.start.clone(), end: end.clone() }, origin: origin.clone() }
+    UniNode::Branch { kind: frame.kind, edges: edges.clone(), span: SourceSpan { source: frame.openingSpan.source.clone(), start: frame.openingSpan.start.clone(), end: end.clone() }, origin: origin.clone() }
 }
 
 pub fn validateToken(lastTokenId: Option<i64>, token: SourceToken) -> Vec<Diagnostic> {
@@ -3558,17 +3558,17 @@ pub fn codePointToString(cp: i64) -> String {
 
 pub fn CommonMarkDialect_instructions(source: SourceInput) -> std::rc::Rc<dyn Processor<String, SourceChunk, VmToken>> {
     let MarkdownLimits_default = MarkdownLimits { core: Limits { maxDepth: 512i64, maxNodes: 10000000i64, maxTokenCodePoints: ((16i64 * 1024i64) * 1024i64), maxDiagnostics: 10000i64 }, maxSourceCodePoints: ((64i64 * 1024i64) * 1024i64), maxLineCodePoints: (1024i64 * 1024i64), maxDelimiterRun: (1024i64 * 1024i64), maxFenceCodePoints: ((16i64 * 1024i64) * 1024i64), maxReferences: 1000000i64, maxBlocks: 10000000i64 };
-    std::rc::Rc::new(MarkdownInstructionProcessor { source: source.source.clone(), profile: MarkdownProfile::CommonMark, limits: MarkdownLimits_default.clone() })
+    std::rc::Rc::new(MarkdownInstructionProcessor { source: source.source, profile: MarkdownProfile::CommonMark, limits: MarkdownLimits_default.clone() })
 }
 
 pub fn GfmDialect_instructions(source: SourceInput) -> std::rc::Rc<dyn Processor<String, SourceChunk, VmToken>> {
     let MarkdownLimits_default = MarkdownLimits { core: Limits { maxDepth: 512i64, maxNodes: 10000000i64, maxTokenCodePoints: ((16i64 * 1024i64) * 1024i64), maxDiagnostics: 10000i64 }, maxSourceCodePoints: ((64i64 * 1024i64) * 1024i64), maxLineCodePoints: (1024i64 * 1024i64), maxDelimiterRun: (1024i64 * 1024i64), maxFenceCodePoints: ((16i64 * 1024i64) * 1024i64), maxReferences: 1000000i64, maxBlocks: 10000000i64 };
-    std::rc::Rc::new(MarkdownInstructionProcessor { source: source.source.clone(), profile: MarkdownProfile::Gfm, limits: MarkdownLimits_default.clone() })
+    std::rc::Rc::new(MarkdownInstructionProcessor { source: source.source, profile: MarkdownProfile::Gfm, limits: MarkdownLimits_default.clone() })
 }
 
 pub fn ScalaScriptMarkdownDialect_instructions(source: SourceInput) -> std::rc::Rc<dyn Processor<String, SourceChunk, VmToken>> {
     let MarkdownLimits_default = MarkdownLimits { core: Limits { maxDepth: 512i64, maxNodes: 10000000i64, maxTokenCodePoints: ((16i64 * 1024i64) * 1024i64), maxDiagnostics: 10000i64 }, maxSourceCodePoints: ((64i64 * 1024i64) * 1024i64), maxLineCodePoints: (1024i64 * 1024i64), maxDelimiterRun: (1024i64 * 1024i64), maxFenceCodePoints: ((16i64 * 1024i64) * 1024i64), maxReferences: 1000000i64, maxBlocks: 10000000i64 };
-    std::rc::Rc::new(MarkdownInstructionProcessor { source: source.source.clone(), profile: MarkdownProfile::ScalaScript, limits: MarkdownLimits_default.clone() })
+    std::rc::Rc::new(MarkdownInstructionProcessor { source: source.source, profile: MarkdownProfile::ScalaScript, limits: MarkdownLimits_default.clone() })
 }
 
 pub fn dialectFor(profile: MarkdownProfile) -> std::rc::Rc<dyn DialectAdapter> {
@@ -3584,7 +3584,7 @@ pub fn dialectId(profile: MarkdownProfile) -> String {
 }
 
 pub fn Markdown_parse(source: SourceInput, profile: MarkdownProfile, limits: MarkdownLimits) -> ParseResult {
-    UniML_parse(source, std::rc::Rc::new(ConfiguredMarkdownDialect { profile: profile, limits: limits.clone() }), limits.core.clone())
+    UniML_parse(source, std::rc::Rc::new(ConfiguredMarkdownDialect { profile: profile, limits: limits.clone() }), limits.core)
 }
 
 pub fn Markdown_project(result: ParseResult, profile: MarkdownProfile) -> MarkdownProjectionResult {
@@ -3859,5 +3859,5 @@ pub fn collect(tokens: Vec<RustLexToken>, from: i64, until: i64, depth: i64) -> 
 }
 
 pub fn RustDialect_instructions(source: SourceInput) -> std::rc::Rc<dyn Processor<String, SourceChunk, VmToken>> {
-    std::rc::Rc::new(RustProcessor { source: source.source.clone() })
+    std::rc::Rc::new(RustProcessor { source: source.source })
 }
