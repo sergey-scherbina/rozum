@@ -1,6 +1,0 @@
-feature/rag-coexistence 2026-09-01T08:56:03Z
-agent: claude-code
-heartbeat: 2026-09-01T08:56:03Z
-status: in-progress
-done-so-far: verified two real gaps — index written non-atomically (plain fs::write), and embed phases of both servers run outside any lock (double GPU work when both registered)
-next: temp+rename for the index, cross-process embed lock, concurrent-skip test, coexistence docs
