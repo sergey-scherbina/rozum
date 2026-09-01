@@ -13,6 +13,7 @@ pub mod mcp_tool_source;
 pub mod memory_store;
 pub mod rag_chunk;
 pub mod rag_embed;
+pub mod rag_mcp;
 pub mod rag_lite;
 pub mod router;
 pub mod verify;

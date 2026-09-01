@@ -232,6 +232,54 @@ pub fn plan_embedding<'a>(
     (pruned, missing)
 }
 
+/// The gateway-less warmup: refresh the index (cross-process lock, incremental) and embed the
+/// missing vectors through the IN-PROCESS embedding hook. Returns how many vectors were added.
+///
+/// This is what makes the standalone `rozum rag mcp` self-contained: the engine binary registers
+/// the hook at startup, so retrieval needs no meeting daemon and no gateway — one process does
+/// chunking, embedding and serving. In a build without the hook (no `mlx-native`) the vector
+/// half is skipped and the index still refreshes: BM25-only, honestly.
+///
+/// Same interruptibility contract as the proxy's HTTP path: vectors are saved per batch, so a
+/// killed process resumes where it stopped.
+pub fn gateway_less_warmup(root: &Path) -> std::io::Result<usize> {
+    let refreshed = crate::rag_chunk::refresh_in_background(root, &mut |_, _, _| {})?;
+    if refreshed.is_none() {
+        return Ok(0); // a sibling holds the build lock and will do the vectors too
+    }
+    if !rozum_core::embedding::available() {
+        return Ok(0);
+    }
+    let chunks = crate::rag_chunk::saved_chunk_texts(root);
+    if chunks.is_empty() {
+        return Ok(0);
+    }
+    let vpath = vectors_path(root);
+    let mut store = VecStore::load(&vpath, None).unwrap_or_else(|| VecStore::new(0));
+    let (pruned, missing) = plan_embedding(&chunks, &mut store);
+    let mut added = 0usize;
+    for group in missing.chunks(64) {
+        let texts: Vec<String> = group.iter().map(|(id, t)| distill(id, t)).collect();
+        let Some(Ok(vecs)) = rozum_core::embedding::embed(&texts, false) else { break };
+        for (v, (id, _)) in vecs.into_iter().zip(group.iter()) {
+            if store.dim == 0 {
+                store.dim = v.len();
+            }
+            if v.len() == store.dim && store.dim > 0 {
+                store.vecs.insert(id.clone(), v);
+                added += 1;
+            }
+        }
+        if store.dim > 0 {
+            let _ = store.save(&vpath);
+        }
+    }
+    if (added > 0 || pruned > 0) && store.dim > 0 {
+        let _ = store.save(&vpath);
+    }
+    Ok(added)
+}
+
 /// RRF fusion of the BM25 ranking and the embedding ranking.
 ///
 /// k=10 and embedding weight 2, from the sweep. Embeddings carry the HIGHER weight even though

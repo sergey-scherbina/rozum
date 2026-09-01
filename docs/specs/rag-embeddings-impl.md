@@ -112,6 +112,22 @@ two readers, no gateway required for `rozum rag search`. Top-k inside `VecStore`
 `select_nth_unstable` (O(n)) and sorts only the winners, rather than sorting all n scores for
 the five the caller wants.
 
+## The standalone MCP option (operator direction, 2026-09-01)
+
+`rozum rag mcp` serves `rag.search` as its OWN stdio MCP server — retrieval without the meeting
+room, for a config that wants only this:
+
+```json
+{ "rozum-rag": { "command": "rozum", "args": ["rag", "mcp"] } }
+```
+
+Fully self-contained in the engine binary: chunking, embedding (the in-process hook — no HTTP
+anywhere) and serving in one process. No meeting daemon, no gateway. Verified live in a fresh
+repo with neither running: the server built the index, embedded the vectors and answered
+`fused: true` with the transcript↔append semantic pair. The meeting proxy's `rag.search` is
+untouched — this is the meetings-free OPTION, not a replacement — and the gate pins that the
+standalone server serves `rag.search` and NOTHING else, so meeting tools cannot quietly leak in.
+
 ## Out of scope
 
 - ~~Residency-ledger accounting~~ — DONE in the follow-up commit: the embedder measures the MLX

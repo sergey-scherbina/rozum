@@ -16,7 +16,7 @@ pub(crate) use rozum_core::backend;
 // in the `rozum-agent` crate (Phase 3). Re-export its modules under their original
 // paths so `crate::cascade::…` (and `rozum::agent::…` / `rozum::router::…` from the
 // binary + integration tests) keep resolving unchanged.
-pub use rozum_agent::{agent, builtin_tools, cascade, mcp_tool_source, memory_store, rag_chunk, rag_embed, rag_lite, router};
+pub use rozum_agent::{agent, builtin_tools, cascade, mcp_tool_source, memory_store, rag_chunk, rag_embed, rag_lite, rag_mcp, router};
 
 // The outward serving layer now lives in the `rozum-gateway` crate (Phase 3).
 // Re-export under their original paths so `rozum::gateway::…` / `rozum::openai_http::…`

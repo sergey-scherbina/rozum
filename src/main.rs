@@ -499,6 +499,13 @@ enum RagAction {
         #[arg(long)]
         full: bool,
     },
+    /// Serve `rag.search` as a standalone stdio MCP server — retrieval WITHOUT the meeting
+    /// room, for an agent config that wants only this:
+    /// `{ "rozum-rag": { "command": "rozum", "args": ["rag", "mcp"] } }`.
+    /// Fully self-contained in this binary: chunking, embedding (in-process) and serving in one
+    /// process — no meeting daemon, no gateway. The meeting proxy's own `rag.search` is
+    /// unaffected; this is the meetings-free OPTION, not a replacement.
+    Mcp,
     /// Query the persisted index — the same hits the `search_documents` tool sees.
     Search {
         /// Query text.
@@ -1656,7 +1663,7 @@ async fn main() {
             run_service(action);
         }
         Some(Command::Rag { action }) => {
-            run_rag(action);
+            run_rag(action).await;
         }
         Some(Command::Meetings { action }) => match action {
             MeetingsAction::Start { foreground } => run_meetings_start(foreground).await,
@@ -8690,7 +8697,7 @@ async fn run_info(spec: &str) {
 /// `rozum rag index|search` — the CLI face of docs/specs/syntactic-rag.md phase 1. Thin over
 /// `rozum::rag_chunk`: index = chunk the tree + persist; search = load + BM25. Sync on purpose —
 /// no engine, no daemon, no tokio needed for either path.
-fn run_rag(action: RagAction) {
+async fn run_rag(action: RagAction) {
     use rozum::rag_chunk;
     use rozum::rag_lite::Retriever;
     match action {
@@ -8737,6 +8744,15 @@ fn run_rag(action: RagAction) {
                     eprintln!("rag index failed: {e}");
                     std::process::exit(1);
                 }
+            }
+        }
+        RagAction::Mcp => {
+            let root = rozum_meeting::meeting::daemon_proxy::detect_project()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            if let Err(e) = rozum::rag_mcp::serve_stdio(root).await {
+                eprintln!("rag mcp: {e}");
+                std::process::exit(1);
             }
         }
         RagAction::Search { query, k, root } => {

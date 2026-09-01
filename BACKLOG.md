@@ -106,6 +106,14 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   (blocks-per-document, then line-length-within-a-block), which is what separated this from the
   filed-but-wrong `TreeVm` theory; `crates/rozum-agent/examples/mdbench.rs` is the instrument, and
   `TreeVm.addTop`'s per-token frame rebuild is still a real O(k²) shape that simply was not this.
+- [x] **rag-standalone-mcp — DONE 2026-09-01.** `rozum rag mcp` = retrieval as its own stdio MCP
+  server, meetings-free, for `{ "command": "rozum", "args": ["rag", "mcp"] }`. Self-contained in
+  the engine binary via the in-process embedding hook — chunk, embed and serve in ONE process, no
+  daemon, no gateway. Shares the proxy's whole contract (warmup off the request path, refresh
+  before search, mid-session re-embed, no_index hint, `fused` honesty, stale reporting) through
+  `rag_embed::gateway_less_warmup` + `rag_mcp::RagServer`. E2E-verified in a fresh repo with
+  nothing else running: `fused: true`, transcript↔append found. A test pins that it serves
+  `rag.search` and NOTHING else. The meeting proxy's tool is untouched.
 - [x] **rag-store-seam — DONE 2026-09-01.** `VectorIndex` trait = the seam an external vector
   store (Qdrant/Lance/remote) implements; `VecStore` is its in-process impl and both consumers
   call through it. Three safety decisions in the shape: ids-only (text never duplicated into a
