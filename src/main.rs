@@ -8757,6 +8757,15 @@ async fn run_rag(action: RagAction) {
         }
         RagAction::Search { query, k, root } => {
             let root = root.unwrap_or_else(|| std::path::PathBuf::from("."));
+            // Refresh before searching, exactly as both MCP servers do — "one policy, two
+            // readers" was already this arm's own promise, and skipping the refresh broke it on
+            // the FRESHNESS axis: the CLI answered from a 12-hour-old index that predated a new
+            // source file while the servers would have picked it up (`rag-ab-failure-forensics`).
+            // A no-change pass is cheap (mtime+len reuse, no rewrite); a sibling holding the
+            // build lock means the answer is already being computed — proceed with what's there.
+            if rag_chunk::index_path(&root).exists() {
+                let _ = rag_chunk::refresh_in_background(&root, &mut |_, _, _| {});
+            }
             let Some(index) = rag_chunk::load_project_index(&root) else {
                 eprintln!(
                     "no index at {} — run `rozum rag index` first",

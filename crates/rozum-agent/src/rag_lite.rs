@@ -288,7 +288,7 @@ pub fn rebalance(raw: &[Hit], k: usize) -> Vec<Hit> {
     let mut impls: Vec<&Hit> = Vec::new();
     let mut rest: Vec<&Hit> = Vec::new();
     for h in raw {
-        if is_code_chunk(&h.id) && !is_test_chunk(&h.id, &h.text) && !is_import_chunk(&h.id) {
+        if is_code_chunk(&h.id) && !is_test_chunk(&h.id, &h.text) && !is_import_chunk(&h.id, &h.text) {
             impls.push(h);
         } else {
             rest.push(h);
@@ -344,7 +344,17 @@ fn is_test_chunk(id: &str, text: &str) -> bool {
 /// every source file, is short, and is dense with identifiers — which BM25's length
 /// normalisation rewards. It held 6 of those same 100 slots. Kept for its module `//!` doc,
 /// but it does not compete for an implementation slot.
-fn is_import_chunk(id: &str) -> bool {
+fn is_import_chunk(id: &str, text: &str) -> bool {
+    // A `#use` chunk that OPENS with the file's `//!` module doc is not the dense identifier
+    // list this demotion exists for — it is prose describing the whole file, the single best
+    // localisation signal a file has. Demoting it cost two answers the moment the balance
+    // started running POST-fusion (`rag-ab-failure-forensics`): the embedding half used to walk
+    // the module-doc chunk back up and the un-rebalanced fusion kept it; the post-fusion pass
+    // then re-demoted it (Q7's `specdecode_plookup.rs#use crate` fell from a would-be top-3 to
+    // rank 19). Read from the chunk's own text, like the test detector above.
+    if text.trim_start().starts_with("//!") || text.trim_start().starts_with("/*!") {
+        return false;
+    }
     let frag = id.split('#').nth(1).unwrap_or("");
     frag == "use" || frag.starts_with("use ")
 }
@@ -440,6 +450,31 @@ mod tests {
         assert_eq!(out[1].id, "src/serving.rs#fn admit", "{out:?}");
         // Demoted, never dropped.
         assert_eq!(out[2].id, "src/share.rs#fn residency_refuses_even_sole_model", "{out:?}");
+    }
+
+    /// A `#use` chunk carrying the file's `//!` module doc keeps its implementation slot — the
+    /// module doc is the best localisation signal a file has, and re-demoting it post-fusion
+    /// cost two answers (Q7/Q8 of the forensics control run). A PLAIN import block without a
+    /// module doc is still demoted.
+    #[test]
+    fn module_doc_use_chunk_is_not_demoted_as_imports() {
+        let hits = vec![
+            Hit {
+                id: "src/plookup.rs#use crate".into(),
+                score: 0.9,
+                text: "//! Prompt-lookup decoding (draft-free speculative decode).\nuse crate::x;".into(),
+            },
+            Hit {
+                id: "src/other.rs#use".into(),
+                score: 0.8,
+                text: "use std::collections::HashMap;\nuse std::sync::Arc;".into(),
+            },
+            Hit { id: "src/a.rs#fn work".into(), score: 0.5, text: "fn work() { … }".into() },
+        ];
+        let out = rebalance(&hits, 3);
+        assert_eq!(out[0].id, "src/plookup.rs#use crate", "{out:?}");
+        assert_eq!(out[1].id, "src/a.rs#fn work", "{out:?}");
+        assert_eq!(out[2].id, "src/other.rs#use", "{out:?}");
     }
 
     #[test]
