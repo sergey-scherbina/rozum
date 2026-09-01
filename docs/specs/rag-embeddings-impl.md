@@ -70,8 +70,9 @@ session's warmup, which is correct but worth knowing when testing.
 
 ## Out of scope
 
-- Residency-ledger accounting for the embed model's ~400 MB (footnoted: the gateway's admission
-  preflight already refuses loads that overcommit actual-free RAM; folding the embedder into
-  `update_own_footprint` is a follow-up).
+- ~~Residency-ledger accounting~~ — DONE in the follow-up commit: the embedder measures the MLX
+  active-memory delta across its lazy load and bills it via `share::adjust_own_footprint`, so
+  other gateways' admission math sees the sidecar. A process holding no reservation (bare test)
+  skips the billing, which is a report, not an error.
 - ANN indexing. 10.5k × 1024 dot products is ~10 ms; exact search wins until corpora are 100×.
 - CLI `rozum rag index` embedding (agents get it via the warmup; the CLI stays model-free).

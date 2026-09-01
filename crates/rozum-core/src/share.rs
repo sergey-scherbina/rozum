@@ -630,6 +630,27 @@ fn write_resident_entry(
 /// process's own reservation, so no handle is needed to find it. `false` if this process never
 /// acquired one (no `residents/<mypid>` file) — a caller that reaches this should already know it
 /// holds a reservation, so that case is "did not have to update" rather than a real error to log.
+/// Add `delta_bytes` to THIS process's published reservation, keeping its model name and
+/// preserving prio — for a sidecar allocation the primary load never saw. The concrete case is
+/// the embedding model (`docs/specs/rag-embeddings-impl.md`): ~400 MB of MLX active memory that
+/// loads lazily INSIDE a gateway whose ledger entry was written at chat-model load time. Without
+/// this, every OTHER gateway's admission math is short by that much, which is exactly the class
+/// of under-count the ledger exists to prevent.
+///
+/// `false` when this process holds no reservation — then there is no ledger entry to correct and
+/// the generic free-RAM preflight is the (weaker) guard, which the caller may log but not fail.
+pub fn adjust_own_footprint(delta_bytes: i64) -> bool {
+    let path = resident_path(std::process::id());
+    let Some(ent) = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<ResidentEntry>(&b).ok())
+    else {
+        return false;
+    };
+    let new = ent.footprint_bytes.saturating_add_signed(delta_bytes);
+    write_resident_entry(&path, &ent.model, new).is_ok()
+}
+
 pub fn update_own_footprint(model: &str, new_footprint_bytes: u64) -> bool {
     let path = resident_path(std::process::id());
     if !path.exists() {
@@ -1665,6 +1686,40 @@ mod tests {
     /// A stand-in for another live resident gateway: writes `residents/<pid>` and
     /// holds its sidecar lock (returned File kept alive ⇒ the scan sees it as alive).
     /// `pid` is just the filename — liveness is lock-based, no real process needed.
+    /// The sidecar-allocation correction (`adjust_own_footprint`): the embed model loads lazily
+    /// inside a gateway whose entry was written at chat-model load, and an uncorrected entry
+    /// under-counts every OTHER gateway's admission math by the sidecar's size.
+    #[test]
+    fn adjust_own_footprint_adds_the_delta_and_keeps_the_model() {
+        // The residency tests share one convention this test initially missed, and the miss was
+        // a 3/3 failure under the full suite while passing alone: they hold POISON_ENV_LOCK and
+        // redirect the state dir via `residency_env`, so a test that touches its own pid's entry
+        // WITHOUT doing the same races their env switches — the path moves between write and read.
+        let _env = POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = residency_env(100 * GB);
+
+        // No reservation yet: nothing to correct, and that is a report, not an error.
+        assert!(!adjust_own_footprint(100));
+
+        let g = acquire_residency("test/chat-model", 1 * GB).expect("ok").expect("guard");
+        assert!(adjust_own_footprint(400_000));
+        let ent: ResidentEntry = serde_json::from_slice(
+            &std::fs::read(resident_path(std::process::id())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ent.footprint_bytes, GB + 400_000, "the sidecar is billed on top");
+        assert_eq!(ent.model, "test/chat-model", "the model name survives the correction");
+        // A shrink larger than the entry saturates at zero rather than wrapping.
+        assert!(adjust_own_footprint(-2 * GB as i64 - 400_000));
+        let ent: ResidentEntry = serde_json::from_slice(
+            &std::fs::read(resident_path(std::process::id())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ent.footprint_bytes, 0);
+        drop(g);
+        residency_env_clear(&dir);
+    }
+
     fn fake_resident(pid: u32, model: &str, footprint: u64) -> std::fs::File {
         let _ = std::fs::create_dir_all(residents_dir());
         let f = std::fs::OpenOptions::new()

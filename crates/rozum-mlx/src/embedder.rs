@@ -85,8 +85,24 @@ fn worker_loop(rx: mpsc::Receiver<Req>) {
     let mut loaded: Option<Loaded> = None;
     while let Ok(Req::Embed { texts, is_query, reply }) = rx.recv() {
         if loaded.is_none() {
+            let before = mlx_rs::memory::get_active_memory();
             match load() {
-                Ok(l) => loaded = Some(l),
+                Ok(l) => {
+                    // Bill the ledger (docs/specs/rag-embeddings-impl.md, the footnoted
+                    // follow-up): the gateway's reservation was written at CHAT-model load and
+                    // knows nothing about this sidecar. Measured, not estimated — the delta of
+                    // MLX active memory across the load is what other gateways' admission math
+                    // is actually short by. `false` (no reservation held — e.g. a bare test
+                    // process) is fine: then there is no ledger to correct.
+                    let delta = mlx_rs::memory::get_active_memory().saturating_sub(before);
+                    if delta > 0 && rozum_core::share::adjust_own_footprint(delta as i64) {
+                        tracing::info!(
+                            "embed model billed to residency ledger: +{} MB",
+                            delta / (1024 * 1024)
+                        );
+                    }
+                    loaded = Some(l);
+                }
                 Err(e) => {
                     let _ = reply.send(Err(e));
                     continue;
