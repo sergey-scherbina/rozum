@@ -44,6 +44,18 @@ Q3="Which file detects that a model's chat template does not render tool definit
 Q4="Which file implements breaking an agent out of a loop of repeated identical actions?";                          E4="crates/rozum-gateway/src/loopbreak.rs"
 Q5="Which file shortens a conversation so it fits into the model's context window?";                                E5="crates/rozum-gateway/src/auto_context.rs"
 Q6="Which file splits a markdown document into heading-bounded sections for retrieval?";                            E6="crates/rozum-agent/src/rag_chunk.rs"
+# 9 more (rag-ab-expanded, 2026-09-01) — same rules: no symbol names in the question, one
+# unambiguous repo-relative file as the key, each verified against the file's own header
+# comment before being added.
+Q7="Which file implements speculative decoding that needs no draft model, guessing continuations from n-grams already present in the context?";  E7="crates/rozum-mlx/src/specdecode_plookup.rs"
+Q8="Which file implements the standalone MCP server that serves only the retrieval search tool, without any meeting features?";                  E8="crates/rozum-agent/src/rag_mcp.rs"
+Q9="Which file trims the codex client's tool set and system prompt so small local models can handle it?";                                        E9="crates/rozum-gateway/src/codex_lean.rs"
+Q10="Which file rewrites and applies the patches the codex client submits in its own diff format?";                                             E10="crates/rozum-gateway/src/codex_patch.rs"
+Q11="Which file manages per-user access control for the messenger bridge, editable live from inside the chat?";                                  E11="crates/rozum-meeting/src/messenger_acl.rs"
+Q12="Which file implements the engine-agnostic token sampler shared by the model backends?";                                                    E12="crates/rozum-core/src/sampler.rs"
+Q13="Which file constrains generation so tool-call arguments come out as valid JSON?";                                                          E13="crates/rozum-core/src/constrain.rs"
+Q14="Which file guards the bug ledger where defects are recorded and tracked?";                                                                 E14="crates/rozum-core/src/bug_ledger.rs"
+Q15="Which file defines the backend trait every chat model engine implements?";                                                                 E15="crates/rozum-core/src/backend.rs"
 
 MCP_CFG="$OUT/mcp.json"
 cat > "$MCP_CFG" <<EOF
@@ -100,7 +112,7 @@ PY
 
 echo "arm,q,run,ok,rag_calls,turns,secs" > "$OUT/results.csv"
 for rn in $(seq 1 "$RUNS"); do
-  for qn in 1 2 3 4 5 6; do
+  for qn in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     eval "q=\$Q$qn"; eval "e=\$E$qn"
     for arm in bare rag; do
       t0=$(date +%s)
