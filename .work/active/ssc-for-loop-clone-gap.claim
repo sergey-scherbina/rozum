@@ -1,4 +1,0 @@
-slug: ssc-for-loop-clone-gap
-agent: claude-fable (session a9af44dd)
-started: 2026-09-01T10:30Z
-task: backend for-loop rendering does not clone an OUTER local read by value in the body (E0382 latent; while has inWhileLoop+loopExempt, for never did). Mirror the while context in renderFor. Work in scratchpad ssc-clean, regen vendored uniml-md, verify no perf regression.

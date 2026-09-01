@@ -126,10 +126,10 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   samples). Fix = the split precedent (index a code-unit Vector once), applied to tokenize and
   its String+index helpers (`isExtendedAutolinkStart` et al.) — a signatures refactor of the
   inline lexer, own claim. Curve till then ~×3.7/doubling on the pathological shape only; real
-  docs have blank lines → small paragraphs. ALSO FILED HERE: latent PRE-EXISTING backend gap —
-  `for`-loop rendering does not clone an OUTER local read by value in the body (while has
-  loopExempt; for never did): `for x <- xs do val cur = St(boxed.items)` emits E0382 Rust
-  today, unrelated to the move passes.
+  docs have blank lines → small paragraphs. The for-loop clone gap
+  filed here is FIXED (ssc-for-loop-clone-gap, scalascript `1e62d064e`): for-do mirrors
+  while's inWhileLoop+loopExempt (generator var exempt), for-yield takes enteringClosure;
+  516/516 goldens, zero churn, vendored crate byte-identical — purely protective.
   Original entry follows for the instrument and history.
   **(superseded) TWO of THREE quadratics fixed 2026-09-01.**
   Worst case 64 KB (6400 short lines): 29.3 s → 12.9 s (hot-top, #1) → **8.7 s**
