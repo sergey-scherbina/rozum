@@ -169,6 +169,30 @@ drowned in the constrained-path prefill tax (both arms timing out at 240 s); wit
   eval-set lesson again: phrasing sits or misses the doc vocabulary.
 - bare is high-variance between runs (3/6 then 1/6); rag is steadier (5/6 then 4/6).
 
+### Expanded set (2026-09-01, `rag-ab-expanded`: 15 questions × 2 arms × 2 runs = 60 runs)
+
+Nine questions added (specdecode_plookup, rag_mcp, codex_lean, codex_patch, messenger_acl,
+sampler, constrain, bug_ledger, backend) — one unambiguous file key each, no symbol names in
+the question, every key verified against the target file's own header comment. Same
+careful-by-design harness (shared resident gateway, sequential, throwaway worktrees).
+
+| arm | correct | turns (med/mean) | secs (med/mean) | total wall |
+|---|---|---|---|---|
+| bare | **18/30 (60%)** | 9 / 9.8 | 54 / 70 | 2101 s |
+| rag | **25/30 (83%)** | **3** / 4.9 | 33 / 50 | 1506 s |
+
+- The rag arm called `rag.search` in every run (32 calls / 30 runs), unprompted.
+- The effect direction REPLICATES the 6-question pilot at 2.5× the sample: +23 points accuracy,
+  ~⅓ the median turns, ~28% less wall time — retrieval replaces guessed-keyword grep loops.
+- Per-question: rag ≥ bare on 14 of 15; never worse. The one both-arms-zero question is Q1
+  (residency admission, `share.rs`) — 0/4 across all arms and runs; its phrasing ("allowed to
+  become resident") matches several plausible files (`footprint.rs`, `serving.rs`), so it is a
+  question defect, not a retrieval one. Q3/Q8/Q5 are where RAG carries hardest (bare 0/2 each).
+- One rag run hit the 240 s cap under foreign machine load (Q8 run 2) and was scored a miss —
+  the honest read; without it rag is 25/29.
+- Runs are ~2× faster than the pilot (med 33–54 s vs 103+ s) — the `constrained-prefix-reuse`
+  fix compounding with the ×837 chunker.
+
 ## Out of scope
 
 - ~~Residency-ledger accounting~~ — DONE in the follow-up commit: the embedder measures the MLX
