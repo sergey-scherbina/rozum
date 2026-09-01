@@ -1,0 +1,4 @@
+slug: rag-vector-freshness-cli
+agent: claude-fable (session a9af44dd)
+started: 2026-09-01T22:20Z
+task: (1) CLI rag search embeds missing vectors via gateway after refresh; (2) re-run the 26-question retrieval eval to quantify the forensics fixes (was 21/26 fused).
