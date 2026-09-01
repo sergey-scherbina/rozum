@@ -188,6 +188,7 @@ impl From<VmFrame> for crate::value::Value {
 #[derive(Debug, Clone, PartialEq)]
 pub struct VmState {
     pub stack: Vec<VmFrame>,
+    pub topEdges: Vec<UniEdge>,
     pub nodeCount: i64,
     pub lastTokenId: Option<i64>,
     pub diagnosticCount: i64,
@@ -197,7 +198,7 @@ pub struct VmState {
 }
 impl From<VmState> for crate::value::Value {
     fn from(x: VmState) -> crate::value::Value {
-        crate::value::Value::Obj("VmState", vec![crate::value::Value::from(x.stack), crate::value::Value::from(x.nodeCount), crate::value::Value::from(x.lastTokenId), crate::value::Value::from(x.diagnosticCount), crate::value::Value::from(x.diagnosticLimitReported), crate::value::Value::from(x.finished), crate::value::Value::from(x.halted)])
+        crate::value::Value::Obj("VmState", vec![crate::value::Value::from(x.stack), crate::value::Value::from(x.topEdges), crate::value::Value::from(x.nodeCount), crate::value::Value::from(x.lastTokenId), crate::value::Value::from(x.diagnosticCount), crate::value::Value::from(x.diagnosticLimitReported), crate::value::Value::from(x.finished), crate::value::Value::from(x.halted)])
     }
 }
 #[allow(dead_code)]
@@ -1798,7 +1799,7 @@ impl RustProcessor {
 }
 impl TreeVm {
     pub fn start(&self) -> VmState {
-        let initial = VmState { stack: Vec::new(), nodeCount: 0i64, lastTokenId: None, diagnosticCount: 0i64, diagnosticLimitReported: false, finished: false, halted: false };
+        let initial = VmState { stack: Vec::new(), topEdges: Vec::new(), nodeCount: 0i64, lastTokenId: None, diagnosticCount: 0i64, diagnosticLimitReported: false, finished: false, halted: false };
         initial
     }
 
@@ -1814,19 +1815,28 @@ impl TreeVm {
             (*halted) = true;
             (*diags).push(Diagnostic { code: "uniml.limit.diagnostics".to_string(), message: format!("diagnostic count exceeds the {} limit", limits.maxDiagnostics), severity: Severity::Fatal.clone(), span: d.span.clone(), dialect: None.clone(), details: Vec::new() }); } else { (); } }
         }
-        fn addTop(edge: UniEdge, stack: &mut Vec<VmFrame>) {
-            let top = (*stack)[(*stack).len() - 1].clone();
-            (*stack) = [&({ let __v = ((*stack)).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() })[..], &[VmFrame { kind: top.kind.clone(), role: top.role.clone(), edges: [&(top.edges)[..], &[edge][..]].concat(), openingSpan: top.openingSpan.clone() }][..]].concat();
+        fn addTop(edge: UniEdge, topEdges: &mut Vec<UniEdge>) {
+            (*topEdges).push(edge);
         }
-        fn attach(branch: UniNode, role: Option<String>, roots: &mut Vec<UniNode>, stack: &mut Vec<VmFrame>) {
-            if !(*stack).is_empty() { addTop(UniEdge { role: role.clone(), child: branch.clone() }, stack); } else { (*roots).push(branch.clone()); }
+        fn pushFrame(frame: VmFrame, newTopEdges: &Vec<UniEdge>, stack: &mut Vec<VmFrame>, topEdges: &mut Vec<UniEdge>) {
+            if !(*stack).is_empty() { let top = (*stack)[(*stack).len() - 1].clone();
+            (*stack) = [&([&({ let __v = ((*stack)).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() })[..], &[VmFrame { kind: top.kind.clone(), role: top.role.clone(), edges: (*topEdges).clone(), openingSpan: top.openingSpan.clone() }][..]].concat())[..], &[frame.clone()][..]].concat(); } else { (*stack).push(frame.clone()); }
+            (*topEdges) = (*newTopEdges).clone();
         }
-        fn closeFrame(roots: &mut Vec<UniNode>, stack: &mut Vec<VmFrame>) {
+        fn attachClosed(branch: UniNode, role: Option<String>, roots: &mut Vec<UniNode>, stack: &mut Vec<VmFrame>, topEdges: &mut Vec<UniEdge>) {
+            if !(*stack).is_empty() { let parent = (*stack)[(*stack).len() - 1].clone();
+            (*stack) = [&({ let __v = ((*stack)).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() })[..], &[VmFrame { kind: parent.kind.clone(), role: parent.role.clone(), edges: Vec::new(), openingSpan: parent.openingSpan.clone() }][..]].concat();
+            (*topEdges) = [&(parent.edges)[..], &[UniEdge { role: role.clone(), child: branch.clone() }][..]].concat(); } else { (*roots).push(branch.clone());
+            (*topEdges) = Vec::new(); }
+        }
+        fn closeFrame(roots: &mut Vec<UniNode>, stack: &mut Vec<VmFrame>, topEdges: &mut Vec<UniEdge>) {
             let frame = (*stack)[(*stack).len() - 1].clone();
+            let branch = buildBranch(frame.clone(), (*topEdges).clone(), Origin::SourceBacked.clone());
             (*stack) = { let __v = ((*stack)).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() };
-            attach(buildBranch(frame.clone(), Origin::SourceBacked.clone()), frame.role.clone(), roots, stack);
+            attachClosed(branch.clone(), frame.role.clone(), roots, stack, topEdges);
         }
         let mut stack = state.stack.clone();
+        let mut topEdges = state.topEdges.clone();
         let mut nodeCount = state.nodeCount.clone();
         let mut lastTokenId = state.lastTokenId.clone();
         let mut diagCount = state.diagnosticCount.clone();
@@ -1841,47 +1851,48 @@ impl TreeVm {
             lastTokenId = Some(input.token.id.clone());
             match (input.instruction).clone() {
                 VmInstruction::Open { kind, role } => { (nodeCount += 2i64);
-                stack.push(VmFrame { kind: kind.clone(), role: role.clone(), edges: vec![UniEdge { role: None.clone(), child: UniNode::Token { value: input.token.clone() } }], openingSpan: input.token.span.clone() }); },
+                pushFrame(VmFrame { kind: kind.clone(), role: role.clone(), edges: Vec::new(), openingSpan: input.token.span.clone() }, &vec![UniEdge { role: None.clone(), child: UniNode::Token { value: input.token.clone() } }], &mut stack, &mut topEdges); },
                 VmInstruction::Emit { role } => { (nodeCount += 1i64);
                 let tokenNode = UniNode::Token { value: input.token.clone() };
-                if !stack.is_empty() { addTop(UniEdge { role: role.clone(), child: tokenNode.clone() }, &mut stack); } else { roots.push(tokenNode.clone()); } },
+                if !stack.is_empty() { addTop(UniEdge { role: role.clone(), child: tokenNode.clone() }, &mut topEdges); } else { roots.push(tokenNode.clone()); } },
                 ref instruction @ VmInstruction::Reframe { ref closeBefore, ref open, ref closeAfter, ref role } => { match reframeProblem(&stack, (*instruction).clone()) {
                     Some(problem) => { (nodeCount += 1i64);
                     record(Diagnostic { span: Some(input.token.span.clone()), ..(problem).clone() }, &mut diagCount, &mut diagLimitReported, &mut diags, &mut halted, limits.clone());
                     let tokenNode = UniNode::Token { value: input.token.clone() };
-                    if !stack.is_empty() { addTop(UniEdge { role: (*role).clone(), child: tokenNode.clone() }, &mut stack); } else { roots.push(tokenNode.clone()); } },
+                    if !stack.is_empty() { addTop(UniEdge { role: (*role).clone(), child: tokenNode.clone() }, &mut topEdges); } else { roots.push(tokenNode.clone()); } },
                     None => { (nodeCount += (1i64 + ((*open).len() as i64)));
                     for _ in (*closeBefore).iter().cloned() {
-                        closeFrame(&mut roots, &mut stack);
+                        closeFrame(&mut roots, &mut stack, &mut topEdges);
                     };
                     for spec in (*open).iter().cloned() {
-                        stack.push(VmFrame { kind: spec.kind.clone(), role: spec.role.clone(), edges: Vec::new(), openingSpan: input.token.span.clone() });
+                        pushFrame(VmFrame { kind: spec.kind.clone(), role: spec.role.clone(), edges: Vec::new(), openingSpan: input.token.span.clone() }, &Vec::new(), &mut stack, &mut topEdges);
                     };
                     let tokenNode = UniNode::Token { value: input.token.clone() };
-                    if !stack.is_empty() { addTop(UniEdge { role: (*role).clone(), child: tokenNode.clone() }, &mut stack); } else { roots.push(tokenNode.clone()); }
+                    if !stack.is_empty() { addTop(UniEdge { role: (*role).clone(), child: tokenNode.clone() }, &mut topEdges); } else { roots.push(tokenNode.clone()); }
                     for _ in (*closeAfter).iter().cloned() {
-                        closeFrame(&mut roots, &mut stack);
+                        closeFrame(&mut roots, &mut stack, &mut topEdges);
                     }; },
                 } },
                 VmInstruction::Report { code, message, severity } => { (nodeCount += 1i64);
                 let tokenNode = UniNode::Token { value: input.token.clone() };
                 record(Diagnostic { code: code.clone(), message: message.clone(), severity: severity.clone(), span: Some(input.token.span.clone()), dialect: None, details: Vec::new() }, &mut diagCount, &mut diagLimitReported, &mut diags, &mut halted, limits.clone());
                 if (severity == Severity::Fatal) { halted = true; } else { (); }
-                if !stack.is_empty() { addTop(UniEdge { role: None.clone(), child: tokenNode.clone() }, &mut stack); } else { roots.push(tokenNode.clone()); } },
+                if !stack.is_empty() { addTop(UniEdge { role: None.clone(), child: tokenNode.clone() }, &mut topEdges); } else { roots.push(tokenNode.clone()); } },
                 VmInstruction::Close { expectedKind, role } => { (nodeCount += 1i64);
                 let tokenNode = UniNode::Token { value: input.token.clone() };
                 if stack.is_empty() { record(Diagnostic { code: "uniml.vm.orphan-close".to_string(), message: "close instruction has no open node".to_string(), severity: Severity::Error.clone(), span: Some(input.token.span.clone()), dialect: None.clone(), details: Vec::new() }, &mut diagCount, &mut diagLimitReported, &mut diags, &mut halted, limits.clone());
                 roots.push(tokenNode.clone()); } else { let frame = stack[stack.len() - 1].clone();
-                addTop(UniEdge { role: role.clone(), child: tokenNode.clone() }, &mut stack);
+                addTop(UniEdge { role: role.clone(), child: tokenNode.clone() }, &mut topEdges);
                 match expectedKind {
                     Some(expected) if (expected != frame.kind) => { record(Diagnostic { code: "uniml.vm.mismatched-close".to_string(), message: format!("expected to close '{}' but current node is '{}'", expected, frame.kind), severity: Severity::Error.clone(), span: Some(input.token.span.clone()), dialect: None.clone(), details: vec![("expected".to_string(), expected.clone()), ("actual".to_string(), frame.kind.clone())] }, &mut diagCount, &mut diagLimitReported, &mut diags, &mut halted, limits.clone()); },
                     _ => { let closed = stack[stack.len() - 1].clone();
+                    let branch = buildBranch(closed.clone(), topEdges.clone(), Origin::SourceBacked.clone());
                     stack = { let __v = (stack).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() };
-                    attach(buildBranch(closed.clone(), Origin::SourceBacked.clone()), closed.role.clone(), &mut roots, &mut stack); },
+                    attachClosed(branch.clone(), closed.role.clone(), &mut roots, &mut stack, &mut topEdges); },
                 } } },
             } },
         }
-        Stepped { state: VmState { stack: stack.clone(), nodeCount: nodeCount.clone(), lastTokenId: lastTokenId.clone(), diagnosticCount: diagCount.clone(), diagnosticLimitReported: diagLimitReported.clone(), finished: false, halted: halted.clone() }, batch: ProcessBatch { values: roots.clone(), diagnostics: diags.clone() } } } } }
+        Stepped { state: VmState { stack: stack.clone(), topEdges: topEdges.clone(), nodeCount: nodeCount.clone(), lastTokenId: lastTokenId.clone(), diagnosticCount: diagCount.clone(), diagnosticLimitReported: diagLimitReported.clone(), finished: false, halted: halted.clone() }, batch: ProcessBatch { values: roots.clone(), diagnostics: diags.clone() } } } } }
     }
 
     pub fn stop(&self, state: VmState) -> ProcessBatch<UniNode> {
@@ -1894,6 +1905,7 @@ impl TreeVm {
             (*diags).push(Diagnostic { code: "uniml.limit.diagnostics".to_string(), message: format!("diagnostic count exceeds the {} limit", limits.maxDiagnostics), severity: Severity::Fatal.clone(), span: d.span.clone(), dialect: None, details: Vec::new() }); } else { (); } }
         }
         let mut stack = state.stack.clone();
+        let mut topEdges = state.topEdges.clone();
         let mut diagCount = state.diagnosticCount.clone();
         let mut diagLimitReported = state.diagnosticLimitReported.clone();
         let mut roots: Vec<UniNode> = Vec::new();
@@ -1902,9 +1914,10 @@ impl TreeVm {
             let frame = stack[stack.len() - 1].clone();
             stack = { let __v = (stack).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() };
             record(Diagnostic { code: "uniml.vm.unclosed-node".to_string(), message: format!("unclosed '{}' node at end of input", frame.kind), severity: Severity::Error.clone(), span: Some(frame.openingSpan.clone()), dialect: None, details: Vec::new() }, &mut diagCount, &mut diagLimitReported, &mut diags, limits.clone());
-            let branch = buildBranch(frame.clone(), Origin::Synthetic { reason: format!("unclosed:{}", frame.kind) });
+            let branch = buildBranch(frame.clone(), topEdges.clone(), Origin::Synthetic { reason: format!("unclosed:{}", frame.kind) });
             if !stack.is_empty() { let top = stack[stack.len() - 1].clone();
-            stack = [&({ let __v = (stack).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() })[..], &[VmFrame { kind: top.kind.clone(), role: top.role.clone(), edges: [&(top.edges)[..], &[UniEdge { role: frame.role.clone(), child: branch.clone() }][..]].concat(), openingSpan: top.openingSpan.clone() }][..]].concat(); } else { roots.push(branch.clone()); }
+            topEdges = [&(top.edges)[..], &[UniEdge { role: frame.role.clone(), child: branch.clone() }][..]].concat();
+            stack = [&({ let __v = (stack).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() })[..], &[VmFrame { kind: top.kind.clone(), role: top.role.clone(), edges: Vec::new(), openingSpan: top.openingSpan.clone() }][..]].concat(); } else { roots.push(branch.clone()); }
         };
         ProcessBatch { values: roots.clone(), diagnostics: diags.clone() } } }
     }
@@ -2149,13 +2162,13 @@ pub fn Literal_instructions(source: SourceInput) -> std::rc::Rc<dyn Processor<St
     std::rc::Rc::new(LiteralProcessor { source: source.source.clone() })
 }
 
-pub fn buildBranch(frame: VmFrame, origin: Origin) -> UniNode {
-    let end = match frame.edges.last().cloned() {
+pub fn buildBranch(frame: VmFrame, edges: Vec<UniEdge>, origin: Origin) -> UniNode {
+    let end = match (edges.last().cloned()).clone() {
         Some(UniEdge { role: _, child: UniNode::Token { value: token } }) => token.span.end,
         Some(UniEdge { role: _, child: UniNode::Branch { kind: _, edges: _, span, origin: _ } }) => span.end.clone(),
         None => frame.openingSpan.end.clone(),
     };
-    UniNode::Branch { kind: frame.kind.clone(), edges: frame.edges.clone(), span: SourceSpan { source: frame.openingSpan.source.clone(), start: frame.openingSpan.start.clone(), end: end.clone() }, origin: origin.clone() }
+    UniNode::Branch { kind: frame.kind.clone(), edges: edges.clone(), span: SourceSpan { source: frame.openingSpan.source.clone(), start: frame.openingSpan.start.clone(), end: end.clone() }, origin: origin.clone() }
 }
 
 pub fn validateToken(lastTokenId: Option<i64>, token: SourceToken) -> Vec<Diagnostic> {
@@ -2264,7 +2277,7 @@ pub fn normalizeLabel(raw: String) -> String {
         builder.push(crate::runtime::_str_substring(&trimmed, li, (li + 1i64))); }
         (li += 1i64);
     };
-    foldCase((builder).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(""))
+    foldCase((builder).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(("".to_string()).as_str()))
 }
 
 pub fn MarkdownInlines_parse(content: String, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> Vec<InlinePiece> {
@@ -2303,7 +2316,7 @@ pub fn tokenize(content: &String, refs: std::collections::HashMap<String, LinkRe
     let CodeSpan = "markdown.code-span".to_string();
     let Expression = "markdown.expression".to_string();
     fn flushText(nodes: &mut Vec<WNode>, pending: &mut Vec<String>) {
-        if !(*pending).is_empty() { (*nodes).push(text(((*pending)).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join("")));
+        if !(*pending).is_empty() { (*nodes).push(text(((*pending)).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(("".to_string()).as_str())));
         (*pending) = Vec::new(); } else { (); }
     }
     let mut nodes: Vec<WNode> = Vec::new();
@@ -2316,7 +2329,7 @@ pub fn tokenize(content: &String, refs: std::collections::HashMap<String, LinkRe
         let c = crate::runtime::_str_char_at(&(*content), i);
         match (c).0 {
             10i64 | 13i64 => { let ending = if (((c == 13i64) && ((i + 1i64) < n)) && (crate::runtime::_str_char_at(&(*content), (i + 1i64)) == 10i64)) { "\r\n".to_string() } else { crate::runtime::_str_substring(&(*content), i, (i + 1i64)) };
-            let pend = (pending).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join("");
+            let pend = (pending).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(("".to_string()).as_str());
             let hard = (pend.ends_with("  ") || pend.ends_with("\\"));
             if (hard && pend.ends_with("\\")) { pending = { let __v = (pending).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() };
             flushText(&mut nodes, &mut pending);
@@ -2463,7 +2476,7 @@ pub fn emailLocalBackscan(nodes: &Vec<WNode>, pending: &Vec<String>) -> (i64, St
             }
         }
     }
-    let mut chunk = ((*pending)).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join("");
+    let mut chunk = ((*pending)).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(("".to_string()).as_str());
     let mut cut = crate::runtime::_str_length(&chunk);
     while ((cut > 0i64) && isEmailLocalChar((crate::runtime::_str_char_at(&chunk, (cut - 1i64))).0)) {
         (cut -= 1i64);
@@ -2677,7 +2690,7 @@ pub fn parseInlineDestination(content: &String, open: i64) -> Option<(String, Op
         (i += 1i64); } } else { sb.push(crate::runtime::_str_substring(&(*content), i, (i + 1i64)));
         (i += 1i64); } } } }
     };
-    dest = (sb).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(""); }
+    dest = (sb).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(("".to_string()).as_str()); }
     let destEnd = i;
     while ((i < n) && isUnicodeWhitespace((crate::runtime::_str_char_at(&(*content), i)).0)) {
         (i += 1i64);
@@ -2909,56 +2922,35 @@ pub fn longestRun(s: String) -> i64 {
 
 pub fn split(text: String) -> Vec<MdLine> {
     let empty = DialectRegistry { byName: std::collections::HashMap::new() };
-    let chars = text.encode_utf16().map(|__u| __u as i64).collect::<Vec<i64>>();
-    let mut lines: Vec<MdLine> = Vec::new();
-    let mut lineStart = 0i64;
-    let mut index = 0i64;
-    while (index < (chars.len() as i64)) {
-        let char = chars[(index) as usize].clone();
-        match (char).clone() {
-            10i64 => { lines.push(MdLine { content: ((chars)[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(""), ending: "\n".to_string() });
-            (index += 1i64);
-            lineStart = index; },
-            13i64 => { if (((index + 1i64) < (chars.len() as i64)) && (chars[((index + 1i64)) as usize].clone() == 10i64)) { lines.push(MdLine { content: ((chars)[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(""), ending: "\r\n".to_string() });
-            (index += 2i64); } else { lines.push(MdLine { content: ((chars)[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(""), ending: "\r".to_string() });
-            (index += 1i64); }
-            lineStart = index; },
-            _ => { (index += 1i64); },
-        }
-    };
-    if (lineStart < (chars.len() as i64)) { lines.push(MdLine { content: ((chars).iter().cloned().skip(lineStart as usize).collect::<Vec<_>>()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(""), ending: "".to_string() }); } else { (); }
-    lines
+    fn split(index: i64, lineStart: i64, lines: &Vec<MdLine>, chars: &Vec<i64>) -> (Vec<MdLine>, i64) {
+        if (index >= ((*chars).len() as i64)) { ((*lines).clone(), lineStart.clone()) } else { match chars[(index.clone()) as usize].clone() {
+            10i64 => split((index + 1i64), (index + 1i64), &[&((*lines))[..], &[MdLine { content: (((*chars))[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ending: "\n".to_string() }][..]].concat(), chars),
+            13i64 => if (((index + 1i64) < ((*chars).len() as i64)) && (chars[((index + 1i64)) as usize].clone() == 10i64)) { split((index + 2i64), (index + 2i64), &[&((*lines))[..], &[MdLine { content: (((*chars))[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ending: "\r\n".to_string() }][..]].concat(), chars) } else { split((index + 1i64), (index + 1i64), &[&((*lines))[..], &[MdLine { content: (((*chars))[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ending: "\r".to_string() }][..]].concat(), chars) },
+            _ => split((index + 1i64), lineStart.clone(), lines, chars),
+        } }
+    }
+    let chars: Vec<i64> = text.encode_utf16().map(|__u| __u as i64).collect::<Vec<i64>>();
+    let splitResult = split(0i64, 0i64, &Vec::new(), &chars);
+    let lines = splitResult.0.clone();
+    let lineStart = splitResult.1.clone();
+    if (lineStart < (chars.len() as i64)) { [&(lines)[..], &[MdLine { content: ((chars).iter().cloned().skip(lineStart as usize).collect::<Vec<_>>()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ending: "".to_string() }][..]].concat() } else { lines.clone() }
 }
 
 pub fn asciiLower(s: String) -> String {
     let empty = DialectRegistry { byName: std::collections::HashMap::new() };
-    let mut i = 0i64;
-    let mut needs = false;
-    while ((i < crate::runtime::_str_length(&s)) && !(needs)) {
-        let c = crate::runtime::_str_char_at(&s, i);
-        if ((c >= 65i64) && (c <= 90i64)) { needs = true; } else { (); }
-        (i += 1i64);
-    };
-    if !(needs) { s.clone() } else { { let mut out: Vec<String> = Vec::new();
-    let mut k = 0i64;
-    while (k < crate::runtime::_str_length(&s)) {
-        let c = crate::runtime::_str_char_at(&s, k);
-        out.push(format!("{}", if ((c >= 65i64) && (c <= 90i64)) { (((c + 32i64)) as i64) } else { (c).0 }));
-        (k += 1i64);
-    };
-    (out).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join("") } }
+    fn needsAt(i: i64, s: String) -> bool {
+        if (i >= crate::runtime::_str_length(&s)) { false } else { { let c = crate::runtime::_str_char_at(&s, i);
+        (((c >= 65i64) && (c <= 90i64)) || needsAt((i + 1i64), s.clone())) } }
+    }
+    let needs = needsAt(0i64, s.clone());
+    if !(needs) { s.clone() } else { ((0i64..crate::runtime::_str_length(&s)).fold(Vec::new(), { { let s = s.clone(); move |out, k| { { let c = crate::runtime::_str_char_at(&s, k);
+    [&(out)[..], &[format!("{}", if ((c >= 65i64) && (c <= 90i64)) { (((c + 32i64)) as i64) } else { (c).0 })][..]].concat() } } } })).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(("".to_string()).as_str()) }
 }
 
 pub fn foldCase(s: String) -> String {
     let empty = DialectRegistry { byName: std::collections::HashMap::new() };
-    let mut out: Vec<String> = Vec::new();
-    let mut i = 0i64;
-    while (i < crate::runtime::_str_length(&s)) {
-        let c = crate::runtime::_str_char_at(&s, i);
-        out.push(format!("{}", if ((c >= 65i64) && (c <= 90i64)) { (((c + 32i64)) as i64) } else { if (c < 128i64) { (c).0 } else { crate::runtime::_char_to_lowercase((c).0) } }));
-        (i += 1i64);
-    };
-    (out).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join("")
+    ((0i64..crate::runtime::_str_length(&s)).fold(Vec::new(), { { let s = s.clone(); move |out, i| { { let c = crate::runtime::_str_char_at(&s, i);
+    [&(out)[..], &[format!("{}", if ((c >= 65i64) && (c <= 90i64)) { (((c + 32i64)) as i64) } else { if (c < 128i64) { (c).0 } else { crate::runtime::_char_to_lowercase((c).0) } })][..]].concat() } } } })).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join(("".to_string()).as_str())
 }
 
 pub fn isAsciiWhitespace(c: i64) -> bool {
@@ -3007,43 +2999,32 @@ pub fn MdChars_isAsciiAlnum(c: i64) -> bool {
 }
 
 pub fn indentWidth(content: String) -> i64 {
-    let mut col = 0i64;
-    let mut i = 0i64;
-    let mut done = false;
-    while ((i < crate::runtime::_str_length(&content)) && !(done)) {
-        match (crate::runtime::_str_char_at(&content, i)).0 {
-            32i64 => { (col += 1i64);
-            (i += 1i64); },
-            9i64 => { (col += (4i64 - (col % 4i64)));
-            (i += 1i64); },
-            _ => { done = true; },
-        }
-    };
-    col
+    fn walk(i: i64, col: i64, content: String) -> i64 {
+        if (i >= crate::runtime::_str_length(&content)) { col.clone() } else { match (crate::runtime::_str_char_at(&content, i)).0 {
+            32i64 => walk((i + 1i64), (col + 1i64), content.clone()),
+            9i64 => walk((i + 1i64), (col + (4i64 - (col % 4i64))), content.clone()),
+            _ => col.clone(),
+        } }
+    }
+    walk(0i64, 0i64, content.clone())
 }
 
 pub fn indentCut(content: String, columns: i64) -> i64 {
-    let mut col = 0i64;
-    let mut i = 0i64;
-    let mut stopped = false;
-    while (((i < crate::runtime::_str_length(&content)) && (col < columns)) && !(stopped)) {
-        match (crate::runtime::_str_char_at(&content, i)).0 {
-            32i64 => { (col += 1i64);
-            (i += 1i64); },
-            9i64 => { (col += (4i64 - (col % 4i64)));
-            (i += 1i64); },
-            _ => { stopped = true; },
-        }
-    };
-    if (col == columns) { i } else { -1i64 }
+    fn walk(i: i64, col: i64, columns: i64, content: String) -> i64 {
+        if ((i >= crate::runtime::_str_length(&content)) || (col >= columns)) { if (col == columns) { i.clone() } else { -1i64 } } else { match (crate::runtime::_str_char_at(&content, i)).0 {
+            32i64 => walk((i + 1i64), (col + 1i64), columns.clone(), content.clone()),
+            9i64 => walk((i + 1i64), (col + (4i64 - (col % 4i64))), columns.clone(), content.clone()),
+            _ => if (col == columns) { i.clone() } else { -1i64 },
+        } }
+    }
+    walk(0i64, 0i64, columns.clone(), content.clone())
 }
 
 pub fn indentPrefixLength(content: String) -> i64 {
-    let mut i = 0i64;
-    while ((i < crate::runtime::_str_length(&content)) && ((crate::runtime::_str_char_at(&content, i) == 32i64) || (crate::runtime::_str_char_at(&content, i) == 9i64))) {
-        (i += 1i64);
-    };
-    i
+    fn walk(i: i64, content: String) -> i64 {
+        if ((i < crate::runtime::_str_length(&content)) && ((crate::runtime::_str_char_at(&content, i) == 32i64) || (crate::runtime::_str_char_at(&content, i) == 9i64))) { walk((i + 1i64), content.clone()) } else { i.clone() }
+    }
+    walk(0i64, content.clone())
 }
 
 pub fn MarkdownProjection_project(result: ParseResult, profile: MarkdownProfile) -> MarkdownProjectionResult {

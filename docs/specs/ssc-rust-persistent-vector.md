@@ -179,3 +179,31 @@ that, and each was worth 2–4× on its own.
 
 Phase 2 is therefore NOT started: the measurement says the cheaper option should be tried
 first, which is what phase 1 existed to find out.
+
+### Phase 2 pass — 2026-09-01 (the single-frame residual, two quadratics deep)
+
+The re-measure confirmed the residual and then some: a single giant frame is not "mildly"
+super-linear but a clean ×3.9/doubling, and holding bytes fixed while varying ONE variable
+(the method that has now worked three times) proved cost ∝ (line count)²: 64 KB as 100 long
+lines parses in 0.25 s, as 6400 short lines in **29.3 s**. `sample` named the leaves —
+`UniNode::clone` + `UniEdge to_vec` under `TreeVm.step`.
+
+**Quadratic #1 — per-token frame rebuild (FIXED, source-level).** `addTop` rebuilt the top
+`VmFrame` (copying all its edges) on every token. The hot-top invariant moves the open frame's
+edges into `VmState.topEdges` (`scalascript feature/treevm-top-edges-prestage10`, stage-10 twin
+on `feature/treevm-top-edges`): the per-token path becomes a plain self-append → O(1) push in
+the lowering; the O(frame) copies move to frame open/close. Result: worst case 29.3 s → 12.9 s,
+the whole frame series ~1.7× faster, all uniml suites + 164 rozum-agent tests green.
+
+**Quadratic #2 — per-token state-field deep-clone (DIAGNOSED, backend-level).** The curve stays
+×3.9 because the generated `step` does `let mut topEdges = state.topEdges.clone()` on entry and
+`topEdges: topEdges.clone()` in the returned `VmState` — two deep O(k) clones of the
+accumulated edge list PER TOKEN, emitted for an owned parameter's field at what is provably its
+last use. That is `cloneIfMoved` conservatism again, one level up: the fix belongs in the
+backend (move an owned param's field at its last read), or — the spec's own fallback — a
+scoped shared representation for exactly this accumulator field. Filed as the remaining work
+of this item; the instrument (`mdbench` + the fixed-bytes/one-variable method) carries over.
+
+Vendored crate regenerated from the pre-stage-10 base (stage-10 currently breaks the Rust lane
+outright — 26 emitter refusals fixed on the stage-10 branch, ~86 rustc errors remain for its
+owner; recorded in the rozum room 2026-09-01).

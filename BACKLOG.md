@@ -98,14 +98,17 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   separate fixes, each documented at its site — the sharpest being that the widened rewrite
   composed with `cloneIfMoved` into `&xs.clone()`, so the signature said `&Vec` while the call
   still copied and the optimisation read as applied while measuring as absent.
-- [ ] **uniml-single-frame-residual-superlinear** — honest remainder of the above. A single
-  enormous frame is STILL mildly super-linear: 0.018 / 0.055 / 0.215 s at 16 / 32 / 64 KB, about
-  ×3.8 per doubling, where ordinary multi-block documents are ~×2. It is 160× cheaper than it was
-  and no longer blocks anything, so this is filed rather than chased. Whoever picks it up: the
-  method that worked twice is to hold total bytes fixed and vary ONE structural variable at a time
-  (blocks-per-document, then line-length-within-a-block), which is what separated this from the
-  filed-but-wrong `TreeVm` theory; `crates/rozum-agent/examples/mdbench.rs` is the instrument, and
-  `TreeVm.addTop`'s per-token frame rebuild is still a real O(k²) shape that simply was not this.
+- [ ] **uniml-single-frame-residual-superlinear — HALF-FIXED 2026-09-01, second half diagnosed.**
+  It was TWO quadratics stacked (spec § Phase 2 pass). #1, the per-token `addTop` frame rebuild
+  (the shape the old entry suspected!): FIXED at the source with the hot-top invariant
+  (`VmState.topEdges`; scalascript `feature/treevm-top-edges-prestage10`) — worst case 64 KB
+  29.3 s → 12.9 s, frame series ~1.7×. #2, still open and now EXACT: the generated `step`
+  deep-clones `state.topEdges` on entry AND exit — two O(k) clones per token — for an owned
+  parameter's field at its provably last use. Backend fix (field move at last use) or a scoped
+  shared representation for that one accumulator field; until then the curve stays ×3.9 on
+  single-frame documents while ordinary documents remain ~×2. NOTE: stage-10 currently breaks
+  the whole Rust lane (~86 rustc errors, owner pinged); the vendored crate is regenerated from
+  the pre-stage-10 base with the hot-top fix.
 - [x] **constrained-path-prefix-reuse — SHIPPED 2026-09-01** (docs/specs/constrained-prefix-reuse.md; measured ×11: ttft 4.7 s → 410 ms on a 5.6k-token continuation turn, live service). Diagnosis trail below.
   Every agent turn on this machine re-prefills its whole conversation: ~1.2 ms/token, ttft 5–10 s
   per turn at 6–8k prompt tokens, growing with history — this is what made every RAG A/B run hit
