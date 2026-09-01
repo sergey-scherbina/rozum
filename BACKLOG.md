@@ -98,7 +98,19 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   separate fixes, each documented at its site — the sharpest being that the widened rewrite
   composed with `cloneIfMoved` into `&xs.clone()`, so the signature said `&Vec` while the call
   still copied and the optimisation read as applied while measuring as absent.
-- [ ] **uniml-single-frame-residual-superlinear — FIVE quadratics down, ONE left (tokenize) 2026-09-01.**
+- [x] **uniml-single-frame-residual-superlinear — CLOSED 2026-09-01: the curve is LINEAR.**
+  `uniml-inline-tokenize-codeunits` (docs/specs/uniml-inline-tokenize-codeunits.md) took #6, the
+  last profiled contributor: the inline tokenizer + its scanners walked the single giant
+  paragraph of a blank-line-free doc via O(i) charAt/substring/indexOf emulation; all of
+  MarkdownInlines now indexes a code-unit Vector (scalascript `4aaeb385c`, backend charseq-param
+  fix `f987fb16d`). Doubling ratio 1.84–1.99 at 3.2k→25.6k lines; 64 KB worst case
+  **29.3 s (campaign start) → 0.035 s, ×837**; 25.6k lines 0.137 s; long-line docs 0.211 →
+  0.012 s. Found on the way: backend printed a Vector[Char] PARAM's mkString as decimal code
+  points (fixed, golden 513/513); rag_embed lock-test flake was the spawn fork→exec fd-window
+  (test states the tolerance now). Six stacked superlinear contributors total, each found by
+  profile-after-fix, none by theory.
+  History of the campaign below.
+  **(superseded) FIVE quadratics down, ONE left (tokenize) 2026-09-01.**
   `ssc-local-last-use-move` (docs/specs/ssc-local-last-use-move.md) landed #3+#4+#5 in one pass:
   #3 backend local-last-use moves (`_localLastUseMoves`, position-keyed) — step's exit
   constructor moves stack/topEdges/roots; #4 backend loop-local FIELD moves
