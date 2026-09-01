@@ -219,6 +219,27 @@ ambiguous-key questions — zero retrieval failures**; key-corrected that is 15/
 same run. Live probes: Q8 `rag_mcp.rs` absent-from-top-30 → #1 and #5 of 5; Q5 `auto_context`
 absent → #4; Q1's `#[test]` top-1 → #5 with impls above.
 
+### Vector freshness + a committed retrieval eval (2026-09-01, `rag-vector-freshness-cli`)
+
+Two follow-ups from the forensics:
+
+- **Vector freshness** — the true Q8 mechanism, closed everywhere: `rag_embed::
+  embed_missing_via_gateway` (extracted from the standalone MCP server) now also runs in the
+  CLI after its refresh, so a refreshed index's new chunks get their embeddings in one cheap
+  gateway batch instead of waiting for a server warmup. Dead gateway = quiet BM25 for exactly
+  those chunks, as before.
+- **The eval is a committed instrument now.** The original 26-question spike harness was LOST
+  (its 21/26 survives only as a number in this spec, unreproducible). Replacement:
+  `crates/rozum-agent/examples/rag-eval.rs` + `scripts/bench/rag-eval-questions.tsv`
+  (25 questions: the 15 A/B locate-questions incl. their |-alternative keys, plus 10 new ones
+  keyed against file headers). It runs the exact shipped policy (deep-pool fusion,
+  post-fusion rebalance, refresh + embed-missing first) and prints per-question T1/t5/--.
+
+**Baseline v2 (2026-09-01, all forensics fixes in): top-1 22/25 (88%), top-5 25/25 (100%),
+fused.** Not comparable to the lost 21/26 (different questions); this is the number future
+retrieval changes are measured against. The three top-5-only questions are the genuinely
+hard phrasings (auto_context "shortening", constrain grammar-vs-driver, verify gate).
+
 ## Out of scope
 
 - ~~Residency-ledger accounting~~ — DONE in the follow-up commit: the embedder measures the MLX

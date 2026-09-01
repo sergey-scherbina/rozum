@@ -340,6 +340,40 @@ pub fn try_embed_lock(root: &Path) -> std::io::Result<Option<std::fs::File>> {
     }
 }
 
+/// The gateway-backed corpus embed: plan (prune+missing), batch 64, per-batch saves, shared
+/// embed lock. Extracted from the standalone MCP server (`rag-vector-freshness-cli`) so the
+/// CLI can run it after its refresh too — VECTOR freshness was the real Q8 mechanism: the
+/// index refreshed everywhere, but a new chunk's embedding appeared only when a server
+/// happened to warm up, and until then the fusion's semantic half simply did not know the
+/// file. A dead gateway breaks the loop quietly and the search stays BM25-backed for the
+/// missing chunks, exactly as before.
+pub async fn embed_missing_via_gateway(root: &std::path::Path) {
+    let Ok(Some(_lock)) = try_embed_lock(root) else { return };
+    let chunks = crate::rag_chunk::saved_chunk_texts(root);
+    if chunks.is_empty() {
+        return;
+    }
+    let vpath = vectors_path(root);
+    let mut store = VecStore::load(&vpath, None).unwrap_or_else(|| VecStore::new(0));
+    let (_pruned, missing) = plan_embedding(&chunks, &mut store);
+    for group in missing.chunks(64) {
+        let texts: Vec<String> =
+            group.iter().map(|(id, t)| distill(id, t)).collect();
+        let Some(vecs) = embed_via_gateway(&texts, false).await else { break };
+        for (v, (id, _)) in vecs.into_iter().zip(group.iter()) {
+            if store.dim == 0 {
+                store.dim = v.len();
+            }
+            if v.len() == store.dim && store.dim > 0 {
+                store.vecs.insert(id.clone(), v);
+            }
+        }
+        if store.dim > 0 {
+            let _ = store.save(&vpath);
+        }
+    }
+}
+
 /// RRF fusion of the BM25 ranking and the embedding ranking.
 ///
 /// k=10 and embedding weight 2, from the sweep. Embeddings carry the HIGHER weight even though

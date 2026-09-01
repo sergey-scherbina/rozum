@@ -8765,6 +8765,12 @@ async fn run_rag(action: RagAction) {
             // build lock means the answer is already being computed — proceed with what's there.
             if rag_chunk::index_path(&root).exists() {
                 let _ = rag_chunk::refresh_in_background(&root, &mut |_, _, _| {});
+                // VECTOR freshness too, not just index freshness (`rag-vector-freshness-cli`):
+                // a refreshed index can hold chunks no embedding exists for yet, and the
+                // fusion's semantic half simply does not know them until a server warmup
+                // happens to run. One cheap gateway batch per 64 missing chunks; a dead
+                // gateway degrades quietly to BM25 for exactly those chunks, as before.
+                rozum::rag_embed::embed_missing_via_gateway(&root).await;
             }
             let Some(index) = rag_chunk::load_project_index(&root) else {
                 eprintln!(

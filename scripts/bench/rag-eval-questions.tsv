@@ -1,0 +1,25 @@
+Which file contains the function that decides whether a model is allowed to become resident in memory?	crates/rozum-core/src/share.rs|crates/rozum-models/src/resident.rs
+Which file decides which meeting room a telegram group chat belongs to?	crates/rozum-meeting/src/messenger_groups.rs
+Which file detects that a model's chat template does not render tool definitions?	crates/rozum-mlx/src/mlx_native_backend.rs
+Which file implements breaking an agent out of a loop of repeated identical actions?	crates/rozum-gateway/src/loopbreak.rs
+Which file shortens a conversation so it fits into the model's context window?	crates/rozum-gateway/src/auto_context.rs
+Which file splits a markdown document into heading-bounded sections for retrieval?	crates/rozum-agent/src/rag_chunk.rs
+Which file implements speculative decoding that needs no draft model, guessing continuations from n-grams already present in the context?	crates/rozum-mlx/src/specdecode_plookup.rs
+Which file implements the standalone MCP server that serves only the retrieval search tool, without any meeting features?	crates/rozum-agent/src/rag_mcp.rs
+Which file trims the codex client's tool set and system prompt so small local models can handle it?	crates/rozum-gateway/src/codex_lean.rs
+Which file rewrites and applies the patches the codex client submits in its own diff format?	crates/rozum-gateway/src/codex_patch.rs
+Which file manages per-user access control for the messenger bridge, editable live from inside the chat?	crates/rozum-meeting/src/messenger_acl.rs
+Which file implements the engine-agnostic token sampler shared by the model backends?	crates/rozum-core/src/sampler.rs
+Which file constrains generation so tool-call arguments come out as valid JSON?	crates/rozum-core/src/constrain.rs|crates/rozum-mlx/src/mlx_native_backend.rs
+Which file guards the bug ledger where defects are recorded and tracked?	crates/rozum-core/src/bug_ledger.rs
+Which file defines the backend trait every chat model engine implements?	crates/rozum-core/src/backend.rs
+Which file implements the append-only local memory store agents persist notes into?	crates/rozum-agent/src/memory_store.rs
+Which file parses the harmony response format the gpt-oss models emit?	crates/rozum-core/src/harmony.rs
+Which file implements the embedding model backend used for retrieval?	crates/rozum-mlx/src/embedder.rs|crates/rozum-agent/src/rag_embed.rs
+Which file stores quantized embedding vectors on disk and fuses them with lexical search?	crates/rozum-agent/src/rag_embed.rs
+Which file decides who may use the web console and what they may do?	crates/rozum-gateway/src/auth.rs
+Which file implements the verify-repair gate that decides what done means after an agent run?	crates/rozum-agent/src/verify.rs
+Which file prefetches model weights into the page cache for fast swapping?	crates/rozum-core/src/prefetch.rs
+Which file is the gateway's resident-model manager that loads and swaps models?	crates/rozum-gateway/src/switchboard.rs|crates/rozum-models/src/resident.rs
+Which file writes the gateway's observability event log and serves its metrics?	crates/rozum-core/src/obs.rs
+Which file starts and stops child processes portably across platforms?	crates/rozum-gateway/src/procctl.rs

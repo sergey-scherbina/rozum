@@ -88,7 +88,7 @@ impl RagServer {
             // …then vectors: through the gateway when one answers (jail-safe), in-process
             // otherwise (the truly standalone case, outside any jail).
             if rag_embed::embed_via_gateway(&["probe".into()], false).await.is_some() {
-                embed_missing_via_gateway(&root).await;
+                rag_embed::embed_missing_via_gateway(&root).await;
             } else {
                 let r = root.clone();
                 let _ = tokio::task::spawn_blocking(move || rag_embed::gateway_less_warmup(&r)).await;
@@ -238,35 +238,6 @@ impl RagServer {
             "index_age_secs": age,
             "stale": age.map(|a| a > STALE_AFTER_SECS).unwrap_or(true),
         }))
-    }
-}
-
-/// The gateway-backed corpus embed, mirroring the proxy's: plan (prune+missing), batch 64,
-/// per-batch saves, shared embed lock.
-async fn embed_missing_via_gateway(root: &std::path::Path) {
-    let Ok(Some(_lock)) = rag_embed::try_embed_lock(root) else { return };
-    let chunks = crate::rag_chunk::saved_chunk_texts(root);
-    if chunks.is_empty() {
-        return;
-    }
-    let vpath = rag_embed::vectors_path(root);
-    let mut store = rag_embed::VecStore::load(&vpath, None).unwrap_or_else(|| rag_embed::VecStore::new(0));
-    let (_pruned, missing) = rag_embed::plan_embedding(&chunks, &mut store);
-    for group in missing.chunks(64) {
-        let texts: Vec<String> =
-            group.iter().map(|(id, t)| rag_embed::distill(id, t)).collect();
-        let Some(vecs) = rag_embed::embed_via_gateway(&texts, false).await else { break };
-        for (v, (id, _)) in vecs.into_iter().zip(group.iter()) {
-            if store.dim == 0 {
-                store.dim = v.len();
-            }
-            if v.len() == store.dim && store.dim > 0 {
-                store.vecs.insert(id.clone(), v);
-            }
-        }
-        if store.dim > 0 {
-            let _ = store.save(&vpath);
-        }
     }
 }
 
