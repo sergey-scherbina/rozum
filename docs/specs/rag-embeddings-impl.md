@@ -68,6 +68,31 @@ and the warmup's embedding pass runs inside the proxy's async task, so it surviv
 as the proxy — a session that exits immediately after one call leaves the vectors to the NEXT
 session's warmup, which is correct but worth knowing when testing.
 
+## The vector layer, measured (operator questions, 2026-09-01)
+
+**Search** is exact cosine over every vector — no ANN, no index structure. Measured end to end
+through the live proxy: warm fused `rag.search` answers in **42–193 ms** (first call ~1.7 s: the
+42 MB store load plus the model's lazy load), and the dot-product sweep itself is ~10–20 ms in
+Rust for 10.6k × 1024. An ANN index or an external vector DB buys nothing at this scale and costs
+a resident service, a dependency, and consistency machinery — the wrong trade until corpora are
+two orders larger. The decision is recorded WITH its numbers so the revisit threshold is visible:
+when exact search is measurably slow (100k+ chunks), HNSW-in-process is the next step, not a
+server.
+
+**Storage** is `RZV2`: per-vector `i8 + f32 scale`, dequantised to f32 at load. Swept against the
+eval before switching — f32 11/26 & 20/26, f16 11/26 & 20/26, i8 **12/26 & 20/26** (the +1 is
+noise; the point is nothing is lost) — for a 4× smaller file and per-proxy resident copy
+(42 MB → 11 MB, and every live agent session holds one). Legacy `RZV1` (f32) still loads and
+upgrades on next save, so no project re-embeds.
+
+**Freshness**: the mid-session gap is closed — `rag.search`'s incremental refresh now kicks a
+background embed pass when it re-chunked or removed files (one in flight, non-blocking, per-batch
+saves), so an edited file regains semantic retrieval within seconds instead of at the next proxy
+start. Before this, BM25 found the edit and fusion half-missed it, silently.
+
+**Discoverability**: the proxy's MCP instructions now name `rag.search` and when NOT to use it,
+so agents learn the tool exists without any client configuration.
+
 ## Out of scope
 
 - ~~Residency-ledger accounting~~ — DONE in the follow-up commit: the embedder measures the MLX

@@ -106,6 +106,17 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   (blocks-per-document, then line-length-within-a-block), which is what separated this from the
   filed-but-wrong `TreeVm` theory; `crates/rozum-agent/examples/mdbench.rs` is the instrument, and
   `TreeVm.addTop`'s per-token frame rebuild is still a real O(k²) shape that simply was not this.
+- [x] **rag-vector-layer — DONE 2026-09-01** (operator's questions about search/storage/DBs,
+  answered by measurement). Exact cosine stays: warm fused `rag.search` is 42–193 ms e2e, the
+  sweep itself ~10–20 ms at 10.6k×1024 — ANN/external vector DBs buy nothing at this scale and
+  cost a resident service; revisit threshold recorded (100k+ chunks → in-process HNSW, not a
+  server). Storage now `RZV2` i8+scale, 4× smaller (42→11 MB per store AND per live proxy copy),
+  quality swept before switching: f32 11 & 20, f16 11 & 20, i8 12 & 20 of 26 — nothing lost;
+  legacy RZV1 still loads, upgrades on next save. Fixed the mid-session freshness gap: a
+  refresh that re-chunks now kicks a background embed (one in flight), so an edited file regains
+  semantic retrieval in seconds, not at next proxy start. Proxy MCP instructions now name
+  rag.search and when NOT to use it.
+
 ### RAG: agents doing ORDINARY CODE WORK must use it (operator, 2026-08-31)
 
 The operator set both the goal and the primary case: **RAG is first of all for agents working

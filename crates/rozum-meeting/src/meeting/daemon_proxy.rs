@@ -63,7 +63,12 @@ const PROXY_INSTRUCTIONS: &str =
      so prioritize it. Call meeting.wait_my_turn for the authoritative delta, then act. The channel \
      body is a preview, not the turn API. If your client does NOT deliver <channel> events, keep a \
      meeting.wait_my_turn poll outstanding while idle so you never miss a message; you can also run \
-     `rozum meetings inbox --as <your-handle>` anytime to see messages addressed to you.";
+     `rozum meetings inbox --as <your-handle>` anytime to see messages addressed to you.\n\
+     \n\
+     This server also provides rag.search — semantic + lexical search over THIS project's code \
+     and docs, by meaning rather than exact tokens. Reach for it when you don't know the symbol \
+     or path yet (a concept, a symptom, an unfamiliar area); use your own grep/read tools when \
+     you do. Results name path#item, so treat a hit as a pointer to open.";
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RagSearchParams {
@@ -142,6 +147,9 @@ struct RagCache {
 pub struct DaemonProxy {
     state: Arc<Mutex<State>>,
     rag: Arc<Mutex<RagCache>>,
+    /// One in-flight background embed pass at a time. Without the guard, every `rag.search`
+    /// during an edit burst would stack an embed task, and each one walks the whole manifest.
+    rag_embedding: Arc<std::sync::atomic::AtomicBool>,
     tool_router: ToolRouter<Self>,
     /// Epoch-seconds of the agent's last MCP request, updated in `forward_raw`. The idle
     /// watchdog reaps a proxy whose agent has gone silent (abandoned it on reconfig) so it
@@ -260,6 +268,7 @@ impl DaemonProxy {
                 presence_announced: false,
             })),
             rag: Arc::new(Mutex::new(RagCache::default())),
+            rag_embedding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_router: Self::tool_router(),
             last_active: Arc::new(AtomicU64::new(now_epoch())),
         }
@@ -650,10 +659,30 @@ impl DaemonProxy {
                 rozum_agent::rag_chunk::reindex_incremental(&root_for_refresh, &mut |_, _, _| {})
             })
             .await;
-            if let Ok(Err(e)) = refreshed {
-                tracing::debug!(
-                    "rag.search: incremental refresh failed, serving what is on disk: {e}"
-                );
+            match refreshed {
+                // The lexical index is now fresh, but the VECTORS for re-chunked files are not:
+                // without this, a file edited mid-session loses its embedding-side retrieval
+                // until the NEXT proxy start — BM25 finds it, fusion half-misses it, silently.
+                // Kicked in the background (the search must not wait ~seconds of embedding), one
+                // in flight at a time; the store's per-batch saves make it interruptible.
+                Ok(Ok((stats, _))) if stats.rechunked > 0 || stats.removed > 0 => {
+                    if rag_embed_enabled()
+                        && !self.rag_embedding.swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        let flag = self.rag_embedding.clone();
+                        let embed_root = root.clone();
+                        tokio::spawn(async move {
+                            embed_missing_vectors(&embed_root).await;
+                            flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                        });
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(
+                        "rag.search: incremental refresh failed, serving what is on disk: {e}"
+                    );
+                }
+                _ => {}
             }
         }
 

@@ -62,12 +62,21 @@ pub fn vectors_path(root: &Path) -> PathBuf {
     root.join(".rozum").join("rag-vectors.bin")
 }
 
-const MAGIC: &[u8; 4] = b"RZV1";
+const MAGIC_V1: &[u8; 4] = b"RZV1";
+const MAGIC_V2: &[u8; 4] = b"RZV2";
 
-/// Chunk-id → L2-normalised vector. A plain binary format (magic, dim, then
-/// `u32 id-len, id, dim × f32-LE` per entry) rather than JSON: the same vectors serialised as
-/// JSON floats measured 128 MB against ~45 MB here, and this file is read on the proxy's hot
-/// path.
+/// Chunk-id → L2-normalised vector.
+///
+/// Written as **i8 + per-vector scale** (`RZV2`): each component is `round(x/scale*127)` with
+/// `scale = max|x|`. Measured on the 26-question eval against the f32 store it replaces —
+/// f32 11/26 & 20/26, f16 11/26 & 20/26, i8 12/26 & 20/26 (the +1 is one question, i.e. noise;
+/// the point is NOTHING is lost) — while the file and every proxy's resident copy shrink 4×:
+/// 42 MB → 11 MB for this repo. That multiplier matters because each live agent session holds
+/// one copy. The older f32 format (`RZV1`) is still READ, so existing stores keep serving and
+/// upgrade to `RZV2` on their next save instead of forcing a re-embed.
+///
+/// In memory vectors are f32 (dequantised at load): the dot-product loop stays trivial, and the
+/// savings that matter are disk and steady-state RAM per store copy.
 pub struct VecStore {
     pub dim: usize,
     pub vecs: HashMap<String, Vec<f32>>,
@@ -89,7 +98,9 @@ impl VecStore {
             *at += n;
             Some(s)
         };
-        if take(&mut at, 4)? != MAGIC {
+        let magic: [u8; 4] = take(&mut at, 4)?.try_into().ok()?;
+        let v2 = &magic == MAGIC_V2;
+        if !v2 && &magic != MAGIC_V1 {
             return None;
         }
         let dim = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?) as usize;
@@ -101,11 +112,15 @@ impl VecStore {
         for _ in 0..count {
             let id_len = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?) as usize;
             let id = String::from_utf8(take(&mut at, id_len)?.to_vec()).ok()?;
-            let raw = take(&mut at, dim * 4)?;
-            let v: Vec<f32> = raw
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().expect("chunks_exact(4)")))
-                .collect();
+            let v: Vec<f32> = if v2 {
+                let scale = f32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?);
+                take(&mut at, dim)?.iter().map(|&b| (b as i8) as f32 * scale / 127.0).collect()
+            } else {
+                take(&mut at, dim * 4)?
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().expect("chunks_exact(4)")))
+                    .collect()
+            };
             vecs.insert(id, v);
         }
         Some(Self { dim, vecs })
@@ -115,15 +130,17 @@ impl VecStore {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let mut out: Vec<u8> = Vec::with_capacity(16 + self.vecs.len() * (self.dim * 4 + 64));
-        out.extend_from_slice(MAGIC);
+        let mut out: Vec<u8> = Vec::with_capacity(16 + self.vecs.len() * (self.dim + 68));
+        out.extend_from_slice(MAGIC_V2);
         out.extend_from_slice(&(self.dim as u32).to_le_bytes());
         out.extend_from_slice(&(self.vecs.len() as u32).to_le_bytes());
         for (id, v) in &self.vecs {
             out.extend_from_slice(&(id.len() as u32).to_le_bytes());
             out.extend_from_slice(id.as_bytes());
+            let scale = v.iter().fold(0.0f32, |m, x| m.max(x.abs())).max(1e-12);
+            out.extend_from_slice(&scale.to_le_bytes());
             for x in v {
-                out.extend_from_slice(&x.to_le_bytes());
+                out.push(((x / scale * 127.0).round().clamp(-127.0, 127.0) as i8) as u8);
             }
         }
         // Write-temp + rename, so a reader never sees a half-written store.
@@ -234,6 +251,32 @@ mod tests {
         // A different dimension is a different MODEL; the store must refuse, not coerce.
         assert!(VecStore::load(&path, Some(8)).is_none());
         assert!(VecStore::load(&dir.path().join("missing.bin"), Some(4)).is_none());
+
+        // Quantisation error is bounded by scale/254 per component — assert the bound rather
+        // than exact equality, since v2 is lossy BY DESIGN and the eval said the loss is free.
+        let mut st = VecStore::new(3);
+        st.vecs.insert("q".into(), vec![0.7071, -0.3, 0.05]);
+        st.save(&path).unwrap();
+        let back = VecStore::load(&path, Some(3)).unwrap();
+        for (a, b) in back.vecs["q"].iter().zip([0.7071f32, -0.3, 0.05]) {
+            assert!((a - b).abs() <= 0.7071 / 254.0 + 1e-6, "{a} vs {b}");
+        }
+
+        // The legacy f32 format (RZV1) must still LOAD — existing stores keep serving and
+        // upgrade on their next save, instead of forcing every project to re-embed.
+        let mut legacy: Vec<u8> = Vec::new();
+        legacy.extend_from_slice(b"RZV1");
+        legacy.extend_from_slice(&2u32.to_le_bytes());
+        legacy.extend_from_slice(&1u32.to_le_bytes());
+        legacy.extend_from_slice(&(4u32).to_le_bytes());
+        legacy.extend_from_slice(b"a#fn");
+        for x in [0.6f32, 0.8] {
+            legacy.extend_from_slice(&x.to_le_bytes());
+        }
+        let lp = dir.path().join("legacy.bin");
+        fs::write(&lp, legacy).unwrap();
+        let old = VecStore::load(&lp, Some(2)).expect("v1 loads");
+        assert_eq!(old.vecs["a#fn"], vec![0.6, 0.8]);
     }
 
     #[test]
