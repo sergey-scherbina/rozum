@@ -1,6 +1,0 @@
-feature/rag-ab-rerun 2026-09-01T12:42:16Z
-agent: claude-code
-heartbeat: 2026-09-01T12:42:16Z
-status: in-progress
-done-so-far: prefix-reuse shipped; rerunning the A/B that was drowned by the prefill tax
-next: full 6x2 run, analyze, record results
