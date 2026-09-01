@@ -1,0 +1,4 @@
+slug: rag-scalascript-and-expansion
+agent: claude-fable (session a9af44dd)
+started: 2026-09-01T23:10Z
+task: (1) index scalascript for RAG; (2) optional query-expansion measured on rag-eval; then stage-10 reconciliation separately.
