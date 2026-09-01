@@ -1,0 +1,6 @@
+feature/rag-store-seam 2026-09-01T08:28:57Z
+agent: claude-code
+heartbeat: 2026-09-01T08:28:57Z
+status: in-progress
+done-so-far: operator asks for pluggable-store architecture + smart own impl + CLI/MCP parity
+next: VectorIndex trait, top-k selection instead of full sort, CLI fusion via in-process embedder
