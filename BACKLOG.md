@@ -106,6 +106,24 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   (blocks-per-document, then line-length-within-a-block), which is what separated this from the
   filed-but-wrong `TreeVm` theory; `crates/rozum-agent/examples/mdbench.rs` is the instrument, and
   `TreeVm.addTop`'s per-token frame rebuild is still a real O(k²) shape that simply was not this.
+- [ ] **constrained-path-prefix-reuse — THE agent-latency fix, fully diagnosed 2026-09-01.**
+  Every agent turn on this machine re-prefills its whole conversation: ~1.2 ms/token, ttft 5–10 s
+  per turn at 6–8k prompt tokens, growing with history — this is what made every RAG A/B run hit
+  its 240 s timeout in both arms, and it taxes every claude/codex session all day. The diagnosis
+  took four instrumented layers, each eliminating a hypothesis: NOT the batch path stealing jobs
+  (agent turns have tools → `should_constrain` → they are serial); NOT the VL gate (no images →
+  `vl_mm=None`); NOT the store or matcher (a lone /v1/messages pair reuses 6008/6030 tokens,
+  ttft 357 ms — the machinery is byte-exact and LIVE for unconstrained requests). The cause is
+  one early return: `run_job` routes tool-bearing jobs to `run_constrained_{dense,hybrid}` BEFORE
+  the prefix-reuse block, and `prefill_job_{dense,hybrid}` build a FRESH cache and prefill the
+  full prompt every time. Upstream-fork support already exists (`Generate.prefill_snapshot` at
+  the conv boundary, `LayerCache::{truncate,snapshot,restore}`), so the fix is to give the
+  constrained prefills the same take→truncate/restore→suffix-prefill→put cycle `run_job` has,
+  threading `&mut PrefixStore` through. Expected ~8–15× on agent-turn ttft. Diagnostic tooling
+  is in-tree behind `ROZUM_PREFIX_DEBUG` (store-miss print, BATCH_GATE decisions, path-entry
+  markers). Also fixed on the way: `is_batchable`'s long-conversation gate under-counted (Text
+  blocks only; an agent turn's volume is ToolResult/ToolUse) — now counted, though moot for
+  tool-bearing turns which are serial anyway.
 - [x] **rag-coexistence — DONE 2026-09-01.** The operator asked whether two servers on one store
   coordinate; the audit found two real gaps. Index writes were a plain overwrite — a reader
   during a sibling's refresh could see a torn file; now temp+rename like the vector store.

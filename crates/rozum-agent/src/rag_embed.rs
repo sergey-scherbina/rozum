@@ -283,6 +283,40 @@ pub fn gateway_less_warmup(root: &Path) -> std::io::Result<usize> {
     Ok(added)
 }
 
+/// Embed texts through the GATEWAY's `/v1/embeddings`. `None` on any failure — no gateway, 501,
+/// timeout — the caller falls back or degrades, never errors.
+///
+/// This exists because "in-process embedder available" is not the same as "in-process embedder
+/// SURVIVES here": under the Seatbelt jail that `rozum launch` puts agents in, lazy MLX/Metal
+/// initialisation aborts the whole process with no stderr — the first `rag.search` killed the
+/// standalone MCP server and the client saw only `MCP error -32000: Connection closed`. HTTP to
+/// 127.0.0.1 is allowed in that same jail (the agent talks to the gateway all day), so the
+/// gateway-first order is what makes the standalone server jail-safe.
+pub async fn embed_via_gateway(texts: &[String], is_query: bool) -> Option<Vec<Vec<f32>>> {
+    let url = gateway_url()?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .ok()?;
+    let resp = client
+        .post(format!("{url}/v1/embeddings"))
+        .json(&serde_json::json!({ "input": texts, "query": is_query }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: serde_json::Value = resp.json().await.ok()?;
+    let data = v["data"].as_array()?;
+    let mut out = Vec::with_capacity(data.len());
+    for row in data {
+        let emb = row.get("embedding")?.as_array()?;
+        out.push(emb.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect());
+    }
+    Some(out)
+}
+
 /// The cross-process embed lock. The BUILD lock covers only the chunking inside
 /// `refresh_in_background` and is released before any embedding starts — which was fine with one
 /// server per project and stopped being fine the day a project can have TWO (the meeting proxy

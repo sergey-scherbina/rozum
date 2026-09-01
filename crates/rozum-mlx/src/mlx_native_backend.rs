@@ -1653,7 +1653,53 @@ mod inner {
         if constrained { BATCH_SERIAL_CONSTRAINED.fetch_add(1, Relaxed); }
         if has_penalty { BATCH_SERIAL_PENALTY.fetch_add(1, Relaxed); }
         if has_seed { BATCH_SERIAL_SEED.fetch_add(1, Relaxed); }
-        !constrained && !has_penalty && !has_seed
+        // A LONG conversation stays serial, because the batch path has no cross-turn prefix
+        // reuse ("Fresh KV per job") while the serial path does — and on a shared gateway there
+        // is almost always a second pending job, so without this gate an agent's every turn
+        // re-prefilled its whole history. Measured on the live service (Qwen3.5-4B, agent turns
+        // of ~6-8k prompt tokens): ttft 5-10 s per turn, ~1.2 ms/token, pure prefill — while a
+        // serial turn extending a stored prefix prefills only the delta (id 276: 7.7k-token
+        // prompt, ttft 357 ms). Batching buys ~2x on DECODE for co-resident short jobs; prefix
+        // reuse buys ~10x on PREFILL for long ones, and prefill dominates agent turns. The
+        // estimate is chars/4 over message text — crude, but only the ORDER of magnitude
+        // matters here. `ROZUM_BATCH_MAX_PROMPT_TOKENS=0` restores unconditional batching.
+        let long_conversation = {
+            let max = std::env::var("ROZUM_BATCH_MAX_PROMPT_TOKENS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(3072);
+            max > 0 && estimate_prompt_tokens_of(&job.messages) > max
+        };
+        if std::env::var_os("ROZUM_PREFIX_DEBUG").is_some() {
+            eprintln!(
+                "BATCH_GATE: est={} long={} constrained={} penalty={} seed={} -> batchable={}",
+                estimate_prompt_tokens_of(&job.messages),
+                long_conversation, constrained, has_penalty, has_seed,
+                !constrained && !has_penalty && !has_seed && !long_conversation
+            );
+        }
+        !constrained && !has_penalty && !has_seed && !long_conversation
+    }
+
+    /// chars/4 over EVERY text-carrying block — the cheap prompt-size estimate `is_batchable`
+    /// gates on. Counting only `Text` was the first version's bug, and it silently defeated the
+    /// gate for exactly the workload it exists for: an agent turn's volume sits in `ToolResult`
+    /// bodies (file dumps, command output) and `ToolUse` args, with `Text` a few lines — so a
+    /// 6k-token turn estimated as a few hundred and stayed on the batch path, full-prefill.
+    fn estimate_prompt_tokens_of(messages: &[Message]) -> usize {
+        use crate::backend::ContentBlock as B;
+        let mut chars = 0usize;
+        for m in messages {
+            for c in &m.content {
+                match c {
+                    B::Text { text } => chars += text.len(),
+                    B::ToolResult { content, .. } => chars += content.len(),
+                    B::ToolUse { input, .. } => chars += input.to_string().len(),
+                    _ => {}
+                }
+            }
+        }
+        chars / 4
     }
 
     /// Per-row sampling params `(temp, top_k, top_p)` for `qwen3::sample_rows`, with the
@@ -1731,6 +1777,15 @@ mod inner {
     }
 
     impl PrefixStore {
+        /// Debug view of stored id sequences (dense + hybrid), for ROZUM_PREFIX_DEBUG.
+        pub(crate) fn debug_entry_ids(&self) -> Vec<Vec<u32>> {
+            self.dense
+                .iter()
+                .map(|e| e.ids.clone())
+                .chain(self.hybrid.iter().map(|e| e.ids.clone()))
+                .collect()
+        }
+
         fn new(kv_bytes_per_pos: Option<u64>) -> Self {
             let cap = std::env::var("ROZUM_PREFIX_CACHE_SLOTS")
                 .ok()
@@ -2190,6 +2245,9 @@ mod inner {
         vision: Option<&mut qwen3_5_vision::VisionModel>,
         job: Job,
     ) {
+        if std::env::var_os("ROZUM_PREFIX_DEBUG").is_some() {
+            eprintln!("ENTER run_job: msgs={} tools={}", job.messages.len(), job.tools.len());
+        }
         // Make this job's reasoning override visible to the harmony render (apply_gptoss_reasoning).
         // gpt-oss tool jobs are constrained → serial here, so a per-job thread-local is exact.
         REQ_REASONING.with(|c| *c.borrow_mut() = job.sampling.reasoning_effort.clone());
@@ -2368,6 +2426,28 @@ mod inner {
         // VL requests can't reuse a token prefix: the vision embeds are spliced onto
         // the image tokens and the mm prefill is single-pass over the whole prompt.
         let prefix_enabled = prefix_enabled && vl_mm.is_none();
+        // ROZUM_PREFIX_DEBUG=1: when a reuse MISSES, print where the best stored entry
+        // diverges from this prompt — the one number that separates "the client mutates the
+        // head" from "our own render drifts at the last assistant turn". Reads the store
+        // without consuming entries.
+        if prefix_enabled && std::env::var_os("ROZUM_PREFIX_DEBUG").is_some() {
+            let ids_dbg: Vec<Vec<u32>> = store.debug_entry_ids();
+            let mut best = (0usize, 0usize, 0usize); // (common, entry_len, idx)
+            for (i, e) in ids_dbg.iter().enumerate() {
+                let common = e.iter().zip(prompt_ids.iter()).take_while(|(a, b)| a == b).count();
+                if common > best.0 {
+                    best = (common, e.len(), i);
+                }
+            }
+            eprintln!(
+                "PREFIX_DEBUG: prompt={} entries={} best_common={} of entry_len={} (idx {})",
+                prompt_ids.len(),
+                ids_dbg.len(),
+                best.0,
+                best.1,
+                best.2
+            );
+        }
         if prefix_enabled && dense {
             if let Some((rl, c)) = store.take_dense(&prompt_ids) {
                 reuse_len = rl;
@@ -4433,6 +4513,9 @@ mod inner {
         jobs: &mut mpsc::UnboundedReceiver<Job>,
         cap: usize,
     ) -> Vec<Job> {
+        if std::env::var_os("ROZUM_PREFIX_DEBUG").is_some() {
+            eprintln!("ENTER run_batch n={}", initial.len());
+        }
         use mlx_lm::models::qwen3::set_batch_pad_offsets;
         use mlx_rs::ops::indexing::{take_axis, IndexOp, NewAxis};
         use mlx_rs::ops::{arange, concatenate_axis};
@@ -4741,6 +4824,9 @@ mod inner {
         jobs: &mut mpsc::UnboundedReceiver<Job>,
         cap: usize,
     ) -> Vec<Job> {
+        if std::env::var_os("ROZUM_PREFIX_DEBUG").is_some() {
+            eprintln!("ENTER run_batch_hybrid n={}", initial.len());
+        }
         use mlx_lm::models::qwen3_5::{set_batch_pad_mask, set_batch_pad_offsets, LayerCache};
         use mlx_rs::ops::indexing::{take_axis, IndexOp, NewAxis};
         use mlx_rs::ops::{arange, concatenate_axis};

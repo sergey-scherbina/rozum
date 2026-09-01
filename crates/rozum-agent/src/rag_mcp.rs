@@ -78,10 +78,20 @@ impl RagServer {
             return;
         }
         let root = self.root.clone();
-        tokio::task::spawn_blocking(move || {
-            match rag_embed::gateway_less_warmup(&root) {
-                Ok(n) if n > 0 => eprintln!("rag warmup: {n} vectors embedded"),
-                _ => {}
+        tokio::spawn(async move {
+            // Index first (blocking, cross-process lock)…
+            let r = root.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::rag_chunk::refresh_in_background(&r, &mut |_, _, _| {})
+            })
+            .await;
+            // …then vectors: through the gateway when one answers (jail-safe), in-process
+            // otherwise (the truly standalone case, outside any jail).
+            if rag_embed::embed_via_gateway(&["probe".into()], false).await.is_some() {
+                embed_missing_via_gateway(&root).await;
+            } else {
+                let r = root.clone();
+                let _ = tokio::task::spawn_blocking(move || rag_embed::gateway_less_warmup(&r)).await;
             }
         });
     }
@@ -172,13 +182,23 @@ impl RagServer {
             Some(vs) => {
                 // The embedder is in-process here (the engine binary registers it); a build
                 // without it answers None and we stay lexical, visibly.
-                let q = query.clone();
-                let emb = tokio::task::spawn_blocking(move || {
-                    rozum_core::embedding::embed(&[q], true)
-                })
-                .await;
-                match emb {
-                    Ok(Some(Ok(qv))) if qv.first().is_some_and(|v| v.len() == vs.dim()) => {
+                // GATEWAY FIRST, in-process second — order is load-bearing: under the agent
+                // jail the in-process path aborts the whole server at Metal init (the client
+                // sees only "Connection closed"), while 127.0.0.1 HTTP is allowed there.
+                let qv = match rag_embed::embed_via_gateway(&[query.clone()], true).await {
+                    Some(v) => Some(v),
+                    None => {
+                        let q = query.clone();
+                        tokio::task::spawn_blocking(move || {
+                            rozum_core::embedding::embed(&[q], true).and_then(Result::ok)
+                        })
+                        .await
+                        .ok()
+                        .flatten()
+                    }
+                };
+                match qv {
+                    Some(qv) if qv.first().is_some_and(|v| v.len() == vs.dim()) => {
                         let ranked = vs.search(&qv[0], k.max(5) * 4);
                         let mut hits = rag_embed::fuse(&bm25, &ranked, k);
                         for h in &mut hits {
@@ -208,6 +228,35 @@ impl RagServer {
             "index_age_secs": age,
             "stale": age.map(|a| a > STALE_AFTER_SECS).unwrap_or(true),
         }))
+    }
+}
+
+/// The gateway-backed corpus embed, mirroring the proxy's: plan (prune+missing), batch 64,
+/// per-batch saves, shared embed lock.
+async fn embed_missing_via_gateway(root: &std::path::Path) {
+    let Ok(Some(_lock)) = rag_embed::try_embed_lock(root) else { return };
+    let chunks = crate::rag_chunk::saved_chunk_texts(root);
+    if chunks.is_empty() {
+        return;
+    }
+    let vpath = rag_embed::vectors_path(root);
+    let mut store = rag_embed::VecStore::load(&vpath, None).unwrap_or_else(|| rag_embed::VecStore::new(0));
+    let (_pruned, missing) = rag_embed::plan_embedding(&chunks, &mut store);
+    for group in missing.chunks(64) {
+        let texts: Vec<String> =
+            group.iter().map(|(id, t)| rag_embed::distill(id, t)).collect();
+        let Some(vecs) = rag_embed::embed_via_gateway(&texts, false).await else { break };
+        for (v, (id, _)) in vecs.into_iter().zip(group.iter()) {
+            if store.dim == 0 {
+                store.dim = v.len();
+            }
+            if v.len() == store.dim && store.dim > 0 {
+                store.vecs.insert(id.clone(), v);
+            }
+        }
+        if store.dim > 0 {
+            let _ = store.save(&vpath);
+        }
     }
 }
 
