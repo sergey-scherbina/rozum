@@ -27,6 +27,11 @@ cargo errors) — landed in scalascript `main` 2026-08-30. Integration seam on t
 already exists: `src/rag_lite.rs` (BM25 `LexicalIndex`, `Retriever` trait, `search_documents`
 tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
 
+- [ ] **rag-ann-threshold-watch** — scalascript's index is 94,849 chunks, the FIRST corpus near
+  the recorded ~100k exact-search threshold (docs/specs/rag-embeddings-impl.md). Before building
+  any ANN structure, MEASURE fused search latency on scalascript under real agent load; exact
+  search stays until the measurement says otherwise. Query expansion already measured NEGATIVE
+  (22/25 & 25/25 identical to base) — do not re-propose without a new eval delta.
 - [x] **rag-uniml-parser-quadratic — DONE 2026-08-31.** `Markdown_parse` was O(bytes²); it is now
   linear in size for ordinary documents, and phase 2 (code) shipped on top of it. 256 KB went
   173.4 s → 0.108 s (~1600×) over four rounds, each of which killed the previous round's cause:
