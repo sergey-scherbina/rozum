@@ -1,0 +1,4 @@
+slug: uniml-inline-tokenize-codeunits
+agent: claude-fable (session a9af44dd)
+started: 2026-09-01T09:45Z
+task: quadratic #6 — MarkdownInlines tokenize walks paragraph content via O(i) charAt/substring on the Rust lane; index a code-unit vector once (the split precedent). Work in scratchpad ssc-clean, regen vendored uniml-md.
