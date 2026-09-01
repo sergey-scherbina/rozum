@@ -98,7 +98,28 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   separate fixes, each documented at its site — the sharpest being that the widened rewrite
   composed with `cloneIfMoved` into `&xs.clone()`, so the signature said `&Vec` while the call
   still copied and the optimisation read as applied while measuring as absent.
-- [ ] **uniml-single-frame-residual-superlinear — TWO of THREE quadratics fixed 2026-09-01.**
+- [ ] **uniml-single-frame-residual-superlinear — FIVE quadratics down, ONE left (tokenize) 2026-09-01.**
+  `ssc-local-last-use-move` (docs/specs/ssc-local-last-use-move.md) landed #3+#4+#5 in one pass:
+  #3 backend local-last-use moves (`_localLastUseMoves`, position-keyed) — step's exit
+  constructor moves stack/topEdges/roots; #4 backend loop-local FIELD moves
+  (`_localFieldMovePos`) — `vmState = stepped.state` no longer deep-clones the whole VmState per
+  token in BOTH UniML.parse driver loops (position-keyed because the two sibling loops both name
+  their local `stepped`); #5 source-level — MarkdownLexer.split's tail recursion was a REAL
+  recursion on the Rust lane concatenating the whole lines vector per line; now imperative
+  while + in-place push. Worst case 64 KB/6400 lines **10.59 s → 0.232 s (×45.6)** same-window;
+  long-line docs unchanged; scalascript `86449b44b`+`cf3a60ec8`+`3377ceb77`, goldens 512/512,
+  rozum-agent 164/164. REMAINING — contributor #6, profiled exactly at 25,600 lines: a
+  blank-line-free doc is ONE paragraph and `MarkdownInlines_parse`→`tokenize` walks its whole
+  content via `_str_code_at`/`_str_substring` (O(i) JVM-code-unit emulation; 3277+1543 of ~5000
+  samples). Fix = the split precedent (index a code-unit Vector once), applied to tokenize and
+  its String+index helpers (`isExtendedAutolinkStart` et al.) — a signatures refactor of the
+  inline lexer, own claim. Curve till then ~×3.7/doubling on the pathological shape only; real
+  docs have blank lines → small paragraphs. ALSO FILED HERE: latent PRE-EXISTING backend gap —
+  `for`-loop rendering does not clone an OUTER local read by value in the body (while has
+  loopExempt; for never did): `for x <- xs do val cur = St(boxed.items)` emits E0382 Rust
+  today, unrelated to the move passes.
+  Original entry follows for the instrument and history.
+  **(superseded) TWO of THREE quadratics fixed 2026-09-01.**
   Worst case 64 KB (6400 short lines): 29.3 s → 12.9 s (hot-top, #1) → **8.7 s**
   (ssc-owned-field-move, #2: the backend now MOVES a single-read field of an owned by-value
   param when every bare use precedes it — scalascript `7a5551b99` on

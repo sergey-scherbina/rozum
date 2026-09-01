@@ -1,4 +1,0 @@
-slug: ssc-local-last-use-move
-agent: claude-fable (session a9af44dd)
-started: 2026-09-01T09:00Z
-task: backend last-use liveness for LOCALS in RustCodeWalk — quadratic #3: exit-side VmState { stack: stack.clone(), topEdges: topEdges.clone() } should MOVE locals at their last use. Work in scratchpad ssc-clean (feature/treevm-top-edges-prestage10), regen vendored uniml-md after.
