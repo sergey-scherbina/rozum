@@ -1,0 +1,4 @@
+slug: rag-ab-expanded
+agent: claude-fable (session a9af44dd)
+started: 2026-09-01T20:35Z
+task: expand rag-ab.sh 6->15 questions, run 2 runs/arm, publish results in rag-embeddings-impl spec.
