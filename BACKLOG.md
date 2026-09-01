@@ -281,10 +281,14 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   defect one layer down. Also corrected a comment in `rag_chunk.rs` that named `maxBlocks` as the
   example of a working limit while it was dead (the test it describes has always used `maxNodes`,
   which is enforced — the test was sound, the comment was not).
-- [ ] **uniml-remaining-dead-limits** — `maxDelimiterRun` and `maxFenceCodePoints` are still
-  ACCEPTED and never read. Both live in the inline lexer rather than the block driver, which is
-  why they were not bundled with the two above. Same argument applies: a limit nobody enforces is
-  worse than one that is absent, because it is the one a caller builds on.
+- [x] **uniml-remaining-dead-limits — DONE 2026-09-01** (scalascript `bf602f46e`, vendored here).
+  `maxDelimiterRun` is checked in the BLOCK driver rather than threaded through the inline lexer:
+  a delimiter run cannot cross a line ending, so the longest run in any line bounds what the
+  inline lexer will ever walk — one O(line) scan where `limits` already lives.
+  `maxFenceCodePoints` counts the OPEN fence's body, reset at each FenceOpen; per-fence and not
+  cumulative is pinned by a test, because a cumulative counter would make the limit depend on how
+  many code blocks a document has. All six `MarkdownLimits` fields are now enforced, tested at
+  BOTH layers (Scala suite + the vendored Rust crate rozum actually runs).
 - [x] **rag-syntactic-rust-dialect — DONE.** `uniml/rust` exists in scalascript (`RustLexer` +
   `RustDialect`, structural: keyword + brace-depth item finder, string/comment aware) and
   `rag_chunk::chunk_code` parses `.rs` through it, so code is chunked by item rather than by

@@ -1119,6 +1119,32 @@ mod tests {
             chunks.iter().map(|c| &c.id).collect::<Vec<_>>()
         );
 
+        // The second pair, enforced later than the first (uniml-remaining-dead-limits): a
+        // delimiter run and a fence body. Same reason to test here: the vendored Rust crate is
+        // the layer rozum runs, and a limit lost in the lowering is the same defect again.
+        let mut run_limited = default_limits();
+        run_limited.maxDelimiterRun = 4;
+        let chunks =
+            chunk_markdown_with_limits("d.md", "ok\n******** long run\n", run_limited);
+        assert!(
+            chunks.iter().all(|c| c.id.contains("#p")),
+            "a delimiter-run halt must fall back to chunk_text, got {:?}",
+            chunks.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+
+        let mut fence_limited = default_limits();
+        fence_limited.maxFenceCodePoints = 8;
+        let chunks = chunk_markdown_with_limits(
+            "d.md",
+            "```\nthis body is far longer than eight code points\n```\n",
+            fence_limited,
+        );
+        assert!(
+            chunks.iter().all(|c| c.id.contains("#p")),
+            "a fence-limit halt must fall back to chunk_text, got {:?}",
+            chunks.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+
         // And the defaults must not fire on an ordinary document: a limit that trips in normal use
         // silently costs every file its heading structure, which is exactly what the cap saga cost.
         let ok = chunk_markdown_with_limits("d.md", "# T\n\nbody\n\n## S\n\nmore\n", default_limits());
