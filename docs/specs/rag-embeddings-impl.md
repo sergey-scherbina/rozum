@@ -152,6 +152,23 @@ name (`mcp__rozum__rag_search` vs `mcp__rozum-rag__rag_search`). It IS redundant
 sees two identical tools and pays schema tokens for both — so the guidance is either/or: the
 meeting proxy if you use meetings (retrieval rides along free), `rozum rag mcp` if you do not.
 
+## The A/B verdict (2026-09-01, after the prefix-reuse fix unblocked it)
+
+`scripts/bench/rag-ab.sh`, 6 locate-questions × 2 arms × 2 runs, claude × resident Qwen3.5-4B
+through the shared gateway, agent jailed in a throwaway worktree of this repo. The first attempts
+drowned in the constrained-path prefill tax (both arms timing out at 240 s); with
+`constrained-prefix-reuse` shipped and `ROZUM_VERIFY=0` set (the launch verify-gate was eating
+~half the cap building the workspace), the bench finally measures retrieval:
+
+- **Correct file found: bare 4/12, rag 9/12.** The model calls `rag.search` unprompted in every
+  rag-arm run (14 calls / 12 runs) with sensible queries.
+- **Turns to answer: bare ~9, rag ~6** — retrieval replaces guessed-keyword grep loops (the
+  bare arm twice ran into the gateway loop-breaker on four identical greps).
+- Both arms failed Q5 (auto-context) in run 1 — the answer file's doc comment describes
+  "shortening" as "summarize+drop", the question said "fits into the context window"; the
+  eval-set lesson again: phrasing sits or misses the doc vocabulary.
+- bare is high-variance between runs (3/6 then 1/6); rag is steadier (5/6 then 4/6).
+
 ## Out of scope
 
 - ~~Residency-ledger accounting~~ — DONE in the follow-up commit: the embedder measures the MLX

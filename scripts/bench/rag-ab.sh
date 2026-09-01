@@ -67,7 +67,11 @@ run_one() { # $1=arm(rag|bare) $2=qnum $3=question $4=expect $5=run
     aargs+=(--mcp-config "$MCP_CFG")
   fi
   local log="$OUT/$arm-$qn-$rn.jsonl"
-  ( cd "$wt" && timeout "$TIMEOUT_S" "$BIN" launch --gateway-url "$GATEWAY" \
+  # ROZUM_VERIFY=0: without it `rozum launch` follows the agent run with its verify-gate —
+  # `cargo build && cargo test` over the throwaway worktree of this whole workspace — which
+  # dwarfs the agent's own time (measured: agent done in 103 s, then the gate ate the rest of
+  # the 240 s cap). agentic.sh sets the same for the same reason.
+  ( cd "$wt" && timeout "$TIMEOUT_S" env ROZUM_VERIFY=0 "$BIN" launch --gateway-url "$GATEWAY" \
       --no-channel-wakeup --no-piggyback --lean "${aargs[@]}" ) > "$log" 2>"$log.err"
   local rc=$?
 
