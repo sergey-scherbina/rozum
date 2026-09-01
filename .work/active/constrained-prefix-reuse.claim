@@ -1,0 +1,6 @@
+feature/constrained-prefix-reuse 2026-09-01T11:35:56Z
+agent: claude-code
+heartbeat: 2026-09-01T11:35:56Z
+status: in-progress
+done-so-far: diagnosis complete (BACKLOG constrained-path-prefix-reuse); worktree up; spec next
+next: spec, thread PrefixStore into constrained prefills, byte-exact test, deploy from MAIN checkout
