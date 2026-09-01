@@ -1,0 +1,6 @@
+feature/rag-embeddings-build 2026-09-01T05:54:41Z
+agent: claude-code
+heartbeat: 2026-09-01T05:54:41Z
+status: in-progress
+done-so-far: operator decided BUILD; all parameters measured (distilled text, "implements" instruction, 255-token cap, token-budget batching + cache limit, RRF k=10 wEmb=2)
+next: spec, then embedder in rozum-mlx, /v1/embeddings on the gateway, vector store + fusion in rozum-agent, proxy wiring with BM25 fallback
