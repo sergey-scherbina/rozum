@@ -2264,17 +2264,17 @@ mod inner {
             let driver =
                 ToolConstraint::from_job(&job, glm, harmony).expect("constrained job has tools");
             return if is_hybrid_arch(model) {
-                run_constrained_hybrid(model, tokenizer, template, eos, job, driver)
+                run_constrained_hybrid(model, tokenizer, template, eos, job, driver, store)
             } else {
-                run_constrained_dense(model, tokenizer, template, eos, job, driver)
+                run_constrained_dense(model, tokenizer, template, eos, job, driver, store)
             };
         }
         if (is_dense(model) || is_hybrid_arch(model)) && job.sampling.response_schema.is_some() {
             let driver = ResponseConstraint::from_job(&job).expect("response_schema present");
             return if is_hybrid_arch(model) {
-                run_constrained_hybrid(model, tokenizer, template, eos, job, driver)
+                run_constrained_hybrid(model, tokenizer, template, eos, job, driver, store)
             } else {
-                run_constrained_dense(model, tokenizer, template, eos, job, driver)
+                run_constrained_dense(model, tokenizer, template, eos, job, driver, store)
             };
         }
         let mut prompt_ids = match render_prompt(
@@ -4309,7 +4309,7 @@ mod inner {
         mut cache: Vec<C>,
         mut logits: Array,
         forward: fn(&mut LoadedModel, &Array, &mut Vec<C>) -> Result<Array, Exception>,
-    ) {
+    ) -> Option<Vec<C>> {
         use mlx_rs::ops::indexing::{IndexOp, NewAxis};
         // Precompute the `"` (double-quote) token ID once — used by the premature-string-close
         // guard in sample_constrained. Scanning the vocab each step would be O(vocab); do it
@@ -4353,11 +4353,14 @@ mod inner {
                         .job
                         .events
                         .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
-                    return;
+                    // A mid-generation failure leaves the cache mid-token — hand back
+                    // nothing so the caller never persists an inconsistent prefix.
+                    return None;
                 }
             };
         }
         seq.finalize();
+        Some(cache)
     }
 
     /// Effective output ceiling (`ROZUM_MAX_OUTPUT_TOKENS`, 0 = off).
@@ -4393,6 +4396,7 @@ mod inner {
         eos: &[u32],
         job: Job,
         driver: D,
+        store: &mut PrefixStore,
     ) {
         let mut opts = sampler_opts_of(&job);
         // gpt-oss CoT collapses into a repetition loop under greedy/near-greedy decode (no tool call →
@@ -4410,12 +4414,26 @@ mod inner {
         if let Some(s) = job.sampling.seed {
             let _ = mlx_rs::random::seed(s);
         }
-        let (seq, cache, logits) =
-            match prefill_job_dense(model, tokenizer, template, output_ceiling(), job) {
+        let (seq, cache, logits, prompt_ids, conv_len) =
+            match prefill_job_dense(model, tokenizer, template, output_ceiling(), job, Some(store)) {
                 Some(x) => x,
                 None => return,
             };
-        constrained_decode_loop(model, tokenizer, eos, driver, opts, seq, cache, logits, dense_step);
+        let max_tokens = seq.max_tokens;
+        let advanced = constrained_decode_loop(
+            model, tokenizer, eos, driver, opts, seq, cache, logits, dense_step,
+        );
+        // Persist for the next turn, keyed by the conversation boundary — run_job's rule.
+        // Only on a clean finish: a poisoned cache is worse than no cache.
+        let prefix_enabled =
+            !matches!(std::env::var("ROZUM_PREFIX_CACHE").as_deref(), Ok("0"));
+        if prefix_enabled
+            && let Some(cache) = advanced
+            && !cache.is_empty()
+            && let Some(ids) = prompt_ids.get(..conv_len).map(<[u32]>::to_vec)
+        {
+            store.put_dense(ids, cache, prompt_ids.len().saturating_add(max_tokens));
+        }
     }
 
     /// Hybrid (Qwen3.6) constrained decode — same masked loop as the dense path, over the
@@ -4428,17 +4446,30 @@ mod inner {
         eos: &[u32],
         job: Job,
         driver: D,
+        store: &mut PrefixStore,
     ) {
         let opts = sampler_opts_of(&job);
         if let Some(s) = job.sampling.seed {
             let _ = mlx_rs::random::seed(s);
         }
-        let (seq, cache, logits) =
-            match prefill_job_hybrid(model, tokenizer, template, output_ceiling(), job) {
+        let (seq, cache, logits, prompt_ids, conv_len, snap) =
+            match prefill_job_hybrid(model, tokenizer, template, output_ceiling(), job, Some(store)) {
                 Some(x) => x,
                 None => return,
             };
-        constrained_decode_loop(model, tokenizer, eos, driver, opts, seq, cache, logits, hybrid_step);
+        let max_tokens = seq.max_tokens;
+        let advanced = constrained_decode_loop(
+            model, tokenizer, eos, driver, opts, seq, cache, logits, hybrid_step,
+        );
+        let prefix_enabled =
+            !matches!(std::env::var("ROZUM_PREFIX_CACHE").as_deref(), Ok("0"));
+        if prefix_enabled
+            && let Some(cache) = advanced
+            && let Some(snap) = snap
+            && let Some(ids) = prompt_ids.get(..conv_len).map(<[u32]>::to_vec)
+        {
+            store.put_hybrid(ids, cache, snap, prompt_ids.len().saturating_add(max_tokens));
+        }
     }
 
     /// Render + prefill ONE job on the dense path, building its `BatchSeq` + per-layer KV
@@ -4451,7 +4482,11 @@ mod inner {
         template: &str,
         ceiling: usize,
         job: Job,
-    ) -> Option<(BatchSeq, Vec<Option<ConcatKeyValueCache>>, Array)> {
+        // `Some` on the constrained/serial path (reuse + persist); `None` from run_batch,
+        // whose rows keep the pre-existing fresh-KV behavior (multi-row reuse is out of scope
+        // — docs/specs/constrained-prefix-reuse.md).
+        store: Option<&mut PrefixStore>,
+    ) -> Option<(BatchSeq, Vec<Option<ConcatKeyValueCache>>, Array, Vec<u32>, usize)> {
         use mlx_rs::ops::indexing::{IndexOp, NewAxis};
         let prompt_ids =
             match render_prompt(tokenizer, template, &job.model_id, &job.messages, &job.tools) {
@@ -4461,12 +4496,43 @@ mod inner {
                     return None;
                 }
             };
+        // Conversation boundary for the put-key, same rule as run_job: the generation-prompt
+        // tail does not recur next turn, so persisting past it would never match.
+        let conv_len = render_prompt_opt(
+            tokenizer, template, &job.model_id, &job.messages, &job.tools, false,
+        )
+        .map(|c| c.len().min(prompt_ids.len()))
+        .unwrap_or(prompt_ids.len());
         let max_tokens = {
             let want = job.sampling.max_tokens.map(|m| m as usize).unwrap_or(DEFAULT_MAX_TOKENS);
             if ceiling == 0 { want } else { want.min(ceiling) }
         };
-        let prompt = Array::from(&prompt_ids[..]).index(NewAxis);
+        // Prefix reuse — the same take → truncate → suffix-prefill cycle as run_job. This is
+        // the constrained (tool-bearing) path, i.e. EVERY agent turn: without this each turn
+        // re-prefilled its whole history (see docs/specs/constrained-prefix-reuse.md).
+        let prefix_enabled =
+            !matches!(std::env::var("ROZUM_PREFIX_CACHE").as_deref(), Ok("0"));
         let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+        let mut reuse_len = 0usize;
+        if prefix_enabled && let Some(store) = store {
+            if let Some((rl, c)) = store.take_dense(&prompt_ids) {
+                reuse_len = rl;
+                cache = c;
+                for c in cache.iter_mut().flatten() {
+                    c.truncate(reuse_len as i32);
+                }
+            }
+        }
+        if reuse_len > 0 && std::env::var_os("ROZUM_PREFIX_DEBUG").is_some() {
+            eprintln!(
+                "CONSTRAINED_REUSE reuse={reuse_len}/{} (prefill {} new tokens)",
+                prompt_ids.len(),
+                prompt_ids.len() - reuse_len
+            );
+        }
+        // `mask: None` is correct for the suffix too: the model builds its causal mask from
+        // the cache offset, so this is byte-exact against a fresh full prefill.
+        let prompt = Array::from(&prompt_ids[reuse_len..]).index(NewAxis);
         let logits = match dense_forward(model, &prompt, None, &mut cache) {
             Ok(l) => l,
             Err(e) => {
@@ -4493,7 +4559,7 @@ mod inner {
             // this is false at the hybrid prefill.
             harmony: gptoss_constrain_enabled() && is_gpt_oss(model),
         };
-        Some((seq, cache, row))
+        Some((seq, cache, row, prompt_ids, conv_len))
     }
 
     /// Batched (continuous) decode for a wave of greedy dense requests: prefill each
@@ -4536,8 +4602,8 @@ mod inner {
         let mut caches: Vec<Vec<Option<ConcatKeyValueCache>>> = Vec::new();
         let mut logit_rows: Vec<Array> = Vec::new();
         for job in initial {
-            if let Some((seq, cache, row)) =
-                prefill_job_dense(model, tokenizer, template, ceiling, job)
+            if let Some((seq, cache, row, _, _)) =
+                prefill_job_dense(model, tokenizer, template, ceiling, job, None)
             {
                 logit_rows.push(row);
                 caches.push(cache);
@@ -4632,8 +4698,8 @@ mod inner {
                     deferred.push(job);
                     continue;
                 }
-                let (mut nseq, ncache, nrow) =
-                    match prefill_job_dense(model, tokenizer, template, ceiling, job) {
+                let (mut nseq, ncache, nrow, _, _) =
+                    match prefill_job_dense(model, tokenizer, template, ceiling, job, None) {
                         Some(t) => t,
                         None => continue,
                     };
@@ -4758,7 +4824,16 @@ mod inner {
         template: &str,
         ceiling: usize,
         job: Job,
-    ) -> Option<(BatchSeq, Vec<qwen3_5::LayerCache>, Array)> {
+        // `Some` on the constrained path; `None` from run_batch_hybrid (fresh KV per row).
+        store: Option<&mut PrefixStore>,
+    ) -> Option<(
+        BatchSeq,
+        Vec<qwen3_5::LayerCache>,
+        Array,
+        Vec<u32>,
+        usize,
+        Option<Vec<qwen3_5::LinearSnap>>,
+    )> {
         use mlx_rs::ops::indexing::{IndexOp, NewAxis};
         let prompt_ids =
             match render_prompt(tokenizer, template, &job.model_id, &job.messages, &job.tools) {
@@ -4768,20 +4843,78 @@ mod inner {
                     return None;
                 }
             };
+        let conv_len = render_prompt_opt(
+            tokenizer, template, &job.model_id, &job.messages, &job.tools, false,
+        )
+        .map(|c| c.len().min(prompt_ids.len()))
+        .unwrap_or(prompt_ids.len());
         let max_tokens = {
             let want = job.sampling.max_tokens.map(|m| m as usize).unwrap_or(DEFAULT_MAX_TOKENS);
             if ceiling == 0 { want } else { want.min(ceiling) }
         };
-        let prompt = Array::from(&prompt_ids[..]).index(NewAxis);
-        let mut cache = hybrid_init_cache(model);
-        let logits = match hybrid_prefill(model, &prompt, &mut cache) {
-            Ok(l) => l,
-            Err(e) => {
-                let _ = job
-                    .events
-                    .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
-                return None;
+        // Reuse: truncate the Full (KV) layers to the stored conversation and restore the
+        // Linear (GatedDeltaNet) recurrent state from its boundary snapshot — the same cycle
+        // as run_job's hybrid arm (docs/specs/constrained-prefix-reuse.md).
+        let prefix_enabled =
+            !matches!(std::env::var("ROZUM_PREFIX_CACHE").as_deref(), Ok("0"));
+        let mut cache;
+        let mut reuse_len = 0usize;
+        if prefix_enabled
+            && let Some(store) = store
+            && let Some((rl, mut c, snap)) = store.take_hybrid(&prompt_ids)
+        {
+            reuse_len = rl;
+            for (layer, sn) in c.iter_mut().zip(snap.iter()) {
+                layer.truncate(rl as i32);
+                layer.restore(sn);
             }
+            cache = c;
+        } else {
+            cache = hybrid_init_cache(model);
+        }
+        if reuse_len > 0 && std::env::var_os("ROZUM_PREFIX_DEBUG").is_some() {
+            eprintln!(
+                "CONSTRAINED_REUSE reuse={reuse_len}/{} (prefill {} new tokens)",
+                prompt_ids.len(),
+                prompt_ids.len() - reuse_len
+            );
+        }
+        // Two-phase prefill around the conversation boundary: the Linear layers cannot be
+        // truncated positionally, so the ONLY way to reuse them next turn is a snapshot taken
+        // exactly at conv_len — prefill [reuse..conv_len), snapshot, then [conv_len..).
+        // Causality makes the split byte-exact; the fork's prefill is chunked internally
+        // anyway. `reuse_len <= conv_len` always holds (stored entries are conv-truncated).
+        let mut send_fail = |e: String, job: &Job| {
+            let _ = job.events.send(Err(ModelError::BackendUnavailable(e)));
+        };
+        let mut snap: Option<Vec<qwen3_5::LinearSnap>> = None;
+        let mut logits: Option<Array> = None;
+        if conv_len > reuse_len {
+            let phase1 = Array::from(&prompt_ids[reuse_len..conv_len]).index(NewAxis);
+            match hybrid_prefill(model, &phase1, &mut cache) {
+                Ok(l) => logits = Some(l),
+                Err(e) => {
+                    send_fail(format!("mlx: {e}"), &job);
+                    return None;
+                }
+            }
+        }
+        snap = Some(cache.iter().map(|c| c.snapshot()).collect());
+        if prompt_ids.len() > conv_len {
+            let phase2 = Array::from(&prompt_ids[conv_len..]).index(NewAxis);
+            match hybrid_prefill(model, &phase2, &mut cache) {
+                Ok(l) => logits = Some(l),
+                Err(e) => {
+                    send_fail(format!("mlx: {e}"), &job);
+                    return None;
+                }
+            }
+        }
+        let Some(logits) = logits else {
+            // Degenerate: nothing to prefill (prompt fully reused AND no gen tail) — cannot
+            // happen with a real template (the gen prompt is always new), so treat as error.
+            send_fail("mlx: empty prefill".into(), &job);
+            return None;
         };
         let row = logits.index((.., -1, ..)); // [1, vocab]
         let mut to_eval: Vec<&Array> = vec![&row];
@@ -4805,7 +4938,7 @@ mod inner {
             // this is false at the hybrid prefill.
             harmony: gptoss_constrain_enabled() && is_gpt_oss(model),
         };
-        Some((seq, cache, row))
+        Some((seq, cache, row, prompt_ids, conv_len, snap))
     }
 
     /// Hybrid (Qwen3.6 dense + MoE) batched decode. Mirror of [`run_batch`], but over the
@@ -4848,8 +4981,8 @@ mod inner {
         let mut caches: Vec<Vec<LayerCache>> = Vec::new();
         let mut logit_rows: Vec<Array> = Vec::new();
         for job in initial {
-            if let Some((seq, cache, row)) =
-                prefill_job_hybrid(model, tokenizer, template, ceiling, job)
+            if let Some((seq, cache, row, _, _, _)) =
+                prefill_job_hybrid(model, tokenizer, template, ceiling, job, None)
             {
                 logit_rows.push(row);
                 caches.push(cache);
@@ -5031,8 +5164,8 @@ mod inner {
                     deferred.push(job);
                     continue;
                 }
-                let (mut nseq, ncache, nrow) =
-                    match prefill_job_hybrid(model, tokenizer, template, ceiling, job) {
+                let (mut nseq, ncache, nrow, _, _, _) =
+                    match prefill_job_hybrid(model, tokenizer, template, ceiling, job, None) {
                         Some(t) => t,
                         None => continue,
                     };
@@ -7107,6 +7240,90 @@ mod tests {
     // Prefix-KV reuse must be byte-exact: a turn-2 request that reuses turn-1's KV
     // prefix (same backend → same worker) must produce the IDENTICAL output to the
     // same turn-2 conversation prefilled fresh (a second, history-less backend).
+    // The constrained-path twin of the reuse gates below: a TOOL-BEARING request (which is
+    // what routes into run_constrained_*) must produce the identical tool call whether its
+    // turn-2 prompt extends a warm store or hits a cold one. Guards the whole cycle this spec
+    // added: take → truncate → suffix-prefill → put, keyed at the conversation boundary.
+    // Runs on the HYBRID arch (Qwen3.5-4B — the production model), which exercises the
+    // delicate half: two-phase prefill with the Linear-state snapshot at the conversation
+    // boundary. The dense arm shares the same take/truncate/put shape minus the snapshot.
+    //   cargo test --features mlx-native -- --ignored --nocapture constrained_reuse
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3.5-4B-MLX-4bit"]
+    async fn constrained_reuse_matches_fresh() {
+        use super::MlxNativeBackend;
+        use crate::backend::{
+            ChatBackend, ChatEvent, ChatRequest, ContentBlock, Message, Role, SamplingParams,
+            ToolDef,
+        };
+        use futures::StreamExt as _;
+        use tokio_util::sync::CancellationToken;
+
+        // The constrained path answers in TOOL events, not text — collect_to_string would
+        // compare two empty strings and pass vacuously. Serialize every event instead.
+        async fn dump(mut stream: crate::backend::ChatStream) -> String {
+            let mut out = String::new();
+            while let Some(ev) = stream.next().await {
+                match ev {
+                    Ok(ChatEvent::TextDelta { text }) => out.push_str(&text),
+                    Ok(ChatEvent::ToolUseStart { name, .. }) => {
+                        out.push_str(&format!("[tool:{name}]"))
+                    }
+                    Ok(ChatEvent::ToolUseDelta { input_json_delta, .. }) => {
+                        out.push_str(&input_json_delta)
+                    }
+                    Ok(ChatEvent::ToolUseEnd { .. }) => out.push_str("[end]"),
+                    Ok(_) => {}
+                    Err(e) => out.push_str(&format!("[err:{e}]")),
+                }
+            }
+            out
+        }
+
+        let dir = resolve_model_dir("mlx-community:Qwen3.5-4B-MLX-4bit")
+            .expect("Qwen3.5-4B-MLX-4bit not in HF cache");
+        let tool = ToolDef {
+            name: "get_weather".into(),
+            description: "Get the weather for a city".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "city": { "type": "string" } },
+                "required": ["city"]
+            }),
+        };
+        let asst = |s: &str| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: s.into() }],
+        };
+        let req = |msgs: Vec<Message>| ChatRequest {
+            messages: msgs,
+            tools: vec![tool.clone()],
+            sampling: SamplingParams { max_tokens: Some(64), ..Default::default() },
+            cancel: CancellationToken::new(),
+            session_id: None,
+        };
+        let q1 = "Briefly: what is a barometer?";
+        let q2 = "Now check the weather in Paris using the tool.";
+
+        let a = MlxNativeBackend::new(dir.clone(), "mlx-community/Qwen3.5-4B-MLX-4bit".into(), None)
+            .await
+            .expect("load A");
+        let t1 = dump(a.chat(req(vec![Message::user(q1)])).await.unwrap()).await;
+        let convo2 = vec![Message::user(q1), asst(&t1), Message::user(q2)];
+        let warm = dump(a.chat(req(convo2.clone())).await.unwrap()).await;
+
+        let b = MlxNativeBackend::new(dir, "mlx-community/Qwen3.5-4B-MLX-4bit".into(), None)
+            .await
+            .expect("load B");
+        let fresh = dump(b.chat(req(convo2)).await.unwrap()).await;
+
+        assert_eq!(warm, fresh, "constrained reuse must be byte-exact vs a fresh prefill");
+        assert!(
+            warm.contains("[tool:get_weather]"),
+            "the constrained path should actually have produced a tool call: {warm}"
+        );
+    }
+
     //   cargo test --features mlx-native -- --ignored --nocapture mlx_prefix_reuse_byte_exact
     #[cfg(feature = "mlx-native")]
     #[tokio::test]
