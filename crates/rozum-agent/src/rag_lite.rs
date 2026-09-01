@@ -335,6 +335,17 @@ fn is_test_chunk(id: &str, text: &str) -> bool {
     if id.contains("/tests/") {
         return true;
     }
+    // Scala/JVM conventions (`rag-scalascript-and-expansion`): the moment the scalascript
+    // repository was indexed, `TreeVmSpec.scala` — living in `src/test/scala/`, named `*Spec` —
+    // filled the whole top-5 for "tree VM step" ahead of `TreeVm.scala`, for the same reason
+    // rust tests did before their demotion: spec names are English sentences.
+    let path = id.split('#').next().unwrap_or(id);
+    if path.contains("/src/test/") || path.contains("/test-jvm/") {
+        return true;
+    }
+    if path.ends_with("Spec.scala") || path.ends_with("Test.scala") || path.ends_with(".test.ts") {
+        return true;
+    }
     let head: String = text.chars().take(120).collect();
     let head = head.trim_start();
     head.starts_with("#[test]") || head.starts_with("#[tokio::test]") || head.starts_with("#[cfg(test)]")

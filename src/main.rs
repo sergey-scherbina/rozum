@@ -8770,7 +8770,11 @@ async fn run_rag(action: RagAction) {
                 // fusion's semantic half simply does not know them until a server warmup
                 // happens to run. One cheap gateway batch per 64 missing chunks; a dead
                 // gateway degrades quietly to BM25 for exactly those chunks, as before.
-                rozum::rag_embed::embed_missing_via_gateway(&root).await;
+                // Budgeted: 4 batches (256 chunks) per search — a freshly indexed LARGE repo
+                // must not turn one search into a synchronous full-corpus embed (scalascript's
+                // 94k chunks measured ~25 min); the catch-up is incremental across searches,
+                // and server warmups stay uncapped.
+                rozum::rag_embed::embed_missing_via_gateway_budgeted(&root, Some(4)).await;
             }
             let Some(index) = rag_chunk::load_project_index(&root) else {
                 eprintln!(

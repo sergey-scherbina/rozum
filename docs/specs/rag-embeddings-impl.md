@@ -240,6 +240,28 @@ fused.** Not comparable to the lost 21/26 (different questions); this is the num
 retrieval changes are measured against. The three top-5-only questions are the genuinely
 hard phrasings (auto_context "shortening", constrain grammar-vs-driver, verify gate).
 
+### Multi-repo coverage + the expansion verdict (2026-09-01, `rag-scalascript-and-expansion`)
+
+- **scalascript is indexed**: 7,845 files → **94,849 chunks** — and its first indexing run paid
+  for itself instantly: a deeply indented blockquote in their own `tests/SPRINT.md` PANICKED
+  the parser (a `.get` whose gate checked the trimmed line while the strip re-checked the raw
+  one; fixed at the uniml source, official corpus nonPassAxes 75 → 72 including the crashing
+  status axis), and `TreeVmSpec.scala` filled a whole top-5 because the test demotion knew
+  only Rust conventions (now also `/src/test/`, `/test-jvm/`, `*Spec.scala`, `*Test.scala`,
+  `*.test.ts`). `.scala`/`.ssc` chunk as prose until a Scala uniml dialect exists — BM25 +
+  embeddings still work over them.
+- **94,849 chunks sits NEAR the recorded ~100k exact-search threshold** — scalascript is the
+  first corpus where an ANN index may start paying; measure search latency there before
+  building anything.
+- **Embed catch-up is budgeted now**: the CLI's post-refresh embed takes at most 4×64 chunks
+  per search — the uncapped form turned the first search on freshly indexed scalascript into a
+  ~25-minute synchronous full-corpus embed. Per-batch saves make the catch-up incremental;
+  server warmups stay uncapped.
+- **Query expansion: measured, NEGATIVE, not shipped.** `rag-eval --expand` (one gateway
+  completion rewriting the question into keywords, appended to the query): top-1 22/25 and
+  top-5 25/25 — identical to base on this set. One chat call of latency for zero points; the
+  mode stays in the eval for future re-measurement, production search stays single-query.
+
 ## Out of scope
 
 - ~~Residency-ledger accounting~~ — DONE in the follow-up commit: the embedder measures the MLX

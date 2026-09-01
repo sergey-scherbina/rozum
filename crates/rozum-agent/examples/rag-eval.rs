@@ -23,7 +23,16 @@ fn file_of(id: &str) -> &str {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let mut args = std::env::args().skip(1);
+    let mut expand = false;
+    let mut rest: Vec<String> = Vec::new();
+    for a in std::env::args().skip(1) {
+        if a == "--expand" {
+            expand = true;
+        } else {
+            rest.push(a);
+        }
+    }
+    let mut args = rest.into_iter();
     let qpath = args
         .next()
         .map(PathBuf::from)
@@ -53,6 +62,18 @@ async fn main() {
     let pool = k.max(5) * 4;
     let (mut top1, mut top5, mut fused_runs) = (0usize, 0usize, 0usize);
     for (q, expects) in &questions {
+        // --expand: one short gateway completion turns the question into extra code-search
+        // keywords, appended to the query for BOTH halves. Measured mode — the summary line
+        // says which mode produced the numbers.
+        let q_search = if expand {
+            match expand_query(q).await {
+                Some(kw) => format!("{q} {kw}"),
+                None => q.clone(),
+            }
+        } else {
+            q.clone()
+        };
+        let q = &q_search;
         let bm25 = rag_lite::search_balanced(&index, q, pool);
         let hits = match &vecs {
             Some(vs) => match rag_embed::embed_via_gateway(std::slice::from_ref(q), true).await {
@@ -99,5 +120,30 @@ async fn main() {
     } else {
         "MIXED (gateway flaked mid-run — rerun)"
     };
-    println!("\ntop-1 {top1}/{n}   top-5 {top5}/{n}   [{mode}]");
+    let em = if expand { " +expand" } else { "" };
+    println!("\ntop-1 {top1}/{n}   top-5 {top5}/{n}   [{mode}{em}]");
+}
+
+/// One short completion against the local gateway: the question rewritten as search keywords.
+/// None on any failure — expansion must never fail a search.
+async fn expand_query(q: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .ok()?;
+    let body = serde_json::json!({
+        "model": "default",
+        "messages": [{"role": "user", "content": format!(
+            "Rewrite as 5-8 code-search keywords, output ONLY the keywords: {q}")}],
+        "max_tokens": 60,
+    });
+    let resp = client
+        .post("http://127.0.0.1:8089/v1/chat/completions")
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    let text = v["choices"][0]["message"]["content"].as_str()?.trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
 }

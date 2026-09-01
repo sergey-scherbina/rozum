@@ -1185,7 +1185,9 @@ impl MarkdownBlocks {
         }
         fn openBlockquoteAndReprocess(lines: &Vec<MdLine>, index: i64, line: MdLine, content: String, blockLimitHit: &mut Option<Diagnostic>, blocksOpened: &mut i64, containers: &mut Vec<Container>, fenceCp: &mut i64, frames: &mut Vec<String>, gfm: bool, indentedCodeBlanks: &mut Vec<(String, String)>, indentedCodePendingPrefix: &mut String, limits: MarkdownLimits, nextId: &mut i64, open: &mut OpenLeaf, out: &mut Vec<VmToken>, paragraphPendingPrefix: &mut String, paragraphSegs: &mut Vec<ParaSeg>, pendingClose: &mut Vec<String>, pos: &mut SourcePosition, profile: MarkdownProfile, refs: &std::collections::HashMap<String, LinkRef>, source: SourceId, __self: &MarkdownBlocks) -> i64 {
             finishParagraph(blockLimitHit, blocksOpened, frames, indentedCodeBlanks, limits.clone(), nextId, open, out, paragraphPendingPrefix, paragraphSegs, pendingClose, pos, profile.clone(), refs, source.clone(), __self);
-            let stripped = __self.stripBlockquoteMarker(&content).clone().unwrap();
+            let stripped = __self.stripBlockquoteMarker(&content).unwrap_or({ let leadLen = indentPrefixLength(content.clone());
+            let inner = __self.stripBlockquoteMarker(&crate::runtime::_str_substring_from(&content, leadLen)).clone().unwrap();
+            (format!("{}{}", crate::runtime::_str_substring(&content, 0i64, leadLen), inner.0), inner.1.clone()) });
             let lead = indentPrefixLength(content.clone());
             if ((lead > 0i64) && !(stripped.0.starts_with(&(crate::runtime::_str_substring(&content, 0i64, lead))))) { (); } else { (); }
             flushPending("markdown.blockquote-marker".to_string(), stripped.0.clone(), &vec![FrameSpec { kind: "markdown.blockquote".to_string(), role: None }], Some("marker".to_string()), TokenChannel::Syntax.clone(), blockLimitHit, blocksOpened, frames, limits.clone(), nextId, open, out, pendingClose, pos, source.clone(), __self);

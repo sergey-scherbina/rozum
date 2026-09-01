@@ -348,6 +348,16 @@ pub fn try_embed_lock(root: &Path) -> std::io::Result<Option<std::fs::File>> {
 /// file. A dead gateway breaks the loop quietly and the search stays BM25-backed for the
 /// missing chunks, exactly as before.
 pub async fn embed_missing_via_gateway(root: &std::path::Path) {
+    embed_missing_via_gateway_budgeted(root, None).await
+}
+
+/// The budgeted form: `max_batches` caps how many 64-chunk batches ONE call embeds. The CLI
+/// passes a small cap — on a freshly indexed large repository (scalascript: 94k chunks) the
+/// uncapped call turned the first `rag search` into a ~25-minute synchronous embed of the
+/// whole corpus. Per-batch saves make the catch-up incremental: every capped call banks its
+/// batches, later calls (or a server warmup, which stays uncapped) finish the rest, and the
+/// fusion's semantic half grows with each search instead of blocking one.
+pub async fn embed_missing_via_gateway_budgeted(root: &std::path::Path, max_batches: Option<usize>) {
     let Ok(Some(_lock)) = try_embed_lock(root) else { return };
     let chunks = crate::rag_chunk::saved_chunk_texts(root);
     if chunks.is_empty() {
@@ -356,7 +366,8 @@ pub async fn embed_missing_via_gateway(root: &std::path::Path) {
     let vpath = vectors_path(root);
     let mut store = VecStore::load(&vpath, None).unwrap_or_else(|| VecStore::new(0));
     let (_pruned, missing) = plan_embedding(&chunks, &mut store);
-    for group in missing.chunks(64) {
+    let cap = max_batches.unwrap_or(usize::MAX);
+    for group in missing.chunks(64).take(cap) {
         let texts: Vec<String> =
             group.iter().map(|(id, t)| distill(id, t)).collect();
         let Some(vecs) = embed_via_gateway(&texts, false).await else { break };
