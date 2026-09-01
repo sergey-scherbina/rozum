@@ -1,0 +1,4 @@
+slug: rag-ab-failure-forensics
+agent: claude-fable (session a9af44dd)
+started: 2026-09-01T21:30Z
+task: dissect the 5 rag-arm failures of rag-ab-expanded; find fixable causes (ranking/snippets/chunking) vs question defects.
