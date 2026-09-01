@@ -5234,6 +5234,7 @@ dependencies = [
  "chrono",
  "futures",
  "rand 0.8.6",
+ "reqwest 0.12.28",
  "rmcp",
  "rozum-core",
  "rozum-models",

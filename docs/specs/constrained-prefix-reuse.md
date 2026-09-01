@@ -26,19 +26,19 @@ No public surface changes. Internal:
 
 ## Behavior
 
-- [ ] A dense constrained request whose prompt extends a stored conversation truncates the
+- [x] A dense constrained request whose prompt extends a stored conversation truncates the
       stored KV to the shared prefix and prefills only the suffix.
-- [ ] A hybrid constrained request restores the Linear (GatedDeltaNet) state from the stored
+- [x] A hybrid constrained request restores the Linear (GatedDeltaNet) state from the stored
       conversation-boundary snapshot, truncates the Full layers, and prefills only the suffix.
-- [ ] After generation the advanced cache is re-inserted keyed by the conversation boundary
+- [x] After generation the advanced cache is re-inserted keyed by the conversation boundary
       (`conv_len`, the render WITHOUT the generation prompt), so the next turn matches.
-- [ ] The hybrid snapshot is taken exactly at `conv_len` — two-phase prefill
+- [x] The hybrid snapshot is taken exactly at `conv_len` — two-phase prefill
       (`[reuse..conv_len)` → snapshot → `[conv_len..)`) — so restore-on-reuse is byte-exact.
-- [ ] Byte-exactness: a constrained generation with reuse produces the same tool call as the
+- [x] Byte-exactness: a constrained generation with reuse produces the same tool call as the
       same request against a fresh cache (asserted by test on the dense path; the hybrid
       truncate/restore primitives are covered by the existing `mlx_prefix_reuse_byte_exact_hybrid`).
-- [ ] A prompt with no stored prefix behaves exactly as before (fresh full prefill).
-- [ ] A cancelled/failed generation does not poison the store (no put without a clean finish).
+- [x] A prompt with no stored prefix behaves exactly as before (fresh full prefill).
+- [x] A cancelled/failed generation does not poison the store (no put without a clean finish).
 
 ## Out of scope
 
@@ -73,6 +73,20 @@ snapshots between them. Phase splitting is safe because prefill is causal and th
 
 ## Results
 
-_To be filled at verify time — measured, not predicted. Planned measurements: the 3-turn agent
-probe (`rozum launch --lean claude -p`, `ROZUM_PREFIX_DEBUG=1`) before/after on the live
-service, and the byte-exact reuse-vs-fresh gate on the dense path._
+Measured on the live service (Qwen3.5-4B hybrid, launchd `com.rozum.gateway`), 3-turn agent
+probe `rozum launch --lean claude -p …` with `ROZUM_PREFIX_DEBUG=1`:
+
+- **Before** (diagnosis runs): every turn full-prefilled — ttft 4.2–4.7 s at ~5.6k prompt
+  tokens, ~1.2 ms/token, every turn of every agent.
+- **After, warm model**: a turn that extends the conversation logs
+  `CONSTRAINED_REUSE reuse=5027/5248 (prefill 221 new tokens)` and answers with
+  **ttft 410 ms** (prompt 5681) — **~11×**. A NEW conversation's first turn still
+  full-prefills (5.2 s at 5.6k), which is correct — there is nothing to reuse.
+- The win grows with history: the reused prefix, not the suffix, is what stops being
+  re-prefilled.
+- Byte-exact gate `constrained_reuse_matches_fresh` (hybrid, the production arch): warm-store
+  vs cold-store two-turn TOOL conversation, full event stream (tool name + arg JSON) identical;
+  first run reused 257/325 tokens. The gate compares the serialized EVENT stream, because the
+  first version compared `collect_to_string` outputs and passed vacuously on two empty strings —
+  constrained answers are tool events, not text.
+- 53/53 rozum-mlx units, 161/161 rozum-gateway.
