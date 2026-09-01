@@ -1,6 +1,0 @@
-feature/rag-ab-bench 2026-09-01T09:07:20Z
-agent: claude-code
-heartbeat: 2026-09-01T09:07:20Z
-status: in-progress
-done-so-far: room notified; matrix idle; designing A/B locate-bench, new files only
-next: scripts/bench/rag-ab.sh + questions, run claude x resident-4B with/without rozum-rag MCP, report
