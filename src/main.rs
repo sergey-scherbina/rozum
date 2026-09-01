@@ -8748,9 +8748,35 @@ fn run_rag(action: RagAction) {
                 );
                 std::process::exit(1);
             };
-            // The same selection the `rag.search` tool uses — one policy, two readers, so the
-            // CLI cannot quietly disagree with what an agent sees.
-            let hits = rozum::rag_lite::search_balanced(&index, &query, k);
+            // The same selection AND fusion the `rag.search` tool uses — one policy, two
+            // readers, so the CLI cannot quietly disagree with what an agent sees. This binary
+            // carries the embedder in-process (the same hook the gateway serves over HTTP), so
+            // the CLI fuses without a gateway when vectors exist; without them, or in a build
+            // without the model, it is BM25 exactly as before.
+            let bm25 = rozum::rag_lite::search_balanced(&index, &query, k);
+            let vecs = rozum::rag_embed::VecStore::load(&rozum::rag_embed::vectors_path(&root), None);
+            let hits = match vecs {
+                Some(vs) => {
+                    use rozum::rag_embed::VectorIndex as _;
+                    match rozum_core::embedding::embed(&[query.clone()], true) {
+                        Some(Ok(qv)) if qv.first().is_some_and(|v| v.len() == vs.dim()) => {
+                            let ranked = vs.search(&qv[0], k.max(5) * 4);
+                            let mut fused = rozum::rag_embed::fuse(&bm25, &ranked, k);
+                            for h in &mut fused {
+                                if h.text.is_empty()
+                                    && let Some(t) = index.text_of(&h.id)
+                                {
+                                    h.text = t.to_string();
+                                }
+                            }
+                            eprintln!("(fused: BM25 + embeddings)");
+                            fused
+                        }
+                        _ => bm25,
+                    }
+                }
+                None => bm25,
+            };
             if hits.is_empty() {
                 println!("no hits");
                 return;

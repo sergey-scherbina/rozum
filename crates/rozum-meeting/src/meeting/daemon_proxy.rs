@@ -758,8 +758,10 @@ impl DaemonProxy {
         let mut fused = false;
         let picked = match (&vecs, rag_embed_enabled()) {
             (Some(vs), true) => match embed_query_via_gateway(&query).await {
-                Some(qv) if qv.len() == vs.dim => {
-                    let ranked = vs.rank(&qv, k.max(5) * 4);
+                // `vs` is used through the `VectorIndex` seam, so an external store slots in
+                // here without this call site changing.
+                Some(qv) if qv.len() == rozum_agent::rag_embed::VectorIndex::dim(vs.as_ref()) => {
+                    let ranked = rozum_agent::rag_embed::VectorIndex::search(vs.as_ref(), &qv, k.max(5) * 4);
                     let mut hits = rozum_agent::rag_embed::fuse(&bm25, &ranked, k);
                     for h in &mut hits {
                         if h.text.is_empty()

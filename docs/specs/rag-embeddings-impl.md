@@ -93,6 +93,25 @@ start. Before this, BM25 found the edit and fusion half-missed it, silently.
 **Discoverability**: the proxy's MCP instructions now name `rag.search` and when NOT to use it,
 so agents learn the tool exists without any client configuration.
 
+## Pluggable stores (operator direction, 2026-09-01)
+
+`rag_embed::VectorIndex` is the seam an external store implements — Qdrant, LanceDB, a remote
+service, or the in-process `VecStore`, interchangeably. Its shape encodes three decisions that
+make external stores SAFE rather than merely possible:
+
+- ids are chunk ids (`path#item`), vectors only — chunk text stays in the lexical index, never
+  duplicated into a store;
+- vectors are L2-normalised f32 at the boundary regardless of internal representation, so the
+  contract "dot == cosine" is stated once;
+- store state is always derivable from the chunk manifest — a cache by construction — so a dead
+  or corrupt external store degrades to BM25, never to wrong answers.
+
+Both consumers (the proxy's `rag.search` and the CLI) already call through the trait. The CLI
+now FUSES too, through the in-process embedder hook this binary already carries — one policy,
+two readers, no gateway required for `rozum rag search`. Top-k inside `VecStore` selects with
+`select_nth_unstable` (O(n)) and sorts only the winners, rather than sorting all n scores for
+the five the caller wants.
+
 ## Out of scope
 
 - ~~Residency-ledger accounting~~ — DONE in the follow-up commit: the embedder measures the MLX

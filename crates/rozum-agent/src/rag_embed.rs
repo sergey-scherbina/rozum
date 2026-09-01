@@ -65,6 +65,33 @@ pub fn vectors_path(root: &Path) -> PathBuf {
 const MAGIC_V1: &[u8; 4] = b"RZV1";
 const MAGIC_V2: &[u8; 4] = b"RZV2";
 
+/// The seam an external vector store would implement — Qdrant, LanceDB, a remote service, or
+/// the in-process [`VecStore`] below, interchangeably.
+///
+/// Shaped by what the CALLERS actually need, not by what stores offer, so a backend can be
+/// swapped without touching retrieval logic:
+///
+/// - ids are the chunk ids the rest of RAG already speaks (`path#item`) — the store never sees
+///   text, only vectors, so chunk content stays in the lexical index and is never duplicated;
+/// - vectors are L2-normalised f32 at this boundary, whatever the store keeps internally
+///   (RZV2 keeps i8+scale; a server-side store may keep its own quantisation) — the CONTRACT is
+///   "dot product == cosine", and normalisation is the caller's obligation stated once, here;
+/// - `sync` is a full-state reconcile (upsert + prune to exactly `these ids`), not a CRUD
+///   surface: retrieval state is always derivable from the chunk manifest, so the store is a
+///   cache by construction and can be dropped and rebuilt at any time. That property is what
+///   makes external stores SAFE to adopt — a dead or corrupt store degrades to BM25, never to
+///   wrong answers.
+///
+/// The trait is sync; an HTTP-backed impl would wrap its own runtime the way the proxy's embed
+/// calls already do. `dim` guards cross-model mixing at the boundary, same rule as the file
+/// format: a dimension change is a model change, and the store must refuse rather than coerce.
+pub trait VectorIndex: Send + Sync {
+    fn dim(&self) -> usize;
+    fn len(&self) -> usize;
+    /// Ranked `(id, score)` by cosine, best first.
+    fn search(&self, query: &[f32], k: usize) -> Vec<(String, f32)>;
+}
+
 /// Chunk-id → L2-normalised vector.
 ///
 /// Written as **i8 + per-vector scale** (`RZV2`): each component is `round(x/scale*127)` with
@@ -149,18 +176,40 @@ impl VecStore {
         fs::rename(tmp, path)
     }
 
-    /// Ranked ids by cosine (dot product — vectors are normalised), best first. Exact search on
-    /// purpose: 10.5k × 1024 dims is ~10 ms, and ANN machinery earns nothing until corpora are
-    /// two orders larger.
+    /// Ranked ids by cosine (dot product — vectors are normalised), best first.
+    ///
+    /// Exact search on purpose: the sweep is ~10–20 ms at 10.6k × 1024 and an ANN structure
+    /// earns nothing until corpora are two orders larger (the threshold and the next step —
+    /// in-process HNSW, not a server — are recorded in `docs/specs/rag-embeddings-impl.md`).
+    /// "Exact" still doesn't mean careless: top-k is selected with `select_nth_unstable`
+    /// (O(n) average) and only the k winners are sorted, instead of sorting all n scores for
+    /// the five the caller wants.
     pub fn rank(&self, query: &[f32], k: usize) -> Vec<(String, f32)> {
-        let mut scored: Vec<(String, f32)> = self
+        let mut scored: Vec<(f32, &str)> = self
             .vecs
             .iter()
-            .map(|(id, v)| (id.clone(), v.iter().zip(query).map(|(a, b)| a * b).sum::<f32>()))
+            .map(|(id, v)| (v.iter().zip(query).map(|(a, b)| a * b).sum::<f32>(), id.as_str()))
             .collect();
-        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        if scored.is_empty() || k == 0 {
+            return Vec::new();
+        }
+        let k = k.min(scored.len());
+        scored.select_nth_unstable_by(k - 1, |a, b| b.0.total_cmp(&a.0));
         scored.truncate(k);
-        scored
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        scored.into_iter().map(|(s, id)| (id.to_string(), s)).collect()
+    }
+}
+
+impl VectorIndex for VecStore {
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn len(&self) -> usize {
+        self.vecs.len()
+    }
+    fn search(&self, query: &[f32], k: usize) -> Vec<(String, f32)> {
+        self.rank(query, k)
     }
 }
 

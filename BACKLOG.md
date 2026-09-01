@@ -106,6 +106,14 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   (blocks-per-document, then line-length-within-a-block), which is what separated this from the
   filed-but-wrong `TreeVm` theory; `crates/rozum-agent/examples/mdbench.rs` is the instrument, and
   `TreeVm.addTop`'s per-token frame rebuild is still a real O(k²) shape that simply was not this.
+- [x] **rag-store-seam — DONE 2026-09-01.** `VectorIndex` trait = the seam an external vector
+  store (Qdrant/Lance/remote) implements; `VecStore` is its in-process impl and both consumers
+  call through it. Three safety decisions in the shape: ids-only (text never duplicated into a
+  store), L2-normalised f32 at the boundary whatever the store keeps inside, and store state
+  always derivable from the manifest — a cache by construction, so a dead store degrades to BM25,
+  never to wrong answers. Top-k via `select_nth_unstable` (O(n)) instead of full sort. CLI
+  `rozum rag search` now FUSES through the in-process embedder hook (same binary, no gateway) —
+  parity with the MCP tool verified live on the same query, same top hits.
 - [x] **rag-vector-layer — DONE 2026-09-01** (operator's questions about search/storage/DBs,
   answered by measurement). Exact cosine stays: warm fused `rag.search` is 42–193 ms e2e, the
   sweep itself ~10–20 ms at 10.6k×1024 — ANN/external vector DBs buy nothing at this scale and
