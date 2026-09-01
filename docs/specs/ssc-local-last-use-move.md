@@ -24,23 +24,23 @@ No language-surface change. Backend-internal:
 
 ## Behavior
 
-- [ ] A local `val`/`var` read once at the def's tail (returned constructor / call / bare return)
+- [x] A local `val`/`var` read once at the def's tail (returned constructor / call / bare return)
   is MOVED — no `.clone()` — when no later use exists.
-- [ ] The move is keyed by POSITION: earlier reads of the same local still clone; only the
+- [x] The move is keyed by POSITION: earlier reads of the same local still clone; only the
   max-position occurrence moves.
-- [ ] Occurrences count as uses wherever they appear: value reads, field projections
+- [x] Occurrences count as uses wherever they appear: value reads, field projections
   (`n.field`), method receivers (`n.len()`), assignment LHS/RHS. Only a bare value read can BE
   the move; anything else at max position simply means no move fires.
-- [ ] A local whose max-position occurrence sits inside a `while`/`for` body or a
+- [x] A local whose max-position occurrence sits inside a `while`/`for` body or a
   lambda/closure is NOT moved (may execute more than once / later than its position).
-- [ ] A local captured by a lifted local def counts a use at EVERY call site of that def
+- [x] A local captured by a lifted local def counts a use at EVERY call site of that def
   (transitively through nested-def calls): a call after the last plain read keeps the clone.
   A lifted def referenced outside call position disqualifies its captures entirely.
-- [ ] A name declared more than once in the def (shadowing) is disqualified.
-- [ ] `lazy val`s and def params are excluded (params belong to `_ownedFieldMoves`).
-- [ ] All existing backend goldens stay green, modulo reviewed expected-text updates where a
+- [x] A name declared more than once in the def (shadowing) is disqualified.
+- [x] `lazy val`s and def params are excluded (params belong to `_ownedFieldMoves`).
+- [x] All existing backend goldens stay green, modulo reviewed expected-text updates where a
   tail clone legitimately disappears — each such diff is a sound move, checked individually.
-- [ ] Vendored `uniml-md` regenerated from the fixed backend: the `step` exit constructor moves
+- [x] Vendored `uniml-md` regenerated from the fixed backend: the `step` exit constructor moves
   `stack`/`topEdges` (verbatim `stack: stack,` in the generated file), rozum tests green.
 
 ## Out of scope
@@ -80,4 +80,40 @@ in a branch not taken never happens.
 
 ## Results
 
-_To be filled at verify time._
+**Three backend/source fixes landed under this slug (quadratics #3, #4, #5 of
+`uniml-single-frame-residual-superlinear`), scalascript
+`feature/treevm-top-edges-prestage10` `86449b44b` + `cf3a60ec8` + `3377ceb77`:**
+
+1. **#3 — locals at last use** (`_localLastUseMoves`, this spec's original scope): the generated
+   `step`'s exit constructor now MOVES `stack`/`topEdges`/`nodeCount`/`lastTokenId`/`roots`
+   (verbatim `stack: stack,` at the tail). The captured-by-`record` smalls (`diags`, counters,
+   `halted`) still clone — `record` is eta-mentioned (`foreach(record)`), which poisons its
+   captures by design; they are O(1)-ish per token.
+2. **#4 — loop-local fields** (`_localFieldMovePos`, position-keyed): `val stepped =
+   vm.step(vmState, token); vmState = stepped.state` in BOTH driver loops of `UniML.parse` no
+   longer deep-clones the whole accumulated VmState per token (`vmState = stepped.state;`).
+   Name-keying would have seen the two sibling `stepped`s as shadowing — hence positions.
+3. **#5 — the line lexer itself** (source-level, like hot-top): `MarkdownLexer.split`'s
+   tail-recursive accumulator lowered to a REAL recursion concatenating the whole `lines` vector
+   per line (85% of a 12,800-line parse). Imperative `while` + self-append push; JVM semantics
+   suite 52/52 unchanged.
+
+**Measured (64 KB as 6400 short lines, min-of-3, same machine window):
+10.59 s → 0.232 s — ×45.6.** Ordinary long-line docs unchanged (0.216 s vs 0.211 s).
+Cumulative for the campaign: 29.3 s (pre-hot-top) → 0.23 s — ×126.
+Backend goldens 512/512 (5 new under this slug); rozum-agent 164/164 against the regenerated
+vendored crate.
+
+**The curve is STILL ~×3.7/doubling on this pathological shape** — contributor #6, profiled
+exactly: a blank-line-free document is ONE paragraph, and `MarkdownInlines_parse` → `tokenize`
+walks that whole content with `_str_code_at`/`_str_substring` (the O(i) JVM-code-unit emulation
+over UTF-8; 3277+1543 of ~5000 samples at 25,600 lines). The fix is the one `split` already
+documents — index a code-unit vector, not the string — applied to the inline tokenizer and its
+helpers (`isExtendedAutolinkStart` et al. take the String by position). Filed in BACKLOG; real
+documents have blank lines, so their paragraphs stay small and this tail does not dominate.
+
+**Latent pre-existing gap found while pinning the negative golden:** the `for`-loop rendering
+does not clone an OUTER local read by value inside the body (the `needs()` comment names the
+gap for `while`, later widened via `loopExempt` — the `for` site never was): `for x <- xs do
+val cur = St(boxed.items)` emits non-compiling Rust (E0382) with or without this pass. The
+golden is spelled with `while` for exactly that reason.
