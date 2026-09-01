@@ -1,0 +1,4 @@
+slug: ssc-rust-lifted-def-return-types
+agent: claude-fable (session a9af44dd)
+started: 2026-09-01T11:20Z
+task: backend gap — a LIFTED LOCAL def declared return type never reaches _returnTypes, so return-type-driven lowerings (.isDefined/.get) fail with "no field isDefined on type Option<T>". Record it where lifting computes param types. Repro golden first (verify the backlog claim), then fix in scratchpad ssc-clean.
