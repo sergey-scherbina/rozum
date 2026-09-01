@@ -810,7 +810,7 @@ impl LiteralProcessor {
             (index += 1i64); } else { emit((char).to_string(), true, &mut nextTokenId, &mut out, &mut position, source.clone());
             (index += 1i64); } }
         };
-        ProcessBatch { values: out.clone(), diagnostics: Vec::new() }
+        ProcessBatch { values: out, diagnostics: Vec::new() }
     }
 }
 impl MarkdownBlocks {
@@ -1362,7 +1362,7 @@ impl MarkdownBlocks {
         closeDangling(&mut frames, &mut open, &mut out);
         match blockLimitHit.or_else(|| fenceLimitHit) {
             Some(d) => MarkdownBlockResult { tokens: Vec::new(), diagnostics: vec![d] },
-            None => MarkdownBlockResult { tokens: out.clone(), diagnostics: diagnostics.clone() },
+            None => MarkdownBlockResult { tokens: out, diagnostics: diagnostics },
         } } } } } }
     }
 
@@ -1472,7 +1472,7 @@ impl MarkdownBlocks {
             (acc += (window[(linesUsed) as usize].clone().raw().len() as i64));
             (linesUsed += 1i64);
         };
-        Some(RefDef { indent: crate::runtime::_str_substring(&joined, 0i64, labelStart), labelLex: labelLex.clone(), colon: ":".to_string(), afterColon: crate::runtime::_str_substring(&joined, afterColonStart, destStart), destLex: crate::runtime::_str_substring(&joined, destStart, destEnd), betweenDestTitle: betweenSlice, titleLex: titleSlice, trailing: crate::runtime::_str_substring(&joined, bodyEnd, lineEnd), linesConsumed: linesUsed }).filter(|__p0| { (__p0.consumedText() == consumed) })
+        Some(RefDef { indent: crate::runtime::_str_substring(&joined, 0i64, labelStart), labelLex: labelLex, colon: ":".to_string(), afterColon: crate::runtime::_str_substring(&joined, afterColonStart, destStart), destLex: crate::runtime::_str_substring(&joined, destStart, destEnd), betweenDestTitle: betweenSlice, titleLex: titleSlice, trailing: crate::runtime::_str_substring(&joined, bodyEnd, lineEnd), linesConsumed: linesUsed }).filter(|__p0| { (__p0.consumedText() == consumed) })
     }
 
     pub fn lineIsBlankAt(&self, joined: &String, from: i64) -> bool {
@@ -1518,7 +1518,7 @@ impl MarkdownBlocks {
             if (k < ((*segs).len() as i64)) { out.push(segs[(k.clone()) as usize].clone().prefix); } else { (); } } else { (); }
             (i += 1i64);
         };
-        (self.withLexeme(piece.clone(), (out).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join("")), k.clone()) } }
+        (self.withLexeme(piece.clone(), (out).iter().map(|__e| format!("{}", __e)).collect::<Vec<String>>().join("")), k) } }
     }
 
     pub fn pieceLexeme(&self, piece: InlinePiece) -> String {
@@ -1686,7 +1686,7 @@ impl MarkdownInstructionProcessor {
         let profile = self.profile.clone();
         let limits = self.limits.clone();
         let result = MarkdownBlocks::new(source, profile, limits).parse(state);
-        ProcessBatch { values: result.tokens.clone(), diagnostics: result.diagnostics.clone() }
+        ProcessBatch { values: result.tokens, diagnostics: result.diagnostics }
     }
 }
 impl MdLine {
@@ -1794,7 +1794,7 @@ impl RustProcessor {
             (nextTokenId += 1i64);
             out.push(VmToken { token: token, instruction: instruction.clone() });
         };
-        ProcessBatch { values: out.clone(), diagnostics: Vec::new() }
+        ProcessBatch { values: out, diagnostics: Vec::new() }
     }
 }
 impl TreeVm {
@@ -1888,11 +1888,11 @@ impl TreeVm {
                     _ => { let closed = stack[stack.len() - 1].clone();
                     let branch = buildBranch(closed.clone(), topEdges.clone(), Origin::SourceBacked.clone());
                     stack = { let __v = (stack).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() };
-                    attachClosed(branch.clone(), closed.role.clone(), &mut roots, &mut stack, &mut topEdges); },
+                    attachClosed(branch.clone(), closed.role, &mut roots, &mut stack, &mut topEdges); },
                 } } },
             } },
         }
-        Stepped { state: VmState { stack: stack.clone(), topEdges: topEdges.clone(), nodeCount: nodeCount.clone(), lastTokenId: lastTokenId.clone(), diagnosticCount: diagCount.clone(), diagnosticLimitReported: diagLimitReported.clone(), finished: false, halted: halted.clone() }, batch: ProcessBatch { values: roots.clone(), diagnostics: diags.clone() } } } } }
+        Stepped { state: VmState { stack: stack, topEdges: topEdges, nodeCount: nodeCount, lastTokenId: lastTokenId, diagnosticCount: diagCount.clone(), diagnosticLimitReported: diagLimitReported.clone(), finished: false, halted: halted.clone() }, batch: ProcessBatch { values: roots, diagnostics: diags.clone() } } } } }
     }
 
     pub fn stop(&self, state: VmState) -> ProcessBatch<UniNode> {
@@ -1916,17 +1916,17 @@ impl TreeVm {
             record(Diagnostic { code: "uniml.vm.unclosed-node".to_string(), message: format!("unclosed '{}' node at end of input", frame.kind), severity: Severity::Error.clone(), span: Some(frame.openingSpan.clone()), dialect: None, details: Vec::new() }, &mut diagCount, &mut diagLimitReported, &mut diags, limits.clone());
             let branch = buildBranch(frame.clone(), topEdges.clone(), Origin::Synthetic { reason: format!("unclosed:{}", frame.kind) });
             if !stack.is_empty() { let top = stack[stack.len() - 1].clone();
-            topEdges = [&(top.edges)[..], &[UniEdge { role: frame.role.clone(), child: branch.clone() }][..]].concat();
-            stack = [&({ let __v = (stack).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() })[..], &[VmFrame { kind: top.kind.clone(), role: top.role.clone(), edges: Vec::new(), openingSpan: top.openingSpan.clone() }][..]].concat(); } else { roots.push(branch.clone()); }
+            topEdges = [&(top.edges)[..], &[UniEdge { role: frame.role, child: branch.clone() }][..]].concat();
+            stack = [&({ let __v = (stack).clone(); let __k = (1i64) as usize; __v[..__v.len().saturating_sub(__k)].to_vec() })[..], &[VmFrame { kind: top.kind, role: top.role, edges: Vec::new(), openingSpan: top.openingSpan }][..]].concat(); } else { roots.push(branch.clone()); }
         };
-        ProcessBatch { values: roots.clone(), diagnostics: diags.clone() } } }
+        ProcessBatch { values: roots, diagnostics: diags } } }
     }
 
     pub fn preflight(&self, stack: &Vec<VmFrame>, nodeCount: i64, input: VmToken) -> Option<Diagnostic> {
         let limits = self.limits.clone();
         let reframeProblem = |__a0, __a1| self.reframeProblem(__a0, __a1);
         let token = input.token;
-        if (codePointCount(token.lexeme.clone()) > limits.maxTokenCodePoints) { Some(Diagnostic { code: "uniml.limit.token".to_string(), message: format!("token exceeds the {} code-point limit", limits.maxTokenCodePoints), severity: Severity::Fatal.clone(), span: Some(token.span.clone()), dialect: None.clone(), details: Vec::new() }) } else { { let requiredNodes: i64 = match (input.instruction).clone() {
+        if (codePointCount(token.lexeme) > limits.maxTokenCodePoints) { Some(Diagnostic { code: "uniml.limit.token".to_string(), message: format!("token exceeds the {} code-point limit", limits.maxTokenCodePoints), severity: Severity::Fatal.clone(), span: Some(token.span.clone()), dialect: None.clone(), details: Vec::new() }) } else { { let requiredNodes: i64 = match (input.instruction).clone() {
             _ => 2i64,
             ref r @ VmInstruction::Reframe { ref closeBefore, ref open, ref closeAfter, ref role } => match reframeProblem(stack, (*r).clone()) {
                 None => (1i64 + ((*open).len() as i64)),
@@ -2125,7 +2125,7 @@ pub fn advance(position: SourcePosition, lexeme: String) -> SourcePosition {
         (offset += 1i64);
         (index += width);
     };
-    SourcePosition { offset: offset.clone(), line: line.clone(), column: column.clone() }
+    SourcePosition { offset: offset, line: line, column: column }
 }
 
 pub fn sourceTokens(root: UniNode) -> Vec<SourceToken> {
@@ -2168,7 +2168,7 @@ pub fn buildBranch(frame: VmFrame, edges: Vec<UniEdge>, origin: Origin) -> UniNo
         Some(UniEdge { role: _, child: UniNode::Branch { kind: _, edges: _, span, origin: _ } }) => span.end.clone(),
         None => frame.openingSpan.end.clone(),
     };
-    UniNode::Branch { kind: frame.kind, edges: edges.clone(), span: SourceSpan { source: frame.openingSpan.source.clone(), start: frame.openingSpan.start.clone(), end: end.clone() }, origin: origin.clone() }
+    UniNode::Branch { kind: frame.kind, edges: edges.clone(), span: SourceSpan { source: frame.openingSpan.source.clone(), start: frame.openingSpan.start.clone(), end: end }, origin: origin.clone() }
 }
 
 pub fn validateToken(lastTokenId: Option<i64>, token: SourceToken) -> Vec<Diagnostic> {
@@ -2241,11 +2241,11 @@ pub fn UniML_parse(source: SourceInput, dialect: std::rc::Rc<dyn DialectAdapter>
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     for chunk in source.chunks.iter().cloned() {
         let stepped = lexer.step(lexState, chunk);
-        lexState = stepped.state.clone();
+        lexState = stepped.state;
         tokens.extend((stepped.batch.values).iter().cloned());
         diagnostics.extend((stepped.batch.diagnostics).iter().cloned());
     };
-    let lexFinal = lexer.stop(lexState.clone());
+    let lexFinal = lexer.stop(lexState);
     tokens.extend((lexFinal.values).iter().cloned());
     diagnostics.extend((lexFinal.diagnostics).iter().cloned());
     let vm = TreeVm { limits: limits };
@@ -2253,15 +2253,15 @@ pub fn UniML_parse(source: SourceInput, dialect: std::rc::Rc<dyn DialectAdapter>
     let mut roots: Vec<UniNode> = Vec::new();
     for token in tokens.iter().cloned() {
         let stepped = vm.step(vmState, token);
-        vmState = stepped.state.clone();
+        vmState = stepped.state;
         roots.extend((stepped.batch.values).iter().cloned());
         diagnostics.extend((stepped.batch.diagnostics).iter().cloned());
     };
-    let vmFinal = vm.stop(vmState.clone());
+    let vmFinal = vm.stop(vmState);
     roots.extend((vmFinal.values).iter().cloned());
     diagnostics.extend((vmFinal.diagnostics).iter().cloned());
     let status = if diagnostics.iter().cloned().any(|__p0| { (__p0.severity == Severity::Fatal) }) { CompletionStatus::Halted.clone() } else { if diagnostics.iter().cloned().any(|__p0| { (__p0.severity == Severity::Error) }) { CompletionStatus::Incomplete.clone() } else { CompletionStatus::Complete.clone() } };
-    ParseResult { roots: roots.clone(), diagnostics: diagnostics.clone(), status: status }
+    ParseResult { roots: roots, diagnostics: diagnostics, status: status }
 }
 
 pub fn normalizeLabel(raw: String) -> String {
@@ -2496,7 +2496,7 @@ pub fn emailLocalBackscan(nodes: &Vec<WNode>, pending: &Vec<String>) -> (i64, St
         (drop += 1i64);
         exhausted = (cut == 0i64);
     };
-    if (!keep.is_empty() && !(validEmailPredecessor((crate::runtime::_str_char_at(&keep, (crate::runtime::_str_length(&keep) - 1i64))).0))) { (0i64, "".to_string(), "".to_string()) } else { (drop, keep.clone(), local.clone()) }
+    if (!keep.is_empty() && !(validEmailPredecessor((crate::runtime::_str_char_at(&keep, (crate::runtime::_str_length(&keep) - 1i64))).0))) { (0i64, "".to_string(), "".to_string()) } else { (drop, keep, local) }
 }
 
 pub fn isEmailLocalChar(c: i64) -> bool {
@@ -2527,7 +2527,7 @@ pub fn domainAndPath(content: &String, from: i64) -> Option<i64> {
     if (((segments.len() as i64) < 2i64) || (segments).iter().cloned().take(((segments.len() as i64) - 1i64) as usize).collect::<Vec<_>>().iter().cloned().any(|__p0| { __p0.is_empty() })) { None } else { { while (((j < crate::runtime::_str_length(&(*content))) && !(isUnicodeWhitespace((crate::runtime::_str_char_at(&(*content), j)).0))) && (crate::runtime::_str_char_at(&(*content), j) != 60i64)) {
         (j += 1i64);
     };
-    Some(j.clone()) } }
+    Some(j) } }
 }
 
 pub fn trimAutolinkTail(raw: &String) -> String {
@@ -2561,7 +2561,7 @@ pub fn delimiterRun(content: &String, start: i64, ch: i64) -> WNode {
     let after = if ((start + len) >= crate::runtime::_str_length(&(*content))) { 32i64 } else { (crate::runtime::_str_char_at(&(*content), (start + len))).0 };
     let leftFlanking = (!(isUnicodeWhitespace(after.clone())) && ((!(isPunctuation(after.clone())) || isUnicodeWhitespace(before.clone())) || isPunctuation(before.clone())));
     let rightFlanking = (!(isUnicodeWhitespace(before.clone())) && ((!(isPunctuation(before.clone())) || isUnicodeWhitespace(after.clone())) || isPunctuation(after.clone())));
-    let (canOpen, canClose) = if (ch == 95i64) { ((leftFlanking && (!(rightFlanking) || isPunctuation(before.clone()))), (rightFlanking && (!(leftFlanking) || isPunctuation(after.clone())))) } else { (leftFlanking, rightFlanking) };
+    let (canOpen, canClose) = if (ch == 95i64) { ((leftFlanking && (!(rightFlanking) || isPunctuation(before))), (rightFlanking && (!(leftFlanking) || isPunctuation(after)))) } else { (leftFlanking, rightFlanking) };
     WNode::WDelim { lexeme: crate::runtime::_str_substring(&(*content), start, (start + len)), ch: ch, canOpen: canOpen, canClose: canClose }
 }
 
@@ -2603,7 +2603,7 @@ pub fn tryReference(content: &String, start: i64, labelStart: i64, labelEnd: i64
     let cursor = (labelEnd + 1i64);
     if ((cursor < crate::runtime::_str_length(&(*content))) && (crate::runtime::_str_char_at(&(*content), cursor) == 91i64)) { match matchBracket(content, (cursor + 1i64)) {
         Some(refEnd) => { let refLabel = crate::runtime::_str_substring(&(*content), (cursor + 1i64), refEnd);
-        let label = if refLabel.trim().to_string().is_empty() { (*labelText).clone() } else { refLabel.clone() };
+        let label = if refLabel.trim().to_string().is_empty() { (*labelText).clone() } else { refLabel };
         resolveRef(&label, refs.clone()).map({ { let buildRefLink = buildRefLink.clone(); let content = content; let labelText = labelText; let profile = profile.clone(); let refEnd = refEnd.clone(); let refs = refs.clone(); move |_| { (buildRefLink(content, start.clone(), labelStart.clone(), labelEnd.clone(), labelText, image.clone(), (refEnd + 1i64), refs.clone(), profile.clone()), (refEnd + 1i64)) } } }) },
         None => None.clone(),
     } } else { resolveRef(labelText, refs.clone()).map({ { let buildRefLink = buildRefLink.clone(); let content = content; let labelText = labelText; let profile = profile.clone(); let refs = refs.clone(); move |_| { (buildRefLink(content, start.clone(), labelStart.clone(), labelEnd.clone(), labelText, image.clone(), (labelEnd + 1i64), refs.clone(), profile.clone()), (labelEnd + 1i64)) } } }) }
@@ -2647,8 +2647,8 @@ pub fn buildLink(content: &String, start: i64, labelStart: i64, labelEnd: i64, l
     slice(Indent.clone(), spans.destEnd.clone(), spans.titleStart.clone(), "space".to_string(), TokenChannel::Trivia.clone(), (*content).clone(), &mut pieces);
     slice(Title.clone(), spans.titleStart.clone(), spans.titleEnd.clone(), "title".to_string(), TokenChannel::Syntax.clone(), (*content).clone(), &mut pieces);
     slice(Indent.clone(), spans.titleEnd.clone(), spans.closeStart.clone(), "space".to_string(), TokenChannel::Trivia.clone(), (*content).clone(), &mut pieces);
-    pieces.push(InlinePiece::Close { branch: branch.clone(), kind: DestClose.clone(), lexeme: crate::runtime::_str_substring(&(*content), spans.closeStart, endEx), role: Some("dest.close".to_string()) });
-    WNode::WFixed { pieces: pieces.clone() }
+    pieces.push(InlinePiece::Close { branch: branch, kind: DestClose.clone(), lexeme: crate::runtime::_str_substring(&(*content), spans.closeStart, endEx), role: Some("dest.close".to_string()) });
+    WNode::WFixed { pieces: pieces }
 }
 
 pub fn buildRefLink(content: &String, start: i64, labelStart: i64, labelEnd: i64, labelText: &String, image: bool, endEx: i64, refs: std::collections::HashMap<String, LinkRef>, profile: MarkdownProfile) -> WNode {
@@ -2661,8 +2661,8 @@ pub fn buildRefLink(content: &String, start: i64, labelStart: i64, labelEnd: i64
     let mut pieces: Vec<InlinePiece> = Vec::new();
     pieces.push(InlinePiece::Open { branch: branch.clone(), kind: LinkOpen.clone(), lexeme: crate::runtime::_str_substring(&(*content), start, labelStart), role: Some("delimiter.open".to_string()) });
     pieces.extend((MarkdownInlines_parse((*labelText).clone(), refs, profile)).iter().cloned());
-    pieces.push(InlinePiece::Close { branch: branch.clone(), kind: ReferenceLabel.clone(), lexeme: crate::runtime::_str_substring(&(*content), labelEnd, endEx), role: Some("reference".to_string()) });
-    WNode::WFixed { pieces: pieces.clone() }
+    pieces.push(InlinePiece::Close { branch: branch, kind: ReferenceLabel.clone(), lexeme: crate::runtime::_str_substring(&(*content), labelEnd, endEx), role: Some("reference".to_string()) });
+    WNode::WFixed { pieces: pieces }
 }
 
 pub fn parseInlineDestination(content: &String, open: i64) -> Option<(String, Option<String>, DestTitleSpans, i64)> {
@@ -2709,7 +2709,7 @@ pub fn parseInlineDestination(content: &String, open: i64) -> Option<(String, Op
     while ((i < n) && isUnicodeWhitespace((crate::runtime::_str_char_at(&(*content), i)).0)) {
         (i += 1i64);
     };
-    if ((i >= n) || (crate::runtime::_str_char_at(&(*content), i) != 41i64)) { None } else { Some((dest.clone(), title.clone(), DestTitleSpans { destStart: destStart, destEnd: destEnd, titleStart: titleStart.clone(), titleEnd: titleEnd.clone(), closeStart: i }, (i + 1i64))) }
+    if ((i >= n) || (crate::runtime::_str_char_at(&(*content), i) != 41i64)) { None } else { Some((dest, title, DestTitleSpans { destStart: destStart, destEnd: destEnd, titleStart: titleStart, titleEnd: titleEnd, closeStart: i }, (i + 1i64))) }
 }
 
 pub fn matchBracket(content: &String, from: i64) -> Option<i64> {
@@ -2762,7 +2762,7 @@ pub fn scanRawHtml(content: &String, start: i64) -> Option<i64> {
     if (c1 == 33i64) { if crate::runtime::_str_starts_with_at(&(*content), &("<!--".to_string()), start) { scanComment(content, start) } else { if crate::runtime::_str_starts_with_at(&(*content), &("<![CDATA[".to_string()), start) { { let end = crate::runtime::_str_index_of_from(&(*content), &("]]>".to_string()), (start + 9i64));
     if (end >= 0i64) { Some((end + 3i64)) } else { None } } } else { { let end = crate::runtime::_str_index_of_from(&(*content), &(char::from_u32((62i64) as u32).unwrap_or('\u{FFFD}').to_string()), (start + 2i64));
     if (end >= 0i64) { Some((end + 1i64)) } else { None } } } } } else { if (c1 == 63i64) { { let end = crate::runtime::_str_index_of_from(&(*content), &("?>".to_string()), (start + 2i64));
-    if (end >= 0i64) { Some((end + 2i64)) } else { None } } } else { if (c1 == 47i64) { scanClosingTag(content, start) } else { if MdChars_isAsciiLetter((c1.clone()).0) { scanOpenTag(content, start) } else { None } } } }
+    if (end >= 0i64) { Some((end + 2i64)) } else { None } } } else { if (c1 == 47i64) { scanClosingTag(content, start) } else { if MdChars_isAsciiLetter((c1).0) { scanOpenTag(content, start) } else { None } } } }
 }
 
 pub fn scanComment(content: &String, start: i64) -> Option<i64> {
@@ -2886,7 +2886,7 @@ pub fn processEmphasis(input: &Vec<WNode>) -> Vec<WNode> {
             let (branch, kind) = if ((*ch) == 126i64) { (Strikethrough.clone(), StrikethroughRun.clone()) } else { if (r#use == 2i64) { (Strong.clone(), DelimiterRun.clone()) } else { (Emphasis.clone(), DelimiterRun.clone()) } };
             let openLex = crate::runtime::_str_substring_from(&opener_lexeme, (crate::runtime::_str_length(&opener_lexeme) - r#use));
             let closeLex = crate::runtime::_str_substring(&(*lexeme), 0i64, r#use);
-            let newOpener = WNode::WDelim { lexeme: crate::runtime::_str_substring(&opener_lexeme, 0i64, (crate::runtime::_str_length(&opener_lexeme) - r#use)), ch: opener_ch.clone(), canOpen: opener_canOpen.clone(), canClose: opener_canClose.clone() };
+            let newOpener = WNode::WDelim { lexeme: crate::runtime::_str_substring(&opener_lexeme, 0i64, (crate::runtime::_str_length(&opener_lexeme) - r#use)), ch: opener_ch.clone(), canOpen: opener_canOpen.clone(), canClose: opener_canClose };
             let newCloser = WNode::WDelim { lexeme: crate::runtime::_str_substring_from(&(*lexeme), r#use), ch: (*ch).clone(), canOpen: (*canOpen).clone(), canClose: (*canClose).clone() };
             let inner = (nodes)[((found + 1i64) as usize)..(closerIdx as usize)].to_vec().iter().cloned().flat_map(flatten).collect::<Vec<_>>().clone().into_iter().collect::<Vec<_>>();
             let wrap = WNode::WFixed { pieces: [&([&[InlinePiece::Open { branch: branch.clone(), kind: kind.clone(), lexeme: openLex, role: Some("delimiter.open".to_string()) }][..], &(inner)[..]].concat())[..], &[InlinePiece::Close { branch: branch.clone(), kind: kind.clone(), lexeme: closeLex, role: Some("delimiter.close".to_string()) }][..]].concat() };
@@ -2922,18 +2922,21 @@ pub fn longestRun(s: String) -> i64 {
 
 pub fn split(text: String) -> Vec<MdLine> {
     let empty = DialectRegistry { byName: std::collections::HashMap::new() };
-    fn split(index: i64, lineStart: i64, lines: &Vec<MdLine>, chars: &Vec<i64>) -> (Vec<MdLine>, i64) {
-        if (index >= ((*chars).len() as i64)) { ((*lines).clone(), lineStart.clone()) } else { match chars[(index.clone()) as usize].clone() {
-            10i64 => split((index + 1i64), (index + 1i64), &[&((*lines))[..], &[MdLine { content: (((*chars))[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ending: "\n".to_string() }][..]].concat(), chars),
-            13i64 => if (((index + 1i64) < ((*chars).len() as i64)) && (chars[((index + 1i64)) as usize].clone() == 10i64)) { split((index + 2i64), (index + 2i64), &[&((*lines))[..], &[MdLine { content: (((*chars))[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ending: "\r\n".to_string() }][..]].concat(), chars) } else { split((index + 1i64), (index + 1i64), &[&((*lines))[..], &[MdLine { content: (((*chars))[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ending: "\r".to_string() }][..]].concat(), chars) },
-            _ => split((index + 1i64), lineStart.clone(), lines, chars),
-        } }
-    }
     let chars: Vec<i64> = text.encode_utf16().map(|__u| __u as i64).collect::<Vec<i64>>();
-    let splitResult = split(0i64, 0i64, &Vec::new(), &chars);
-    let lines = splitResult.0.clone();
-    let lineStart = splitResult.1.clone();
-    if (lineStart < (chars.len() as i64)) { [&(lines)[..], &[MdLine { content: ((chars).iter().cloned().skip(lineStart as usize).collect::<Vec<_>>()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ending: "".to_string() }][..]].concat() } else { lines.clone() }
+    let mut lines: Vec<MdLine> = Vec::new();
+    let mut lineStart = 0i64;
+    let mut index = 0i64;
+    while (index < (chars.len() as i64)) {
+        let c = chars[(index) as usize].clone();
+        if (c == 10i64) { lines.push(MdLine { content: ((chars)[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ending: "\n".to_string() });
+        index = (index + 1i64);
+        lineStart = index; } else { if (c == 13i64) { if (((index + 1i64) < (chars.len() as i64)) && (chars[((index + 1i64)) as usize].clone() == 10i64)) { lines.push(MdLine { content: ((chars)[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ending: "\r\n".to_string() });
+        index = (index + 2i64);
+        lineStart = index; } else { lines.push(MdLine { content: ((chars)[(lineStart as usize)..(index as usize)].to_vec()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ending: "\r".to_string() });
+        index = (index + 1i64);
+        lineStart = index; } } else { index = (index + 1i64); } }
+    };
+    if (lineStart < (chars.len() as i64)) { [&(lines)[..], &[MdLine { content: ((chars).iter().cloned().skip(lineStart as usize).collect::<Vec<_>>()).iter().map(|__e| crate::runtime::SscChar(*__e).to_string()).collect::<Vec<String>>().join(("".to_string()).as_str()), ending: "".to_string() }][..]].concat() } else { lines }
 }
 
 pub fn asciiLower(s: String) -> String {
@@ -3040,7 +3043,7 @@ pub fn MarkdownProjection_project(result: ParseResult, profile: MarkdownProfile)
             None => (),
         };
     };
-    MarkdownProjectionResult { document: Some(MarkdownDocument { blocks: blocks.clone(), references: references.clone() }), diagnostics: result.diagnostics.clone() } } }
+    MarkdownProjectionResult { document: Some(MarkdownDocument { blocks: blocks, references: references }), diagnostics: result.diagnostics.clone() } } }
 }
 
 pub fn collectDefinitions(roots: &Vec<UniNode>) -> std::collections::HashMap<String, MarkdownBlock> {
@@ -3083,7 +3086,7 @@ pub fn definitionOf(branch: UniNode) -> Option<MarkdownBlock> {
             _ => (),
         };
     };
-    if label.is_empty() { None } else { Some(MarkdownBlock::LinkDefinition { label: label.clone(), destination: dest.clone(), title: title.clone() }) }
+    if label.is_empty() { None } else { Some(MarkdownBlock::LinkDefinition { label: label, destination: dest, title: title }) }
 }
 
 pub fn projectBlock(node: UniNode, refs: std::collections::HashMap<String, MarkdownBlock>) -> Option<MarkdownBlock> {
@@ -3376,7 +3379,7 @@ pub fn projectInlineToken(t: SourceToken) -> Option<MarkdownInline> {
         "markdown.soft-break" => Some(MarkdownInline::SoftBreak.clone()),
         "markdown.hard-break" => Some(MarkdownInline::HardBreak.clone()),
         "markdown.autolink" => { let inner = ((t.lexeme).strip_prefix(("<".to_string()).as_str()).map(|__r| __r.to_string()).unwrap_or_else(|| (t.lexeme).clone())).strip_suffix((">".to_string()).as_str()).map(|__r| __r.to_string()).unwrap_or_else(|| ((t.lexeme).strip_prefix(("<".to_string()).as_str()).map(|__r| __r.to_string()).unwrap_or_else(|| (t.lexeme).clone())).clone());
-        Some(MarkdownInline::Autolink { destination: autolinkDestination(inner.clone()), label: inner.clone() }) },
+        Some(MarkdownInline::Autolink { destination: autolinkDestination(inner.clone()), label: inner }) },
         "markdown.html" => Some(MarkdownInline::RawHtml { raw: t.lexeme.clone() }),
         "markdown.delimiter-run" => Some(MarkdownInline::Text { value: t.lexeme.clone() }),
         _ => None,
@@ -3390,7 +3393,7 @@ pub fn codeSpanValue(edges: &Vec<UniEdge>) -> String {
         _ => None,
     }).unwrap_or("".to_string());
     let spaced = raw.chars().map(|__ch| char::from_u32(({ let c = (__ch as u32) as i64; if ((c == 10i64) || (c == 13i64)) { 32i64 } else { c.clone() } }) as u32).unwrap_or('\u{FFFD}')).collect::<String>();
-    if ((((crate::runtime::_str_length(&spaced) >= 2i64) && (crate::runtime::_str_char_at(&spaced, 0i64) == 32i64)) && (crate::runtime::_str_char_at(&spaced, crate::runtime::_str_length(&spaced) - 1i64) == 32i64)) && spaced.chars().any(|__ch| (|__p0| { (__p0 != 32i64) })((__ch as u32) as i64))) { crate::runtime::_str_substring(&spaced, 1i64, (crate::runtime::_str_length(&spaced) - 1i64)) } else { spaced.clone() }
+    if ((((crate::runtime::_str_length(&spaced) >= 2i64) && (crate::runtime::_str_char_at(&spaced, 0i64) == 32i64)) && (crate::runtime::_str_char_at(&spaced, crate::runtime::_str_length(&spaced) - 1i64) == 32i64)) && spaced.chars().any(|__ch| (|__p0| { (__p0 != 32i64) })((__ch as u32) as i64))) { crate::runtime::_str_substring(&spaced, 1i64, (crate::runtime::_str_length(&spaced) - 1i64)) } else { spaced }
 }
 
 pub fn expressionSource(edges: &Vec<UniEdge>) -> String {
@@ -3428,7 +3431,7 @@ pub fn projectLink(edges: &Vec<UniEdge>, refs: std::collections::HashMap<String,
             None => ("".to_string(), None.clone()),
         } },
     };
-    if image { MarkdownInline::Image { alt: label.clone(), destination: dest.clone(), title: title.clone() } } else { MarkdownInline::Link { label: label.clone(), destination: dest.clone(), title: title.clone() } }
+    if image { MarkdownInline::Image { alt: label.clone(), destination: dest.clone(), title: title.clone() } } else { MarkdownInline::Link { label: label, destination: dest.clone(), title: title.clone() } }
 }
 
 pub fn isDelimiterEdge(edge: UniEdge) -> bool {
@@ -3638,7 +3641,7 @@ pub fn rawStringHashes(chars: &Vec<i64>, from: i64, n: i64) -> i64 {
         (hashes += 1i64);
         (i += 1i64);
     };
-    if ((i < n) && (chars[(i.clone()) as usize].clone() == 34i64)) { hashes } else { -1i64 } } }
+    if ((i < n) && (chars[(i) as usize].clone() == 34i64)) { hashes } else { -1i64 } } }
 }
 
 pub fn rawStringEnd(chars: &Vec<i64>, from: i64, n: i64, hashes: i64) -> i64 {
@@ -3658,7 +3661,7 @@ pub fn rawStringEnd(chars: &Vec<i64>, from: i64, n: i64, hashes: i64) -> i64 {
         if (matched == hashes) { i = k;
         closed = true; } else { (i += 1i64); } } else { (i += 1i64); }
     };
-    if (i > n) { n } else { i.clone() }
+    if (i > n) { n } else { i }
 }
 
 pub fn blockCommentEnd(chars: &Vec<i64>, from: i64, n: i64) -> i64 {
@@ -3740,7 +3743,7 @@ pub fn lexWindow(text: &String, atEof: bool) -> WindowLex {
         if (!(atEof) && (i >= n)) { stop = true; } else { out.push(RustLexToken { kind: kind.clone(), lexeme: crate::runtime::_str_substring(&(*text), start, i) });
         consumed = i; }
     };
-    WindowLex { tokens: out.clone(), consumed: consumed }
+    WindowLex { tokens: out, consumed: consumed }
 }
 
 pub fn isModifier(w: &String) -> bool {
@@ -3807,13 +3810,13 @@ pub fn skipHead(tokens: &Vec<RustLexToken>, from: i64, until: i64) -> i64 {
 pub fn resolveKeyword(tokens: &Vec<RustLexToken>, kw: i64, until: i64) -> i64 {
     let w = tokens[(kw) as usize].clone().lexeme;
     if ((w == "const".to_string()) || (w == "static".to_string())) { { let after = nextSignificant(tokens, (kw + 1i64), until);
-    if (((after < until) && (tokens[(after.clone()) as usize].clone().kind == "rust.ident".to_string())) && (tokens[(after.clone()) as usize].clone().lexeme == "fn".to_string())) { after.clone() } else { kw } } } else { kw }
+    if (((after < until) && (tokens[(after.clone()) as usize].clone().kind == "rust.ident".to_string())) && (tokens[(after.clone()) as usize].clone().lexeme == "fn".to_string())) { after } else { kw } } } else { kw }
 }
 
 pub fn itemName(tokens: &Vec<RustLexToken>, kw: i64, until: i64) -> String {
     let mut i = nextSignificant(tokens, (kw + 1i64), until);
     if ((i < until) && isPunct(tokens[(i.clone()) as usize].clone(), &"<".to_string())) { i = nextSignificant(tokens, skipBalanced(tokens, i.clone(), until, &"<".to_string(), &">".to_string()), until); } else { (); }
-    if ((i < until) && (tokens[(i.clone()) as usize].clone().kind == "rust.ident".to_string())) { tokens[(i.clone()) as usize].clone().lexeme } else { "".to_string() }
+    if ((i < until) && (tokens[(i.clone()) as usize].clone().kind == "rust.ident".to_string())) { tokens[(i) as usize].clone().lexeme } else { "".to_string() }
 }
 
 pub fn itemEnd(tokens: &Vec<RustLexToken>, kw: i64, until: i64) -> i64 {
