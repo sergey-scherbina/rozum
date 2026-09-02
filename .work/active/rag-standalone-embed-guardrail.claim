@@ -1,4 +1,0 @@
-slug: rag-standalone-embed-guardrail
-agent: claude-fable (session cf8e96fe)
-started: 2026-09-02T14:17Z
-task: prevent a standalone rag mcp/CLI process from silently ballooning to a multi-GB in-process embedding model when the shared gateway is briefly unreachable (root-caused a live 28GB incident) - retry the gateway probe before falling back, and bound the Metal cache when running standalone.
