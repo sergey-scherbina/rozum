@@ -27,6 +27,16 @@ cargo errors) — landed in scalascript `main` 2026-08-30. Integration seam on t
 already exists: `src/rag_lite.rs` (BM25 `LexicalIndex`, `Retriever` trait, `search_documents`
 tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
 
+- [ ] **ssc-main-base-perf-parity** — the perf port to scalascript main (`ssc-perf-port-to-main`,
+  branch feature/perf-port-to-main @ bec2f0b12, merge requested from the owner) made their Rust
+  lane BUILD (0 errors, was 86+) and stop overflowing the stack (TCO for lifted defs incl.
+  match-arm tails), but markdown wall-clock there is still ~24 s @ 3,200 lines vs 0.07 s on our
+  prestage10 vendor: the var-free accumulator style clones state per line in shapes the move
+  passes conservatively skip (`matchContainers(st.clone(), …)`-class — multiple uses in one
+  match statement trip the statement-unique E0505 gate). rozum KEEPS VENDORING from
+  feature/treevm-top-edges-prestage10 until parity. Next lever: a finer-grained gate
+  (per-innermost-call uniqueness instead of per-statement) or a real liveness pass; NOTE:
+  sample/lldb were hanging machine-wide during this round — fix profiling first.
 - [ ] **rag-ann-threshold-watch** — scalascript's index is 94,849 chunks, the FIRST corpus near
   the recorded ~100k exact-search threshold (docs/specs/rag-embeddings-impl.md). Before building
   any ANN structure, MEASURE fused search latency on scalascript under real agent load; exact

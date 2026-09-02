@@ -1,4 +1,0 @@
-slug: ssc-perf-port-to-main
-agent: claude-fable (session a9af44dd)
-started: 2026-09-02T00:20Z
-task: port the 10 perf/correctness commits from feature/treevm-top-edges-prestage10 onto scalascript main (stage-10 closed there without them): hot-top equivalent, 6 backend move/type mods, imperative split, tokenize codeunits, blockquote fix. Then switch rozum vendored regen base to main.
