@@ -293,7 +293,16 @@ pub fn gateway_less_warmup(root: &Path) -> std::io::Result<usize> {
 /// 127.0.0.1 is allowed in that same jail (the agent talks to the gateway all day), so the
 /// gateway-first order is what makes the standalone server jail-safe.
 pub async fn embed_via_gateway(texts: &[String], is_query: bool) -> Option<Vec<Vec<f32>>> {
-    let url = gateway_url()?;
+    embed_via_gateway_at(&gateway_url()?, texts, is_query).await
+}
+
+/// [`embed_via_gateway`] against an explicit gateway URL (the corpus embed passes the one it
+/// resolved once, and a test passes a fake).
+pub async fn embed_via_gateway_at(
+    url: &str,
+    texts: &[String],
+    is_query: bool,
+) -> Option<Vec<Vec<f32>>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -358,19 +367,63 @@ pub async fn embed_missing_via_gateway(root: &std::path::Path) {
 /// batches, later calls (or a server warmup, which stays uncapped) finish the rest, and the
 /// fusion's semantic half grows with each search instead of blocking one.
 pub async fn embed_missing_via_gateway_budgeted(root: &std::path::Path, max_batches: Option<usize>) {
-    let Ok(Some(_lock)) = try_embed_lock(root) else { return };
+    let Some(url) = gateway_url() else { return };
+    embed_missing_with(root, max_batches, &url, EMBED_RETRY_BACKOFF).await;
+}
+
+/// How long the corpus embed waits for the gateway to come back before giving a batch up:
+/// four retries over ~110 s. The shape comes from an outage that was measured, not imagined —
+/// the shared gateway idle-exits and launchd restarts it, and a 4B model takes ~60 s to load;
+/// the FIRST version of this loop broke on the first `None`, so scalascript's 94k-chunk
+/// catch-up died at 12,864 vectors during one such restart and stayed there until a human
+/// noticed. A dead gateway still ends the loop — after the last delay, not before the first.
+const EMBED_RETRY_BACKOFF: &[std::time::Duration] = &[
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(15),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(60),
+];
+
+/// The corpus embed against an explicit gateway, with a retry schedule: a batch that fails
+/// is retried after each delay in `backoff`; only when every delay is spent does the loop
+/// stop (progress so far is saved per batch, so the next warmup resumes from there).
+/// Returns the number of vectors added.
+pub async fn embed_missing_with(
+    root: &std::path::Path,
+    max_batches: Option<usize>,
+    url: &str,
+    backoff: &[std::time::Duration],
+) -> usize {
+    let Ok(Some(_lock)) = try_embed_lock(root) else { return 0 };
     let chunks = crate::rag_chunk::saved_chunk_texts(root);
     if chunks.is_empty() {
-        return;
+        return 0;
     }
     let vpath = vectors_path(root);
     let mut store = VecStore::load(&vpath, None).unwrap_or_else(|| VecStore::new(0));
     let (_pruned, missing) = plan_embedding(&chunks, &mut store);
     let cap = max_batches.unwrap_or(usize::MAX);
-    for group in missing.chunks(64).take(cap) {
+    let mut added = 0usize;
+    'batches: for group in missing.chunks(64).take(cap) {
         let texts: Vec<String> =
             group.iter().map(|(id, t)| distill(id, t)).collect();
-        let Some(vecs) = embed_via_gateway(&texts, false).await else { break };
+        let mut vecs = embed_via_gateway_at(url, &texts, false).await;
+        let mut waits = backoff.iter();
+        while vecs.is_none() {
+            let Some(delay) = waits.next() else {
+                eprintln!(
+                    "rag: gateway embedding failed {} times in a row — stopping the corpus embed \
+                     at {} vectors; the next warmup resumes from here",
+                    backoff.len() + 1,
+                    store.vecs.len()
+                );
+                break 'batches;
+            };
+            tokio::time::sleep(*delay).await;
+            vecs = embed_via_gateway_at(url, &texts, false).await;
+        }
+        let Some(vecs) = vecs else { break };
+        added += vecs.len();
         for (v, (id, _)) in vecs.into_iter().zip(group.iter()) {
             if store.dim == 0 {
                 store.dim = v.len();
@@ -383,6 +436,7 @@ pub async fn embed_missing_via_gateway_budgeted(root: &std::path::Path, max_batc
             let _ = store.save(&vpath);
         }
     }
+    added
 }
 
 /// RRF fusion of the BM25 ranking and the embedding ranking.
@@ -419,6 +473,150 @@ pub fn fuse(bm25: &[Hit], emb_ranked: &[(String, f32)], k: usize) -> Vec<Hit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A gateway that is down for two batches and then answers must NOT end the corpus embed:
+    /// the retry schedule covers a restart. A fake gateway refuses twice (503) and then serves.
+    #[tokio::test]
+    async fn corpus_embed_survives_a_gateway_blip() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.md"), "# Alpha\n\nalpha text\n\n# Beta\n\nbeta text\n").unwrap();
+        assert!(crate::rag_chunk::refresh_in_background(root, &mut |_, _, _| {}).unwrap().is_some());
+        let n_chunks = crate::rag_chunk::saved_chunk_texts(root).len();
+        assert!(n_chunks > 0);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let n = h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = vec![0u8; 65536];
+                let mut got = 0;
+                // Read until the JSON body closes — enough for a one-shot fake.
+                loop {
+                    let r = sock.read(&mut buf[got..]).await.unwrap_or(0);
+                    if r == 0 {
+                        break;
+                    }
+                    got += r;
+                    let head = String::from_utf8_lossy(&buf[..got]);
+                    if let Some(i) = head.find("\r\n\r\n") {
+                        let cl = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length: "))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if got >= i + 4 + cl {
+                            break;
+                        }
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf[..got]).to_string();
+                let body = if n < 2 {
+                    "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_string()
+                } else {
+                    let v: serde_json::Value = serde_json::from_str(
+                        &req[req.find("\r\n\r\n").unwrap() + 4..],
+                    )
+                    .unwrap();
+                    let k = v["input"].as_array().unwrap().len();
+                    let data: Vec<serde_json::Value> =
+                        (0..k).map(|_| serde_json::json!({"embedding": [1.0, 0.0]})).collect();
+                    let payload = serde_json::json!({"data": data}).to_string();
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    )
+                };
+                let _ = sock.write_all(body.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let zero = [std::time::Duration::ZERO; 3];
+        let added = embed_missing_with(root, None, &url, &zero).await;
+        assert_eq!(added, n_chunks, "two 503s then success must embed the whole corpus");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3, "2 refusals + 1 answer");
+        let st = VecStore::load(&vectors_path(root), None).expect("vectors saved");
+        assert_eq!(st.vecs.len(), n_chunks);
+
+        // And with NO retries a refusing gateway ends the loop — the pre-existing contract.
+        // Zero requests means the embed lock was not ours: a sibling test's child process can
+        // hold a dup of the fd for the fork→exec window (the tolerance the lock test states
+        // too), so re-attempt briefly rather than read that window as a failure.
+        std::fs::remove_file(vectors_path(root)).unwrap();
+        hits.store(0, std::sync::atomic::Ordering::SeqCst);
+        let mut added = 0;
+        for _ in 0..40 {
+            added = embed_missing_with(root, None, &url, &[]).await;
+            if hits.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(added, 0);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Latency instrument for the exact-search threshold (BACKLOG `rag-ann-threshold-watch`):
+    /// the cost of ONE brute-force sweep over N unit vectors of the store's real width, k=20.
+    /// Synthetic vectors — the sweep is N×dim multiply-adds whatever the values are — plus the
+    /// real store when `RAG_BENCH_VECTORS` names one. Ignored: it is a measurement, not a test.
+    ///   cargo test -p rozum-agent --release sweep_latency -- --ignored --nocapture
+    #[test]
+    #[ignore = "latency instrument, run by hand with --release"]
+    fn sweep_latency_curve() {
+        fn unit(seed: &mut u64, dim: usize) -> Vec<f32> {
+            let mut v: Vec<f32> = (0..dim)
+                .map(|_| {
+                    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    ((*seed >> 33) as f32 / (1u64 << 31) as f32) - 0.5
+                })
+                .collect();
+            let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            v.iter_mut().for_each(|x| *x /= n);
+            v
+        }
+        fn measure(label: &str, st: &VecStore, seed: &mut u64) {
+            let qs: Vec<Vec<f32>> = (0..20).map(|_| unit(seed, st.dim)).collect();
+            let _ = st.rank(&qs[0], 20); // warm
+            let mut times: Vec<f64> = qs
+                .iter()
+                .map(|q| {
+                    let t = std::time::Instant::now();
+                    let r = st.rank(q, 20);
+                    assert_eq!(r.len(), 20.min(st.vecs.len()));
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            times.sort_by(|a, b| a.total_cmp(b));
+            eprintln!(
+                "sweep {label}: n={} dim={} k=20  min {:.2} ms  p50 {:.2} ms  max {:.2} ms",
+                st.vecs.len(),
+                st.dim,
+                times[0],
+                times[times.len() / 2],
+                times[times.len() - 1]
+            );
+        }
+        let mut seed = 42u64;
+        for n in [10_000usize, 95_000, 200_000, 400_000] {
+            let mut st = VecStore::new(1024);
+            for i in 0..n {
+                st.vecs.insert(format!("src/file{}.rs#fn item_{i}", i % 997), unit(&mut seed, 1024));
+            }
+            measure("synthetic", &st, &mut seed);
+        }
+        if let Some(p) = std::env::var_os("RAG_BENCH_VECTORS") {
+            let st = VecStore::load(Path::new(&p), None).expect("RAG_BENCH_VECTORS loads");
+            measure(&format!("real {}", p.to_string_lossy()), &st, &mut seed);
+        }
+    }
 
     #[test]
     fn distill_prefers_the_doc_and_falls_back_to_source() {
