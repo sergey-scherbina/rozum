@@ -66,24 +66,43 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   as-is; the mdbench measurement harness (`mdbench-*` crates against `emit-rust` output,
   reused from `crates/rozum-agent/examples/mdbench.rs`'s method) was scratch-only and is not
   preserved, but is short enough to redo from the table above.
-- [x] **rag-ann-threshold-watch — MEASURED 2026-09-02, exact search stays.** Fused `rag.search`
-  latency against the standalone MCP server, live over scalascript's 94,857-chunk corpus, 40
-  queries after full warmup: **p50 85 ms, p90 239 ms, max 487 ms** — well inside an agent turn.
+- [x] **rag-ann-threshold-watch — MEASURED 2026-09-02, exact search stays, but the FIRST number
+  reported here was wrong and is corrected below.** Fused `rag.search` latency against the
+  standalone MCP server, live over scalascript's FULL 94,981-chunk corpus (fresh process, 40
+  queries, warmup complete — `fused: true` on every one): **p50 645 ms, p90 1195 ms,
+  max 1445 ms**. (An earlier pass of this entry reported p50 85 ms/p90 239 ms — that run
+  targeted rozum's own ~10.6k-chunk corpus by a copy-paste error in the bench script, not
+  scalascript's; caught by re-running against the right root before closing the claim.)
   A microbenchmark (`rag_embed::sweep_latency_curve`, `--ignored`) isolates the vector-sweep
   half alone at synthetic sizes: 10k → 5 ms, 95k (this corpus) → 55 ms, 200k → 122 ms,
-  400k → 251 ms p50, all `select_nth_unstable` O(n) with no allocation surprise. The 100k
-  threshold in `docs/specs/rag-embeddings-impl.md` was a guess against no data; the first real
-  measurement at the guessed scale says it is still 4× headroom before a search turn gets
-  uncomfortable, and the curve is the expected straight line, not a knee. Next revisit: when a
-  project's corpus crosses ~250k chunks, or p50 crosses ~150 ms in practice — re-run the sweep
-  instrument at that N before reaching for HNSW.
+  400k → 251 ms p50, `select_nth_unstable` O(n), no allocation surprise. **That is the load-
+  bearing finding, not the headline number**: the vector sweep is 55 ms of a 645 ms total —
+  BM25 (a per-document term-frequency scan) and the fusion's linear `text_of` lookup (its own
+  comment already named "~10k docs" as the scale it was sized for) are the other ~590 ms, and
+  those are what actually grow with corpus size here, not the vector half an ANN index would
+  replace. **HNSW would not have fixed this measurement** — the 100k-chunk exact-search
+  threshold in `docs/specs/rag-embeddings-impl.md` was named for the vector-sweep cost alone
+  and never accounted for BM25/fusion scaling at all. Next step, if scalascript's corpus or a
+  bigger one makes this cost real in practice: profile the standalone server end-to-end (not
+  the isolated sweep) to split BM25 vs `text_of` vs protocol/serialisation overhead before
+  reaching for any structural fix — this session did not do that split. Exact search stays for
+  now; 645 ms p50 is still well inside an agent turn, just not the 4× headroom the wrong
+  number implied.
   **Found on the way and fixed**: the corpus catch-up embed had no retry — a batch that hit the
   gateway mid-restart (idle-exit + relaunch, ~60 s to reload the model) ended the whole warmup
   permanently. scalascript's first catch-up died at 12,864/94,857 vectors and silently stayed
   there; every later search reported `fused: true` while actually running semantic search over
   13% of the corpus. Now `embed_missing_via_gateway_budgeted` retries a failed batch after
   5/15/30/60 s before giving up (`rag-agent` `c80a9fd`, test: a fake gateway that 503s twice
-  then serves still embeds the whole corpus). Query expansion already measured NEGATIVE
+  then serves still embeds the whole corpus). A SECOND, more serious defect surfaced finishing
+  this catch-up live: the standalone server's one-shot gateway probe, on failure, committed the
+  WHOLE corpus to in-process embedding with no bound on the growing Metal cache — a live
+  process reached **28 GB** over roughly two hours before it was caught and killed
+  (`footprint`, not `ps`, is what showed the real number — `rss` under-reported it). Fixed
+  separately and durably: the probe now retries before falling back
+  (`rag-standalone-embed-guardrail` `a87f9b8`), and a standalone process (never a resident
+  chat gateway) bounds its own embedding cache to 512 MB
+  (`rozum_core::embedding::is_standalone_process`). Query expansion already measured NEGATIVE
   (22/25 & 25/25 identical to base) — do not re-propose without a new eval delta.
 - [x] **rag-uniml-parser-quadratic — DONE 2026-08-31.** `Markdown_parse` was O(bytes²); it is now
   linear in size for ordinary documents, and phase 2 (code) shipped on top of it. 256 KB went
