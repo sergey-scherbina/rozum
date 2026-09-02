@@ -35,11 +35,23 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   passes conservatively skip (`matchContainers(st.clone(), …)`-class — multiple uses in one
   match statement trip the statement-unique E0505 gate). rozum KEEPS VENDORING from
   feature/treevm-top-edges-prestage10 until parity.
-  **Prototyped over two rounds, 2026-09-02: real, compiler-verified, 6.4–7.7× at every
-  measured size — still NOT parity, a superlinear contributor remains.** Pushed to
-  `origin/rozum-perf-parity-prototype` in scalascript (`cc39d29c6`, based on `main`
-  `f15f0266e`) for the owner's review — not merged into scalascript `main`, not proposed as
-  final, and the corpus was not re-run against it.
+  **Prototyped over two rounds, MERGED to scalascript `main` 2026-09-02 at the operator's
+  direction — real, compiler-verified, 6.4–7.7× at every measured size, but still NOT
+  parity: a superlinear contributor remains, un-chased.** Fast-forwarded onto scalascript
+  `main` as `cc39d29c6` (`ef63b7f95..cc39d29c6`, no conflicts — the branch had stayed a clean
+  ancestor-superset of `main` throughout).
+  **Post-merge, `scripts/smoke-ci` (the same suite `.github/workflows/smoke.yml` runs) went RED
+  on it immediately**: `v1-jit-size` — the frozen-bytecode-size gate — caught `renderTerm`
+  growing 43272 → 43948 from the new `.copy()` self-append match arm, exactly the class of
+  regression that gate exists to catch. Fixed the same way every prior entry on that gate's own
+  frozen list was: raised, not reverted, growth attributed and measured on a freshly built tree
+  (`ec50d65aa`). Full `scripts/smoke-ci` reran green after, **125/125**, including the
+  conformance corpus lane it bundles — so the "verify the corpus still builds" follow-up this
+  entry originally left open is now done, not still open. One coordination note: a stale claim
+  (`.work/active/v1-jit-size-renderterm-freeze-raise.claim`, heartbeat frozen since 11:24 that
+  day, its own actual work already landed as `144cf3d1e`/the prior `43040→43272` raise) named
+  this exact gate; left untouched rather than released, since touching another agent's claim
+  bookkeeping was not part of what this session was asked to do.
 
   **Round 1** — `RustCodeWalk.scala`'s move analysis (`_localLastUseMoves`, `_ownedFieldMoves`,
   `_localFieldMovePos`) was textual-position-only: it moved a value at its one textually-last
