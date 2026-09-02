@@ -1,0 +1,4 @@
+slug: rag-close-out
+agent: claude-fable (session cf8e96fe)
+started: 2026-09-02T11:20Z
+task: close the remaining RAG board items: rag-expose-to-agents (verify in-process wiring for assistant/cascade, mark done), rag-ann-threshold-watch (measure fused search latency on scalascript 94.9k corpus), then the ssc perf items (ssc-main-base-perf-parity, ssc-rust-reduce-clone-volume, ssc-rust-persistent-vector) in order.
