@@ -36,9 +36,10 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   match statement trip the statement-unique E0505 gate). rozum KEEPS VENDORING from
   feature/treevm-top-edges-prestage10 until parity.
   **Prototyped over two rounds, 2026-09-02: real, compiler-verified, 6.4–7.7× at every
-  measured size — still NOT parity, a superlinear contributor remains.** Local, UNPUSHED branch
-  in the scalascript checkout — `rozum-perf-parity-prototype` (`cc39d29c6`, based on `main`
-  `f15f0266e`) — for the owner's review, not proposed for merge as-is; corpus not re-run.
+  measured size — still NOT parity, a superlinear contributor remains.** Pushed to
+  `origin/rozum-perf-parity-prototype` in scalascript (`cc39d29c6`, based on `main`
+  `f15f0266e`) for the owner's review — not merged into scalascript `main`, not proposed as
+  final, and the corpus was not re-run against it.
 
   **Round 1** — `RustCodeWalk.scala`'s move analysis (`_localLastUseMoves`, `_ownedFieldMoves`,
   `_localFieldMovePos`) was textual-position-only: it moved a value at its one textually-last
