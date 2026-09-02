@@ -101,6 +101,16 @@ fn worker_loop(rx: mpsc::Receiver<Req>) {
                             delta / (1024 * 1024)
                         );
                     }
+                    // Only when no resident CHAT model shares this process (a `rag mcp`/`rag
+                    // search` process, never `rozum gateway`) — see this module's header
+                    // comment and `rozum_core::embedding::is_standalone_process`'s own doc for
+                    // the incident this guards against: an unbounded Metal cache over a long
+                    // corpus catch-up (tens of thousands of chunks, hours) grew to 28 GB because
+                    // nothing here had ever bounded it. 512 MB is the number the embedding spike
+                    // (`docs/specs/rag-embeddings-backend.md`) proved sufficient for this model.
+                    if rozum_core::embedding::is_standalone_process() {
+                        mlx_rs::memory::set_cache_limit(512 * 1024 * 1024);
+                    }
                     loaded = Some(l);
                 }
                 Err(e) => {

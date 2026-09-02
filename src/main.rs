@@ -8700,6 +8700,10 @@ async fn run_info(spec: &str) {
 async fn run_rag(action: RagAction) {
     use rozum::rag_chunk;
     use rozum::rag_lite::Retriever;
+    // No `rag` subcommand ever loads a resident CHAT model in this process — tell the embedder
+    // it may bound its own MLX cache instead of leaving that to a gateway that isn't here
+    // (`rozum_core::embedding::mark_standalone_process`'s own doc comment has the incident).
+    rozum_core::embedding::mark_standalone_process();
     match action {
         RagAction::Index { root, full } => {
             let root = root.unwrap_or_else(|| std::path::PathBuf::from("."));

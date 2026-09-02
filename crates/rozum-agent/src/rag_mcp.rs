@@ -86,8 +86,27 @@ impl RagServer {
             })
             .await;
             // …then vectors: through the gateway when one answers (jail-safe), in-process
-            // otherwise (the truly standalone case, outside any jail).
-            if rag_embed::embed_via_gateway(&["probe".into()], false).await.is_some() {
+            // otherwise (the truly standalone case, outside any jail). The probe is retried
+            // before committing to the in-process path: a ONE-SHOT probe hitting a gateway
+            // mid-restart (idle-exit + relaunch, ~60s to reload the chat model — an ordinary
+            // event, not an outage) used to commit the WHOLE corpus to the fallback for the
+            // rest of the process's life, with no recheck. On scalascript's 94,857-chunk corpus
+            // that meant hours of continuous in-process embedding with no bound on the growing
+            // Metal cache — 28 GB, an incident this retry and `is_standalone_process`'s cache
+            // bound (`rozum-mlx/src/embedder.rs`) both guard against.
+            const PROBE_BACKOFF: &[std::time::Duration] = &[
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(15),
+                std::time::Duration::from_secs(30),
+            ];
+            let mut gateway_up = rag_embed::embed_via_gateway(&["probe".into()], false).await.is_some();
+            let mut waits = PROBE_BACKOFF.iter();
+            while !gateway_up {
+                let Some(delay) = waits.next() else { break };
+                tokio::time::sleep(*delay).await;
+                gateway_up = rag_embed::embed_via_gateway(&["probe".into()], false).await.is_some();
+            }
+            if gateway_up {
                 rag_embed::embed_missing_via_gateway(&root).await;
             } else {
                 let r = root.clone();
