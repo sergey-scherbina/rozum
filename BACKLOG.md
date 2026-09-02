@@ -30,17 +30,60 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
 - [ ] **ssc-main-base-perf-parity** — the perf port to scalascript main (`ssc-perf-port-to-main`,
   branch feature/perf-port-to-main @ bec2f0b12, merge requested from the owner) made their Rust
   lane BUILD (0 errors, was 86+) and stop overflowing the stack (TCO for lifted defs incl.
-  match-arm tails), but markdown wall-clock there is still ~24 s @ 3,200 lines vs 0.07 s on our
+  match-arm tails), but markdown wall-clock there was still ~24 s @ 3,200 lines vs 0.07 s on our
   prestage10 vendor: the var-free accumulator style clones state per line in shapes the move
   passes conservatively skip (`matchContainers(st.clone(), …)`-class — multiple uses in one
   match statement trip the statement-unique E0505 gate). rozum KEEPS VENDORING from
-  feature/treevm-top-edges-prestage10 until parity. Next lever: a finer-grained gate
-  (per-innermost-call uniqueness instead of per-statement) or a real liveness pass; NOTE:
-  sample/lldb were hanging machine-wide during this round — fix profiling first.
-- [ ] **rag-ann-threshold-watch** — scalascript's index is 94,849 chunks, the FIRST corpus near
-  the recorded ~100k exact-search threshold (docs/specs/rag-embeddings-impl.md). Before building
-  any ANN structure, MEASURE fused search latency on scalascript under real agent load; exact
-  search stays until the measurement says otherwise. Query expansion already measured NEGATIVE
+  feature/treevm-top-edges-prestage10 until parity.
+  **Prototyped 2026-09-02: the named lever helps (~3×), does NOT reach parity — a second cost
+  is now the bigger one.** `RustCodeWalk.scala`'s move analysis (`_localLastUseMoves`,
+  `_ownedFieldMoves`, `_localFieldMovePos`) was textual-position-only: it moved a value at its
+  one textually-last read and cloned every earlier one, so a var-free fold's `if blank then
+  handleBlank(st) else dispatchLeaf(st)` — both arms are the accumulator's real last use, on
+  disjoint paths — cloned in the non-last arm for no reason. Patch (uncommitted, scratch
+  worktree, NOT pushed to scalascript — this needs the owner's review, the same as the port
+  itself): a `branchExclusive`/`condShields` control-flow check lets a name move in EVERY
+  mutually-exclusive if/else arm or match arm, not only the textually last one, while still
+  cloning two reads on the SAME path (the real E0505 race) and a read whose branch overlaps the
+  condition. Four new goldens pass and the existing 5,821-line `RustGenCodeWalkTest` suite was
+  not otherwise touched. Measured against main's own emitted parser (fixed-line-count
+  documents, `crates/rozum-agent/examples/mdbench.rs`'s method):
+
+  | lines | main (unpatched) | main + branch-exclusive patch | vendor (prestage10) |
+  |---|---|---|---|
+  | 400 | 4.06 s | 1.89 s | 0.049 s |
+  | 800 | 18.1 s | 6.02 s | 0.158 s |
+  | 1600 | 66.2 s | 26.6 s | 0.516 s |
+
+  ~3× at every size, but the doubling ratio on the PATCHED curve is 3.18× then 4.42× — worse
+  than quadratic, not better — so a second, larger contributor dominates once the move-analysis
+  gap is closed. Not chased further this session (time-boxed); the honest next step is
+  `sample`/`lldb` profiling the patched build the way the six-round `uniml/markdown` campaign
+  did on the vendor side (`ssc-rust-persistent-vector`), which needs the profiling-hang fix
+  this entry already named as a NOTE and still has not gotten. Patch committed to a LOCAL,
+  UNPUSHED branch in the scalascript checkout — `rozum-perf-parity-prototype`
+  (`15d39205a`, based on `main` `f15f0266e`) — for the owner's review, not proposed for merge
+  as-is; the mdbench measurement harness (`mdbench-*` crates against `emit-rust` output,
+  reused from `crates/rozum-agent/examples/mdbench.rs`'s method) was scratch-only and is not
+  preserved, but is short enough to redo from the table above.
+- [x] **rag-ann-threshold-watch — MEASURED 2026-09-02, exact search stays.** Fused `rag.search`
+  latency against the standalone MCP server, live over scalascript's 94,857-chunk corpus, 40
+  queries after full warmup: **p50 85 ms, p90 239 ms, max 487 ms** — well inside an agent turn.
+  A microbenchmark (`rag_embed::sweep_latency_curve`, `--ignored`) isolates the vector-sweep
+  half alone at synthetic sizes: 10k → 5 ms, 95k (this corpus) → 55 ms, 200k → 122 ms,
+  400k → 251 ms p50, all `select_nth_unstable` O(n) with no allocation surprise. The 100k
+  threshold in `docs/specs/rag-embeddings-impl.md` was a guess against no data; the first real
+  measurement at the guessed scale says it is still 4× headroom before a search turn gets
+  uncomfortable, and the curve is the expected straight line, not a knee. Next revisit: when a
+  project's corpus crosses ~250k chunks, or p50 crosses ~150 ms in practice — re-run the sweep
+  instrument at that N before reaching for HNSW.
+  **Found on the way and fixed**: the corpus catch-up embed had no retry — a batch that hit the
+  gateway mid-restart (idle-exit + relaunch, ~60 s to reload the model) ended the whole warmup
+  permanently. scalascript's first catch-up died at 12,864/94,857 vectors and silently stayed
+  there; every later search reported `fused: true` while actually running semantic search over
+  13% of the corpus. Now `embed_missing_via_gateway_budgeted` retries a failed batch after
+  5/15/30/60 s before giving up (`rag-agent` `c80a9fd`, test: a fake gateway that 503s twice
+  then serves still embeds the whole corpus). Query expansion already measured NEGATIVE
   (22/25 & 25/25 identical to base) — do not re-propose without a new eval delta.
 - [x] **rag-uniml-parser-quadratic — DONE 2026-08-31.** `Markdown_parse` was O(bytes²); it is now
   linear in size for ordinary documents, and phase 2 (code) shipped on top of it. 256 KB went
@@ -252,18 +295,31 @@ weak spot and it is BM25's, not the chunker's: `rag search "read-only parameter 
 returns `struct SandboxPolicy` first — word overlap with no notion of meaning — while the same
 index answers prose queries correctly (`"residency admission queue"` → the right spec, top hit).
 
-- [ ] **rag-expose-to-agents (P0)** — the one that makes the rest matter. Two surfaces, both
-  already built and both unconnected:
-  1. **MCP.** `crates/rozum-meeting/src/meeting/mcp_server.rs` is the server every agent in this
-     project is already attached to (`meeting.*`, `rooms.*`). One more `#[tool]` — `rag.search`
-     — and every claude/codex/nadia session gets project retrieval with no client config change.
-     Hold the index in memory in the server: 0.35 s per call is a disk reload, not a search.
-  2. **In-process agent loop.** `MultiToolSource` already composes `CallbackToolSource` with
-     `McpToolSource` (`docs/specs/mcp-toolsource.md`), so `rag_lite::…` needs registering, not
-     writing. This is the path the local Qwen assistant and the cascade take.
+- [x] **rag-expose-to-agents (P0) — DONE, confirmed against code 2026-09-02.** Both surfaces
+  this entry named are wired; the checkbox had gone stale, not the work:
+  1. **MCP.** `crates/rozum-meeting/src/meeting/daemon_proxy.rs` (not `mcp_server.rs` — that
+     path in the original entry never existed; the meeting daemon's own proxy is the server
+     every claude/codex/nadia session in this project already attaches to) serves `rag.search`
+     next to `meeting.*`/`rooms.*` (`daemon_proxy.rs:618`), index held in memory, with a test
+     pinning it in the tool router (`rag_search_is_registered_in_the_tool_router`). The
+     meetings-free standalone form (`rozum rag mcp`) ships too, for a client that wants only
+     retrieval.
+  2. **In-process agent loop.** `rag_chunk::project_retrieval_tools` (written for exactly this,
+     had no callers when this entry was filed) is registered on `nadia`'s `MultiToolSource`
+     (`crates/nadia/src/main.rs:325`) — nadia is "the local Qwen assistant" this entry meant:
+     the local agent loop whose model cannot fall back on a large context window, and the
+     executor the cascade (`crates/rozum-agent/src/cascade/`) drives task-by-task. Silent when
+     a project has no index, by design (an absent tool costs nothing; a present one that always
+     answers "no index" burns schema tokens every request).
   NOT via gateway-side injection into every request: `reference` tool-schema bloat is measured
   (~4.9K tokens of schema per request, which is why `--lean` exists), and a tool the client did
   not ask for is exactly that cost on every call. MCP is opt-in by construction.
+  **Known gap, separate from this entry's scope**: the Telegram/Discord meeting-room participant
+  (`crates/rozum-meeting/src/meeting/model_participant.rs`) talks to the gateway directly with
+  its own fixed `list_files`/`read_file`/`write_file`/`run_command` set (`sandbox_tools.rs`), not
+  through `MultiToolSource` — it has no `rag.search`. That participant was never named in this
+  spec (it is a chat sandbox, not a coding agent), so it is not this item's unfinished half; file
+  separately if the operator wants it there.
 - [x] **rag-index-freshness (P1) — DONE 2026-08-31.** Incremental reindex (mtime+length, chunks
   grouped per file in an on-disk v2 manifest), a refresh before every `rag.search`, and a
   background warmup at proxy startup so nobody waits for the first build. Measured on a 490-file
