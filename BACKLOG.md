@@ -35,37 +35,60 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   passes conservatively skip (`matchContainers(st.clone(), …)`-class — multiple uses in one
   match statement trip the statement-unique E0505 gate). rozum KEEPS VENDORING from
   feature/treevm-top-edges-prestage10 until parity.
-  **Prototyped 2026-09-02: the named lever helps (~3×), does NOT reach parity — a second cost
-  is now the bigger one.** `RustCodeWalk.scala`'s move analysis (`_localLastUseMoves`,
-  `_ownedFieldMoves`, `_localFieldMovePos`) was textual-position-only: it moved a value at its
-  one textually-last read and cloned every earlier one, so a var-free fold's `if blank then
-  handleBlank(st) else dispatchLeaf(st)` — both arms are the accumulator's real last use, on
-  disjoint paths — cloned in the non-last arm for no reason. Patch (uncommitted, scratch
-  worktree, NOT pushed to scalascript — this needs the owner's review, the same as the port
-  itself): a `branchExclusive`/`condShields` control-flow check lets a name move in EVERY
-  mutually-exclusive if/else arm or match arm, not only the textually last one, while still
-  cloning two reads on the SAME path (the real E0505 race) and a read whose branch overlaps the
-  condition. Four new goldens pass and the existing 5,821-line `RustGenCodeWalkTest` suite was
-  not otherwise touched. Measured against main's own emitted parser (fixed-line-count
-  documents, `crates/rozum-agent/examples/mdbench.rs`'s method):
+  **Prototyped over two rounds, 2026-09-02: real, compiler-verified, 6.4–7.7× at every
+  measured size — still NOT parity, a superlinear contributor remains.** Local, UNPUSHED branch
+  in the scalascript checkout — `rozum-perf-parity-prototype` (`cc39d29c6`, based on `main`
+  `f15f0266e`) — for the owner's review, not proposed for merge as-is; corpus not re-run.
 
-  | lines | main (unpatched) | main + branch-exclusive patch | vendor (prestage10) |
-  |---|---|---|---|
-  | 400 | 4.06 s | 1.89 s | 0.049 s |
-  | 800 | 18.1 s | 6.02 s | 0.158 s |
-  | 1600 | 66.2 s | 26.6 s | 0.516 s |
+  **Round 1** — `RustCodeWalk.scala`'s move analysis (`_localLastUseMoves`, `_ownedFieldMoves`,
+  `_localFieldMovePos`) was textual-position-only: it moved a value at its one textually-last
+  read and cloned every earlier one, so a var-free fold's `if blank then handleBlank(st) else
+  dispatchLeaf(st)` — both arms are the accumulator's real last use, on disjoint paths — cloned
+  in the non-last arm for no reason. A `branchExclusive`/`condShields` control-flow check lets a
+  name move in EVERY mutually-exclusive if/else or match arm, not only the textually last one,
+  while still cloning two reads on the SAME path (the real E0505 race) and a read whose branch
+  overlaps the condition.
 
-  ~3× at every size, but the doubling ratio on the PATCHED curve is 3.18× then 4.42× — worse
-  than quadratic, not better — so a second, larger contributor dominates once the move-analysis
-  gap is closed. Not chased further this session (time-boxed); the honest next step is
-  `sample`/`lldb` profiling the patched build the way the six-round `uniml/markdown` campaign
-  did on the vendor side (`ssc-rust-persistent-vector`), which needs the profiling-hang fix
-  this entry already named as a NOTE and still has not gotten. Patch committed to a LOCAL,
-  UNPUSHED branch in the scalascript checkout — `rozum-perf-parity-prototype`
-  (`15d39205a`, based on `main` `f15f0266e`) — for the owner's review, not proposed for merge
-  as-is; the mdbench measurement harness (`mdbench-*` crates against `emit-rust` output,
-  reused from `crates/rozum-agent/examples/mdbench.rs`'s method) was scratch-only and is not
-  preserved, but is short enough to redo from the table above.
+  **Round 2** — profiling round 1's own patched build (`sample`, `uniml/markdown` at 1600
+  lines) found the general `:+` lowering's `.concat()` at 94% of one run inside
+  `MarkdownBlocks.emit`: `st.copy(pos = …, out = st.out :+ VmToken(…))`. `.copy()` is a method
+  Apply, not an Assign, so the PRE-EXISTING self-append optimisation (`xs = xs :+ x` → `push`,
+  shipped before this session) never matched it. A fourth move table
+  (`collectCopySelfAppendMoves`) moves the self-appended field out of `p.copy(f = p.f :+ x)`
+  and spreads the rest via `..p` (not `..p.clone()`) when sound — for both def PARAMS and
+  locals declared once PER MATCH ARM (`track`'s `counted`, declared separately in its `Open`
+  and `Reframe` arms). Getting this to a working, fully-green state found and fixed two real
+  bugs, one of them PRE-EXISTING in round 1's own commit:
+  - the loop/lambda disqualification guard scanned the WHOLE def body, so an unrelated lambda
+    in `track`'s unrelated `Close` arm blocked the fix in the disconnected `Open`/`Reframe`
+    arms entirely — scoped to the relevant node's own ancestor chain instead;
+  - `branchExclusive`'s `Term.Match` case only fires when one of the two compared occurrences
+    IS the scrutinee (a direct child of `Match`) — two occurrences BOTH inside DIFFERENT arms
+    converge one level short of that, at the `CasesBlock` itself, a case that did not exist and
+    silently returned `false`. **This was in round 1's own first commit, not round 2's new
+    code** — caught only when the FULL 522-test suite was run for the first time this round;
+    round 1's four goldens had been verified individually, never against the suite (a process
+    gap worth naming, not just a code one).
+
+  Measured (`crates/rozum-agent/examples/mdbench.rs`'s method, fixed-line-count documents):
+
+  | lines | main (unpatched) | round 1 | round 2 (current) | vendor (prestage10) |
+  |---|---|---|---|---|
+  | 400  | 4.06 s  | 1.89 s | 0.547 s  | 0.019 s |
+  | 800  | 18.1 s  | 6.02 s | 2.341 s  | 0.051 s |
+  | 1600 | 66.2 s  | 26.6 s | 10.369 s | 0.187 s |
+  | 3200 | 141.2 s | (round 1 never finished this size) | 43.964 s | 0.378 s |
+
+  6.4–7.7× faster than unpatched main at every size, and 3200 lines is reachable at all for the
+  first time. **Still not parity**: the doubling ratio holds steady at ~4.3× (4.28×, 4.43×,
+  4.24×) against vendor's ~2×, so a real superlinear contributor remains beyond what these two
+  rounds address. Full 526-test suite green (522 pre-existing + 4 new goldens this round, one
+  of which pins the `CasesBlock`-as-LCA bug specifically so a narrower repro cannot pass by
+  accident the way round 1's own golden did). Honest next step, unchanged from round 1: profile
+  ROUND 2's build with `sample`/`lldb` to find what's left, the way the six-round
+  `uniml/markdown` campaign did on the vendor side (`ssc-rust-persistent-vector`) — this
+  session profiled round 1's build, not round 2's, and stopped once the concat/CasesBlock fixes
+  landed rather than chasing a third round.
 - [x] **rag-ann-threshold-watch — MEASURED 2026-09-02, exact search stays, but the FIRST number
   reported here was wrong and is corrected below.** Fused `rag.search` latency against the
   standalone MCP server, live over scalascript's FULL 94,981-chunk corpus (fresh process, 40
