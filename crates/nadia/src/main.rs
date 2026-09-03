@@ -45,6 +45,9 @@ OPTIONS:
     --replay <PATH>       re-run that journal: no gateway, no model, no tools
     --replay-live-tools   with --replay: replay the PLAN, run tools for real, and stop at
                           the first tool result that differs from the recording
+    --replay-fork <PATH>  with --replay: like --replay-live-tools, but instead of stopping at
+                          the divergence, carry on with a LIVE model and write the whole run
+                          (replayed prefix + a note + the continuation) to PATH
     --port <N>            serve: listen here                  [default: 8790]
     --token <T>           serve: required in x-nadia-token; mandatory off loopback
     --bind <ADDR>         serve: address to bind              [default: 127.0.0.1]
@@ -115,6 +118,9 @@ struct Opts {
     /// first tool result that differs, because every model reply after that point in the
     /// journal was an answer to the old result.
     replay_live_tools: bool,
+    /// With `--replay`: fork at the first divergence instead of stopping — continue with a
+    /// live model and write the resulting run to this path as a new, self-contained journal.
+    replay_fork: Option<PathBuf>,
 }
 
 fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
@@ -138,6 +144,7 @@ fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
         record: None,
         replay: None,
         replay_live_tools: false,
+        replay_fork: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -151,12 +158,14 @@ fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
             "--replay-live-tools" => o.replay_live_tools = true,
             "--probe" => o.probe = true,
             "--workspace" | "--gateway" | "--model" | "--max-steps" | "--port" | "--token"
-            | "--bind" | "--mcp" | "--mcp-config" | "--record" | "--replay" => {
+            | "--bind" | "--mcp" | "--mcp-config" | "--record" | "--replay"
+            | "--replay-fork" => {
                 let v = args.get(i + 1).ok_or_else(|| format!("{a} needs a value"))?;
                 match a {
                     "--workspace" => o.workspace = PathBuf::from(v),
                     "--record" => o.record = Some(PathBuf::from(v)),
                     "--replay" => o.replay = Some(PathBuf::from(v)),
+                    "--replay-fork" => o.replay_fork = Some(PathBuf::from(v)),
                     "--gateway" => o.gateway = with_v1(v),
                     "--model" => o.model = v.clone(),
                     "--token" => o.token = v.clone(),
@@ -375,6 +384,16 @@ async fn main() {
         eprintln!("nadia: --replay-live-tools needs --replay <PATH>");
         std::process::exit(2);
     }
+    if opts.replay_fork.is_some() && opts.replay.is_none() {
+        eprintln!("nadia: --replay-fork needs --replay <PATH>");
+        std::process::exit(2);
+    }
+    if opts.replay_fork.is_some() && opts.replay_live_tools {
+        // They answer different questions about the same divergence: stop and tell me, or
+        // carry on and hand me a new run. Doing both would mean choosing one silently.
+        eprintln!("nadia: --replay-fork and --replay-live-tools are mutually exclusive");
+        std::process::exit(2);
+    }
     let journal = match (&opts.record, &opts.replay) {
         (Some(p), _) => match rozum_agent::replay::Journal::create(p) {
             Ok(j) => Some(j),
@@ -414,17 +433,53 @@ async fn main() {
         .as_ref()
         .filter(|_| replaying && opts.replay_live_tools)
         .map(|j| rozum_agent::replay::ReplayLiveTools::new(j, &tools));
-    let run_backend: &dyn rozum_core::backend::ChatBackend = match (&rec_backend, &rep_backend) {
-        (Some(b), _) => b,
-        (_, Some(b)) => b,
-        _ => &backend,
+    // The fork's OUTPUT journal, and the shared "have we forked yet" flag its two halves agree
+    // on. Created eagerly so the file exists (and any permission problem is reported) before a
+    // single model call is spent.
+    let fork_out = match &opts.replay_fork {
+        Some(p) => match rozum_agent::replay::Journal::create(p) {
+            Ok(j) => Some(j),
+            Err(e) => {
+                eprintln!("nadia: cannot write the fork to {}: {e}", p.display());
+                std::process::exit(2);
+            }
+        },
+        None => None,
     };
-    let run_tools: &dyn ToolSource = match (&rec_tools, &rep_tools_strict, &rep_tools_live) {
-        (Some(t), _, _) => t,
-        (_, Some(t), _) => t,
-        (_, _, Some(t)) => t,
-        _ => &tools,
+    let fork_point = rozum_agent::replay::ForkPoint::new();
+    let fork_backend = match (journal.as_ref(), fork_out.as_ref()) {
+        (Some(old), Some(out)) => Some(rozum_agent::replay::ForkingBackend::new(
+            old,
+            out,
+            &backend,
+            &fork_point,
+        )),
+        _ => None,
     };
+    let fork_tools = match (journal.as_ref(), fork_out.as_ref()) {
+        (Some(old), Some(out)) => Some(rozum_agent::replay::ForkingTools::new(
+            old,
+            out,
+            &tools,
+            &fork_point,
+        )),
+        _ => None,
+    };
+    let run_backend: &dyn rozum_core::backend::ChatBackend =
+        match (&rec_backend, &fork_backend, &rep_backend) {
+            (Some(b), _, _) => b,
+            (_, Some(b), _) => b,
+            (_, _, Some(b)) => b,
+            _ => &backend,
+        };
+    let run_tools: &dyn ToolSource =
+        match (&rec_tools, &fork_tools, &rep_tools_strict, &rep_tools_live) {
+            (Some(t), _, _, _) => t,
+            (_, Some(t), _, _) => t,
+            (_, _, Some(t), _) => t,
+            (_, _, _, Some(t)) => t,
+            _ => &tools,
+        };
     if let Some(p) = &opts.record {
         eprintln!("nadia: recording this run to {}", p.display());
     }
@@ -433,7 +488,10 @@ async fn main() {
             "nadia: replaying {} ({} entries){}",
             p.display(),
             journal.as_ref().map(|j| j.len()).unwrap_or(0),
-            if opts.replay_live_tools {
+            if opts.replay_fork.is_some() {
+                " — model from the journal, tools LIVE; forks to a live model at the first \
+                 result that differs"
+            } else if opts.replay_live_tools {
                 " — model from the journal, tools LIVE; stops at the first result that differs"
             } else {
                 " — no gateway, no model, no tools"
@@ -476,6 +534,23 @@ async fn main() {
             // up inside `operations` while what surfaces at the end is the model-level
             // divergence it caused one step later. Lift it back out: this line IS the answer the
             // mode exists to produce, and burying it under a fingerprint mismatch would waste it.
+            if let Some(p) = &opts.replay_fork {
+                // Say which of the two things happened, because both are useful and they mean
+                // opposite things: a fork is "the world moved and here is the new run", no fork
+                // is "today's world still answers exactly as the recording did".
+                if fork_point.has_forked() {
+                    eprintln!(
+                        "nadia: forked — the new run is {} (its own note says where and why)",
+                        p.display()
+                    );
+                } else {
+                    eprintln!(
+                        "nadia: no divergence — the whole plan still holds against today's tree; \
+                         {} is a faithful copy of the replayed run",
+                        p.display()
+                    );
+                }
+            }
             if opts.replay_live_tools {
                 for op in &outcome.operations {
                     if let Err(e) = &op.output

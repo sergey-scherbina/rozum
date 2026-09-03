@@ -66,6 +66,13 @@ pub enum Entry {
         /// Set when the stream itself failed to start.
         error: Option<String>,
     },
+    /// A provenance line, not a call: written when a journal is FORKED from another one at a
+    /// divergence (see [`ForkingTools`]). Readers skip it — it matches no call and consumes no
+    /// cursor position for fingerprint purposes — so a forked journal replays exactly like any
+    /// other, while still carrying, in the file itself, why it exists.
+    Note {
+        text: String,
+    },
     /// One `ToolSource::dispatch` call.
     Tool {
         /// Fingerprint of the call (see [`tool_fingerprint`]).
@@ -285,6 +292,10 @@ pub struct Journal {
     path: PathBuf,
     /// Entries loaded for replay, and how far the cursor has advanced.
     replay: Mutex<(Vec<Entry>, usize)>,
+    /// How many entries this handle has APPENDED — the recording-side counterpart of
+    /// `consumed`, so a fork's provenance note can say how long its replayed prefix was
+    /// without re-reading the file it is still writing.
+    written: std::sync::atomic::AtomicUsize,
 }
 
 impl Journal {
@@ -298,6 +309,7 @@ impl Journal {
         Ok(Self {
             path,
             replay: Mutex::new((Vec::new(), 0)),
+            written: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -322,6 +334,7 @@ impl Journal {
         Ok(Self {
             path,
             replay: Mutex::new((entries, 0)),
+            written: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -337,13 +350,27 @@ impl Journal {
             .open(&self.path)
         {
             let _ = writeln!(f, "{line}");
+            self.written
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
+    /// How many entries this handle has appended (see the field's own comment).
+    pub fn written(&self) -> usize {
+        self.written.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The next entry, or an explanation of why there is not one.
+    ///
+    /// [`Entry::Note`] is skipped: it is provenance a human reads, not a call a run makes, so
+    /// it must not line up against one. A forked journal therefore replays identically to a
+    /// recorded one.
     fn next(&self) -> Result<Entry, String> {
         let mut guard = self.replay.lock().expect("journal cursor poisoned");
         let (entries, at) = &mut *guard;
+        while matches!(entries.get(*at), Some(Entry::Note { .. })) {
+            *at += 1;
+        }
         match entries.get(*at) {
             Some(e) => {
                 *at += 1;
@@ -523,6 +550,7 @@ impl ChatBackend for ReplayBackend<'_> {
                 "replay diverged: the run asked the MODEL, the journal's next entry is the tool \
                  call '{name}'"
             ))),
+            Entry::Note { .. } => unreachable!("Journal::next skips notes"),
         }
     }
 
@@ -581,6 +609,7 @@ impl ToolSource for ReplayTools<'_> {
                 "replay diverged: the run called the tool '{name}', the journal's next entry is \
                  a model call"
             ))),
+            Entry::Note { .. } => unreachable!("Journal::next skips notes"),
         }
     }
 }
@@ -648,6 +677,7 @@ impl ToolSource for ReplayLiveTools<'_> {
                     "replay diverged: the run called the tool '{name}', the journal's next entry                      is a model call"
                 )));
             }
+            Entry::Note { .. } => unreachable!("Journal::next skips notes"),
         };
         // The plan itself must match. This is the same check the strict mode makes, and it has
         // to come FIRST: running a live tool for a call the recording never made would touch
@@ -687,6 +717,224 @@ impl ToolSource for ReplayLiveTools<'_> {
             self.journal.consumed(),
             self.journal.len()
         )))
+    }
+}
+
+/// Shared "have we forked yet" flag between [`ForkingBackend`] and [`ForkingTools`]. One run
+/// has one fork point, and both halves have to agree on which side of it they are.
+#[derive(Debug, Default)]
+pub struct ForkPoint {
+    forked: std::sync::atomic::AtomicBool,
+}
+
+impl ForkPoint {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn has_forked(&self) -> bool {
+        self.forked.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn mark(&self) {
+        self.forked.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Replay a plan against the live world and, at the first tool result that differs, **fork**:
+/// keep going with a LIVE model from that point, and write the whole thing — replayed prefix,
+/// a note saying why it stopped being a replay, and the fresh continuation — to a NEW journal.
+///
+/// This is the operator's third mode, and the way to read it is *rebase for agent runs*. The
+/// prefix that still matches costs no model calls at all; you pay for the model only from the
+/// point where the world actually changed. What comes out is a complete, ordinary journal that
+/// replays strictly like any other, and says in its own text where it came from.
+///
+/// Why it is sound where plain "carry on with live tools" would not be: the reason
+/// [`ReplayLiveTools`] must stop is that the OLD journal's later model turns were answers to
+/// the OLD tool result. This mode does not use them. At the fork it stops reading the old
+/// journal entirely and lets a live model see the new result — which is exactly the question
+/// worth asking once the world has moved.
+///
+/// It needs a live model, unlike the other two modes. That is the trade: strict replay and
+/// live-tools replay answer questions with no gateway at all; this one continues a run, so it
+/// costs what continuing a run costs.
+pub struct ForkingBackend<'a> {
+    old: &'a Journal,
+    out: &'a Journal,
+    live: &'a dyn ChatBackend,
+    fork: &'a ForkPoint,
+}
+
+impl<'a> ForkingBackend<'a> {
+    pub fn new(
+        old: &'a Journal,
+        out: &'a Journal,
+        live: &'a dyn ChatBackend,
+        fork: &'a ForkPoint,
+    ) -> Self {
+        Self {
+            old,
+            out,
+            live,
+            fork,
+        }
+    }
+}
+
+#[async_trait]
+impl ChatBackend for ForkingBackend<'_> {
+    async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream> {
+        // After the fork the old journal is abandoned: its remaining model turns answered a
+        // world this run no longer has.
+        if self.fork.has_forked() {
+            return RecordingBackend::new(self.live, self.out).chat(req).await;
+        }
+        let call = request_fingerprint(&req);
+        let entry = self.old.next().map_err(ModelError::BackendUnavailable)?;
+        match entry {
+            Entry::Model {
+                call: recorded,
+                events,
+                error,
+            } => {
+                if recorded != call {
+                    return Err(ModelError::BackendUnavailable(diverged(
+                        "model call",
+                        &call,
+                        &recorded,
+                    )));
+                }
+                // Mirror it into the new journal, so the fork's prefix is a real journal and
+                // not a pointer back into the one it came from.
+                self.out.append(&Entry::Model {
+                    call,
+                    events: events.clone(),
+                    error: error.clone(),
+                });
+                if let Some(e) = error {
+                    return Err(ModelError::BackendUnavailable(e));
+                }
+                let out: Vec<ModelResult<ChatEvent>> =
+                    events.iter().map(EventRec::to_event).collect();
+                Ok(Box::pin(futures::stream::iter(out)))
+            }
+            Entry::Tool { name, .. } => Err(ModelError::BackendUnavailable(format!(
+                "replay diverged: the run asked the model, the journal's next entry is a call \
+                 to the tool '{name}'"
+            ))),
+            Entry::Note { .. } => unreachable!("Journal::next skips notes"),
+        }
+    }
+
+    fn context_window(&self) -> u32 {
+        self.live.context_window()
+    }
+}
+
+/// The tool half of the fork (see [`ForkingBackend`]): every call runs for real, is compared
+/// against the old journal until the fork, and is written to the new journal always.
+pub struct ForkingTools<'a> {
+    old: &'a Journal,
+    out: &'a Journal,
+    live: &'a dyn ToolSource,
+    fork: &'a ForkPoint,
+}
+
+impl<'a> ForkingTools<'a> {
+    pub fn new(
+        old: &'a Journal,
+        out: &'a Journal,
+        live: &'a dyn ToolSource,
+        fork: &'a ForkPoint,
+    ) -> Self {
+        Self {
+            old,
+            out,
+            live,
+            fork,
+        }
+    }
+}
+
+#[async_trait]
+impl ToolSource for ForkingTools<'_> {
+    fn tools(&self) -> Vec<ToolDef> {
+        self.live.tools()
+    }
+
+    async fn dispatch(&self, name: &str, args: Value) -> Result<Value, ToolError> {
+        if self.fork.has_forked() {
+            return RecordingTools::new(self.live, self.out).dispatch(name, args).await;
+        }
+        let want = tool_fingerprint(name, &args);
+        let entry = self.old.next().map_err(ToolError::new)?;
+        let (call, recorded_ok, recorded_err, recorded_name) = match entry {
+            Entry::Tool {
+                call,
+                ok,
+                err,
+                name,
+                ..
+            } => (call, ok, err, name),
+            Entry::Model { .. } => {
+                return Err(ToolError::new(format!(
+                    "replay diverged: the run called the tool '{name}', the journal's next entry \
+                     is a model call"
+                )));
+            }
+            Entry::Note { .. } => unreachable!("Journal::next skips notes"),
+        };
+        // The PLAN must still match even here: a live tool run for a call the recording never
+        // made would touch the world on behalf of a run that already diverged, and there would
+        // be nothing to fork FROM.
+        if call != want {
+            return Err(ToolError::new(diverged(
+                &format!("tool call '{name}' (journal has '{recorded_name}')"),
+                &want,
+                &call,
+            )));
+        }
+
+        let live = self.live.dispatch(name, args.clone()).await;
+        let matches = match (&live, &recorded_ok, &recorded_err) {
+            (Ok(v), Some(r), _) => v == r,
+            (Err(e), _, Some(r)) => e.to_string() == *r,
+            _ => false,
+        };
+        // Whatever happened, this call belongs in the new journal — the prefix has to be
+        // replayable on its own.
+        self.out.append(&Entry::Tool {
+            call,
+            name: name.to_string(),
+            args,
+            ok: live.as_ref().ok().cloned(),
+            err: live.as_ref().err().map(|e| e.to_string()),
+        });
+        if matches {
+            return live;
+        }
+
+        let now = match &live {
+            Ok(v) => format!("ok: {v}"),
+            Err(e) => format!("error: {e}"),
+        };
+        let then = match (&recorded_ok, &recorded_err) {
+            (Some(r), _) => format!("ok: {r}"),
+            (_, Some(r)) => format!("error: {r}"),
+            _ => "neither a result nor an error".into(),
+        };
+        self.fork.mark();
+        self.out.append(&Entry::Note {
+            text: format!(
+                "forked here: '{name}' returned {now}, the journal this was replayed from has \
+                 {then}. Everything above replayed identically ({} entries); everything below \
+                 is a live continuation, because the old journal's later model turns answered \
+                 the OLD result.",
+                self.out.written().saturating_sub(1)
+            ),
+        });
+        live
     }
 }
 
@@ -1197,6 +1445,83 @@ mod tests {
             seen.contains("disk on fire"),
             "and what the recording had, got: {seen:?}"
         );
+    }
+
+    /// The fork mode's whole claim: the identical prefix costs no model calls, the divergence
+    /// is recorded as a note, and the continuation is live — producing one new journal that
+    /// replays strictly on its own.
+    #[tokio::test]
+    async fn a_fork_replays_the_prefix_then_continues_live_into_a_new_journal() {
+        use crate::agent::{Budget, run_agent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let old_path = dir.path().join("old.jsonl");
+        let new_path = dir.path().join("new.jsonl");
+        let add_def = ToolDef {
+            name: "add".into(),
+            description: "add one".into(),
+            input_schema: json!({"type":"object","properties":{"a":{"type":"integer"}}}),
+        };
+        let tool_call_turn = || {
+            vec![
+                ChatEvent::ToolUseStart { id: "c1".into(), name: "add".into() },
+                ChatEvent::ToolUseDelta { id: "c1".into(), input_json_delta: "{\"a\":41}".into() },
+                ChatEvent::ToolUseEnd { id: "c1".into() },
+                ChatEvent::Done { input_tokens: 10, output_tokens: 5, stop_reason: StopReason::ToolUse },
+            ]
+        };
+        let budget = Budget { max_steps: 4, ..Budget::default() };
+
+        // The recording: the tool failed, and the model said so.
+        let broken = CallbackToolSource::new()
+            .with_tool(add_def.clone(), |_| Err(ToolError::new("disk on fire")));
+        let old_model = Scripted::new(vec![
+            tool_call_turn(),
+            vec![ChatEvent::TextDelta { text: "it failed".into() }, done()],
+        ]);
+        {
+            let journal = Journal::create(&old_path).unwrap();
+            let backend = RecordingBackend::new(&old_model, &journal);
+            let tools = RecordingTools::new(&broken, &journal);
+            let out = run_agent(&backend, "be brief", "add one to 41", &tools, &budget).await;
+            assert_eq!(out.text, "it failed");
+        }
+
+        // The fix landed, and a LIVE model is available to carry on from the fork.
+        let defs = vec![add_def.clone()];
+        let fixed = CallbackToolSource::new().with_tool(add_def, |args| {
+            Ok(json!({ "sum": args["a"].as_i64().unwrap_or(0) + 1 }))
+        });
+        // Only ONE turn is scripted: the prefix's model turn comes from the old journal, so a
+        // second scripted turn would go unused — which is exactly the saving being claimed.
+        let live_model = Scripted::new(vec![vec![
+            ChatEvent::TextDelta { text: "the sum is 42".into() },
+            done(),
+        ]]);
+
+        let old = Journal::open(&old_path).unwrap();
+        let out_journal = Journal::create(&new_path).unwrap();
+        let fork = ForkPoint::new();
+        let backend = ForkingBackend::new(&old, &out_journal, &live_model, &fork);
+        let tools = ForkingTools::new(&old, &out_journal, &fixed, &fork);
+        let forked = run_agent(&backend, "be brief", "add one to 41", &tools, &budget).await;
+
+        assert!(fork.has_forked(), "the changed tool result must fork the run");
+        assert_eq!(forked.text, "the sum is 42", "the live model finished it");
+
+        // The new journal stands on its own: a note explaining itself, and a strict replay that
+        // reproduces the forked run with no model and no tools at all.
+        let text = std::fs::read_to_string(&new_path).unwrap();
+        assert!(text.contains("forked here"), "the note explains the fork: {text}");
+        assert!(text.contains("disk on fire"), "and what the old journal had: {text}");
+
+        let replayed_journal = Journal::open(&new_path).unwrap();
+        let rb = ReplayBackend::new(&replayed_journal);
+        // The SAME tool defs: their names are part of the model-call fingerprint, so replaying
+        // with a different set is a different run and is refused — as it should be.
+        let rt = ReplayTools::new(&replayed_journal, defs);
+        let again = run_agent(&rb, "be brief", "add one to 41", &rt, &budget).await;
+        assert_eq!(again.text, forked.text, "the forked journal replays like any other");
     }
 
     /// The negative of the test above, and the reason divergence detection exists at all:
