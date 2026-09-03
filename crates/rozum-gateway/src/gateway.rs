@@ -587,31 +587,56 @@ async fn admit_handler(State(state): State<GatewayState>) -> impl IntoResponse {
     }
 }
 
+/// The `/v1/models` body: the resident model plus every model on disk.
+///
+/// Pure so the SHAPE is testable without a gateway — the parts that break clients are ordering
+/// and ids, and both are decided here.
+fn models_payload(model_id: &str, installed: &[(String, u64)], created: u64) -> serde_json::Value {
+    // The RESIDENT model, under its Claude alias, stays FIRST and unchanged: Claude Code's
+    // discovery only adds ids beginning with `claude`/`anthropic`, so this entry is the one it
+    // can see, and moving or renaming it would break a working client to tidy a list.
+    let mut data = vec![json!({
+        "id": claude_model_alias(model_id),
+        "object": "model",
+        "created": created,
+        "owned_by": "rozum",
+        "display_name": model_id,
+        "resident": true,
+    })];
+    // Then every model ON DISK, by the spec you would pass back in `model`. Listing only the
+    // resident one made this endpoint answer a different question than the one clients ask:
+    // "what can this gateway serve" is the catalogue, not "what is loaded this second" — and a
+    // caller had no way to discover a model it could switch to (`rozum models list` knew, the
+    // API did not). `resident` says which one is loaded now, so the distinction stays visible.
+    for (spec, size_bytes) in installed {
+        data.push(json!({
+            "id": spec,
+            "object": "model",
+            "created": created,
+            "owned_by": "rozum",
+            "display_name": spec,
+            "size_bytes": size_bytes,
+            "resident": rozum_models::model_source::same_model(spec, model_id),
+        }));
+    }
+    // `data` is the OpenAI shape. `models` is the key Codex's model-list refresh requires — but
+    // each Codex `Model` entry has many required fields (`slug`, `supported_reasoning_levels`, …)
+    // we'd have to track. We force `-m local` via the launch, so the list is unused; return an
+    // EMPTY `models` so Codex finds the key and validates zero entries (no "missing field"
+    // warning), while OpenAI clients keep using `data`.
+    json!({ "object": "list", "data": data, "models": [] })
+}
+
 async fn models_handler(State(state): State<GatewayState>) -> impl IntoResponse {
     tracing::debug!("GET /v1/models");
     // Claude Code's gateway discovery only adds models whose id starts with
     // "claude" or "anthropic" to its /model picker. Expose an alias so the
     // real model name still appears in display_name.
-    let model_id = state.sb.model_id();
-    let claude_alias = claude_model_alias(&model_id);
-    let entry = json!({
-        "id": claude_alias,
-        "object": "model",
-        "created": now_secs(),
-        "owned_by": "rozum",
-        "display_name": model_id,
-    });
-    // `data` is the OpenAI shape (the real model). `models` is the key Codex's
-    // model-list refresh requires — but each Codex `Model` entry has many required
-    // fields (`slug`, `supported_reasoning_levels`, …) we'd have to track. We force
-    // `-m local` via the launch, so the list is unused; return an EMPTY `models` so
-    // Codex finds the key and validates zero entries (no "missing field" warning),
-    // while OpenAI clients keep using `data`.
-    axum::Json(json!({
-        "object": "list",
-        "data": [entry],
-        "models": [],
-    }))
+    let installed: Vec<(String, u64)> = rozum_models::models::scan_all_installed()
+        .into_iter()
+        .map(|m| (m.spec, m.size_bytes))
+        .collect();
+    axum::Json(models_payload(&state.sb.model_id(), &installed, now_secs()))
 }
 
 fn sanitize_id(s: &str) -> String {
@@ -4112,14 +4137,22 @@ mod tests {
         assert!(sb.current().is_some(), "the primary is untouched");
     }
 
+    /// A model that does not fit alongside is SWITCHED to, not silently replaced by the primary.
+    ///
+    /// This test used to assert the opposite — `openai-model-catalog-and-switch` changed the
+    /// contract, and the old behaviour is what made the change worth doing: the client named a
+    /// model, the gateway answered with a different one, and nothing in the response said so.
+    /// Falling back is still right when the name is not a model on disk, which
+    /// `a_request_for_an_unknown_model_does_not_switch` pins.
     #[tokio::test]
-    async fn warm_falls_back_to_primary_when_it_doesnt_fit() {
-        // budget 4; primary 3 + requested 3 = 6 > 4 → oversubscribed → serve the primary.
+    async fn a_too_big_model_switches_the_primary_rather_than_being_ignored() {
+        // budget 4; primary 3 + requested 3 = 6 > 4 → oversubscribed → cannot co-reside.
         let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(4, &[("model-old", 3), ("big", 3)]));
         let lease = sb.enter(Some("big")).await.expect("served");
-        assert_eq!(lease.model_id, "model-old", "a too-big model falls back to the primary");
+        assert_eq!(lease.model_id, "big", "the request named `big`, so `big` must answer it");
+        assert_eq!(sb.model_id(), "big", "the primary switched");
         assert_eq!(sb.generating.load(Ordering::SeqCst), 1, "the primary lease holds a token");
-        assert!(sb.warm.lock().await.is_empty());
+        assert!(sb.warm.lock().await.is_empty(), "it did not fit, so nothing is co-resident");
     }
 
     /// Point a test switchboard's primary at a real-shaped HF spec.
@@ -4170,6 +4203,83 @@ mod tests {
             1,
             "the same weights must not be warmed twice under two spellings"
         );
+    }
+
+    /// Behavior: a request naming an installed model that CANNOT co-reside switches the primary
+    /// to it. Before this, the gateway fell through and answered with whatever was loaded — the
+    /// client asked for one model and got another, and nothing in the response said so.
+    /// Behavior: `/v1/models` lists the CATALOGUE — every model on disk — with the resident one
+    /// first under its Claude alias, and says which is loaded.
+    #[test]
+    fn models_payload_lists_the_whole_catalogue_resident_first() {
+        let installed = vec![
+            ("mlx-community:Qwen3.5-4B-MLX-4bit".to_string(), 3_000_000_000u64),
+            ("mlx-community:Qwen3.8-27B-4bit".to_string(), 15_000_000_000u64),
+        ];
+        let v = models_payload("mlx-community:Qwen3.5-4B-MLX-4bit", &installed, 7);
+        let data = v["data"].as_array().expect("data array");
+        assert_eq!(data.len(), 3, "the alias entry plus one per installed model: {v}");
+
+        // First entry unchanged in shape, and that is load-bearing twice over: Claude Code finds
+        // a gateway by an id starting with `claude`, and `first_model_display_name` (how a
+        // meeting participant learns what the gateway is ACTUALLY serving) reads
+        // `data[0].display_name`. Reordering this list would silently break both.
+        assert!(data[0]["id"].as_str().unwrap().starts_with("claude-"), "{v}");
+        assert_eq!(data[0]["display_name"], "mlx-community:Qwen3.5-4B-MLX-4bit");
+
+        // The rest are real specs — the string a client passes back in `model`.
+        assert_eq!(data[1]["id"], "mlx-community:Qwen3.5-4B-MLX-4bit");
+        assert_eq!(data[1]["resident"], serde_json::json!(true), "the loaded one is marked");
+        assert_eq!(data[2]["id"], "mlx-community:Qwen3.8-27B-4bit");
+        assert_eq!(data[2]["resident"], serde_json::json!(false), "on disk, not loaded");
+        assert_eq!(data[2]["size_bytes"], serde_json::json!(15_000_000_000u64));
+
+        // Codex reads `models` and validates every entry; an empty list is what keeps it quiet.
+        assert_eq!(v["models"], serde_json::json!([]));
+    }
+
+    /// Behavior: a model whose spec is spelled differently from the resident's is still marked
+    /// resident — `org/repo` and `org:repo` are one model, and showing it twice as "not loaded"
+    /// would invite a pointless swap.
+    #[test]
+    fn models_payload_marks_an_equivalent_spelling_as_resident() {
+        let installed = vec![("mlx-community/Qwen3.5-4B-MLX-4bit".to_string(), 1u64)];
+        let v = models_payload("mlx-community:Qwen3.5-4B-MLX-4bit", &installed, 0);
+        assert_eq!(v["data"][1]["resident"], serde_json::json!(true), "{v}");
+    }
+
+    #[tokio::test]
+    async fn a_request_for_a_model_that_cannot_co_reside_switches_to_it() {
+        // Budget 4 GB, primary 2 GB, requested 3 GB → 5 > 4, so warm admission refuses.
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(4, &[("model-old", 2), ("big", 3)]));
+        let lease = sb.enter(Some("big")).await.expect("served");
+        assert_eq!(sb.model_id(), "big", "the primary must have switched");
+        assert_eq!(lease.model_id, "big");
+        assert!(lease.warm.is_none(), "served as the PRIMARY, not as a co-resident");
+        assert!(sb.warm.lock().await.is_empty(), "nothing co-resident: it did not fit");
+    }
+
+    /// Behavior: a model name this gateway does not have on disk must NOT cost a swap. Clients
+    /// send invented names all day (`gpt-4`, `local`, a Claude alias), and a swap on each would
+    /// be a stall for a model that cannot load anyway.
+    #[tokio::test]
+    async fn a_request_for_an_unknown_model_does_not_switch() {
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(4, &[("model-old", 2)]));
+        let lease = sb.enter(Some("gpt-4")).await.expect("served");
+        assert_eq!(sb.model_id(), "model-old", "an unknown name must leave the primary alone");
+        assert_eq!(lease.model_id, "model-old");
+    }
+
+    /// Behavior: when the requested model DOES fit alongside, it is co-resident and the primary
+    /// is untouched — swapping would be the worse answer, and this pins that the new path did
+    /// not swallow the warm one.
+    #[tokio::test]
+    async fn a_request_that_fits_stays_co_resident_and_leaves_the_primary() {
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(16, &[("model-old", 2), ("small", 2)]));
+        let lease = sb.enter(Some("small")).await.expect("served");
+        assert_eq!(sb.model_id(), "model-old", "a model that fits must not swap the primary");
+        assert_eq!(lease.model_id, "small");
+        assert!(lease.warm.is_some(), "served from the warm slot");
     }
 
     #[tokio::test]

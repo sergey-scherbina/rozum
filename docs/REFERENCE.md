@@ -58,6 +58,24 @@ rozum gateway unload                  # free the model, keep the daemon (lazy re
 rozum gateway reload                  # graceful re-exec from the current binary (after an upgrade)
 ```
 
+**Or through the OpenAI API, with no rozum command at all.** `GET /v1/models` lists every model
+on disk — not just the loaded one — each by the spec you pass back in `model`, with `resident`
+marking the one serving now:
+
+```bash
+curl -s localhost:8080/v1/models | jq '.data[] | {id, resident, size_bytes}'
+curl -s localhost:8080/v1/chat/completions -d '{"model":"<spec>","messages":[…]}'
+```
+
+A request naming a model this gateway has on disk is served by THAT model: co-resident alongside
+the current one when the RAM fits, and otherwise by switching to it. A name the gateway does not
+have — `gpt-4`, `local`, whatever a client fills in — changes nothing and is served by the
+resident model, which is what those clients expect.
+
+Before this, a request for a model that would not fit was answered by the resident one while the
+response echoed the REQUESTED name — a wrong answer, delivered silently. `ROZUM_MODEL_SWITCH_ON_REQUEST=0`
+restores the old fall-through for a deployment that would rather answer than pause to swap.
+
 ### Memory admission — why a load can be refused
 
 Loading past host RAM can panic or reboot the machine, so a load is admitted only if it

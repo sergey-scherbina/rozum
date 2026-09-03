@@ -313,7 +313,11 @@ rozum gateway stop
 ```
 
 The two curated local models are **Qwen3.6-35B-A3B** (strongest local coder) and
-**gpt-oss-20b** (OpenAI reasoning MoE). List them with `rozum models list`
+**gpt-oss-20b** (OpenAI reasoning MoE). List them with `rozum models list` — or ask the gateway
+itself, `GET /v1/models`, which returns the whole on-disk catalogue with `resident` marking the
+loaded one. Sending a different one of those specs as `model` in a chat request switches to it
+(co-resident when it fits, a swap when it does not), so a plain OpenAI client can change models
+without touching the CLI
 (`--all` adds the extended fallback catalog); a model downloads on first use. Any
 HuggingFace / MLX / GGUF spec works too.
 

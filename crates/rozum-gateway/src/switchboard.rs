@@ -162,6 +162,42 @@ fn multislot_enabled() -> bool {
     !matches!(std::env::var("ROZUM_MULTISLOT").ok().as_deref(), Some("0" | "false" | "off"))
 }
 
+/// Whether a client naming a model this gateway is not serving should make it SWITCH.
+///
+/// On by default: a request that names a model is asking for that model, and answering it with
+/// whatever happens to be resident is a wrong answer delivered silently. `0`/`false`/`off` keeps
+/// the old behaviour for a deployment that would rather serve something than pause to swap.
+fn switch_on_request_enabled() -> bool {
+    !matches!(
+        std::env::var("ROZUM_MODEL_SWITCH_ON_REQUEST").ok().as_deref(),
+        Some("0" | "false" | "off")
+    )
+}
+
+/// Serialises request-driven swaps. Without it, N concurrent requests for the same absent model
+/// each start their own swap; the winner is re-checked under the gate, so the rest cost nothing.
+static SWAP_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The INSTALLED spec a client's `model` field names, or `None` when it names nothing on disk.
+///
+/// Two spellings resolve: the spec itself (under any of its valid forms — `org:repo`,
+/// `org/repo`, `hf:org/repo`) and the Claude alias `/v1/models` publishes for the resident, since
+/// a client that reads an id out of that list may well send it back. Returning `None` for
+/// everything else is what keeps this from firing on the model names clients invent —
+/// `gpt-4`, `claude-sonnet-…`, `local` — none of which this gateway has, and none of which should
+/// cost a swap.
+fn resolve_installed(requested: &str) -> Option<String> {
+    let want = requested.trim();
+    if want.is_empty() {
+        return None;
+    }
+    rozum_models::models::scan_all_installed().into_iter().find_map(|m| {
+        let hit = rozum_models::model_source::same_model(&m.spec, want)
+            || crate::gateway::claude_model_alias(&m.spec) == want;
+        hit.then_some(m.spec)
+    })
+}
+
 /// Find a warm resident for `model` under **any** valid spelling of the same weights.
 ///
 /// The map is keyed by whatever string the first requester used, and one model has several
@@ -418,10 +454,54 @@ impl Switchboard {
                             warm: Some(handle),
                         });
                     }
+                    // It would not co-reside. Until now that fell straight through and served
+                    // the PRIMARY — the client asked for one model and got another, with nothing
+                    // in the response saying so. Swap instead, but only to a model actually on
+                    // disk: clients send names this gateway has never heard of all day
+                    // (`gpt-4`, `local`, a Claude alias), and those must stay a no-op.
+                    self.maybe_switch_for_request(model).await;
                 }
             }
         }
         self.enter_primary().await
+    }
+
+    /// Swap the primary to `requested` when it names a model on disk that is not the one loaded.
+    ///
+    /// Best effort by design: a refusal (no builder, admission, a failing load) leaves the
+    /// current model serving, which is the same outcome as before this existed — never a failed
+    /// request. The gate serialises concurrent callers and the re-check under it means only the
+    /// first of N requests for the same model pays.
+    async fn maybe_switch_for_request(self: &Arc<Self>, requested: &str) {
+        if !switch_on_request_enabled() {
+            return;
+        }
+        // The cheap, injectable probe first — the SAME one warm admission sizes a model with, so
+        // "installed" means one thing in this file rather than two. Only when it misses do we
+        // touch the disk, which is what resolves a Claude alias or an unusual spelling.
+        let spec = if (self.warm_cfg.weight)(requested).is_some() {
+            requested.to_string()
+        } else if let Some(found) = resolve_installed(requested) {
+            found
+        } else {
+            return; // not a model this gateway has — leave the primary alone
+        };
+        let _gate = SWAP_GATE.lock().await;
+        // Re-checked under the gate: while we queued, the winner may already have loaded it.
+        if rozum_models::model_source::same_model(&spec, &self.model_id()) {
+            return;
+        }
+        let from = self.model_id();
+        match self.switch(spec.clone(), None, None).await {
+            Ok(generation) => crate::obs::log_event(json!({
+                "event": "model_switch_on_request",
+                "from": from, "to": spec, "generation": generation,
+            })),
+            Err(e) => crate::obs::log_event(json!({
+                "event": "model_switch_on_request_refused",
+                "from": from, "to": spec, "error": e,
+            })),
+        }
     }
 
     /// Evict warm secondary residents idle (no in-flight) for ≥ `idle_secs`, freeing their RAM.
