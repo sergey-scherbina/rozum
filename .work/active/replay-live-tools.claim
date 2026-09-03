@@ -1,4 +1,0 @@
-slug: replay-live-tools
-agent: claude-opus (session cf8e96fe)
-started: 2026-09-03T07:05Z
-task: make agent-record-replay usable — wire record/replay into nadia's CLI (nothing can reach it today), add the operator-proposed "replay the plan, run tools live" mode with a sound stopping rule at the first tool-RESULT divergence, and write the shared agent-plugins skill for it.
