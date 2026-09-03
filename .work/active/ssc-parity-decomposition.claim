@@ -1,7 +1,0 @@
-slug: ssc-parity-decomposition
-owner: claude (opus 5)
-started: 2026-09-03
-scope:
-  - round 4: find what actually reaches parity, by measuring each candidate ALONE
-    and in combination rather than reasoning about them
-  - record the decomposition; correct round 3's incomplete conclusion
