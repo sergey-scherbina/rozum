@@ -411,6 +411,10 @@ tool replied "missing required argument", which was false, so it re-sent the ide
 call until the guard ended a task it had already solved. Fixed in `4f6746a`, after this
 run; not re-measured since.
 
+Current numbers, regenerated from the run CSVs rather than kept by hand, are in
+[`scripts/bench/RESULTS.md`](../scripts/bench/RESULTS.md). The table above is one dated
+run and stays here for its story — the failure it explains — not as a live figure.
+
 ### Where the code is
 
 | File | |

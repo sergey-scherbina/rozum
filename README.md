@@ -190,6 +190,9 @@ loop and its own tools. Journals land in `.rozum/runs/`, the same shelf
   the ScalaScript/Scala 3 ones in [its own repo](https://github.com/sergey-scherbina/nadia).
 - **[docs/models.md](docs/models.md)** — model assets: what to download, where
   they live, and the `rozum models` commands.
+- **[scripts/bench/RESULTS.md](scripts/bench/RESULTS.md)** — what the harness last
+  measured: pass rates per model × agent, regenerated from the run CSVs rather than
+  maintained by hand.
 - **[scripts/bench/README.md](scripts/bench/README.md)** — the benchmark harness:
   the agentic matrix, its task ladder and knobs, the focused probes, and the rules
   that decide whether a number means anything.
