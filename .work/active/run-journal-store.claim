@@ -1,0 +1,4 @@
+slug: run-journal-store
+agent: claude-opus (session cf8e96fe)
+started: 2026-09-03T07:59Z
+task: give replay journals a managed home — Entry::Meta header, .rozum/runs/<id>.jsonl placement, id resolution, nadia runs list/rm.
