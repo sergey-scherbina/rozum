@@ -1,0 +1,7 @@
+slug: openai-model-catalog-and-switch
+owner: claude (opus 5)
+started: 2026-09-03
+scope:
+  - /v1/models lists every model on disk, not only the resident one
+  - a chat request naming an installed model switches to it instead of being
+    silently answered by whatever happens to be resident
