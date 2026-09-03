@@ -1,4 +1,0 @@
-slug: gateway-record-replay
-agent: claude-opus (session cf8e96fe)
-started: 2026-09-03T08:19Z
-task: record/replay at the gateway, so a Claude Code session running on a rozum-served model can be journaled and replayed — intercept at serve_wire's backend, reuse rozum-agent's Journal/Entry and the .rozum/runs store, control it live via the control plane (rozum gateway record start/stop/status).
