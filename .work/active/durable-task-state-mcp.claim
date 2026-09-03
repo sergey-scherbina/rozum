@@ -1,4 +1,0 @@
-slug: durable-task-state-mcp
-agent: claude-fable (session okay-cross-repo)
-started: 2026-09-03T08:00Z
-task: durable per-project task state exposed over MCP by ProxyServer — state.get, state.update (RFC 7396 JSON Merge Patch), state.reset — backed by a JSON file at <project>/.rozum/state.json (project resolved via detect_project(), same as the cwd-project room). Mirrors okay's StateMcp (Scala) design point for point, native to this project's own rmcp-based proxy.
