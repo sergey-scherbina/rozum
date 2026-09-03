@@ -1,0 +1,7 @@
+slug: ssc-perf-round3-diagnosis
+owner: claude (opus 5)
+started: 2026-09-03
+scope:
+  - profile ROUND 2's build (the honest next step the entry itself named)
+  - name the remaining superlinear contributor with a measurement, not a theory
+  - commit the instruments so the next round does not re-derive them
