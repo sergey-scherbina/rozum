@@ -41,6 +41,10 @@ OPTIONS:
     --mcp <NAME>          connect this MCP server's tools (repeatable)
     --mcp-all             connect every server in the config
     --mcp-config <PATH>   [default: <workspace>/.mcp.json, else ~/.config/nadia/mcp.json]
+    --record <PATH>       journal this run (model replies + tool results) as JSONL
+    --replay <PATH>       re-run that journal: no gateway, no model, no tools
+    --replay-live-tools   with --replay: replay the PLAN, run tools for real, and stop at
+                          the first tool result that differs from the recording
     --port <N>            serve: listen here                  [default: 8790]
     --token <T>           serve: required in x-nadia-token; mandatory off loopback
     --bind <ADDR>         serve: address to bind              [default: 127.0.0.1]
@@ -100,6 +104,17 @@ struct Opts {
     mcp_config: Option<PathBuf>,
     /// `mcp list --probe`: connect each server and list what it actually serves.
     probe: bool,
+    /// Record this run's model replies and tool results to a JSONL journal
+    /// (`rozum_agent::replay`). Explicit: nothing records by default, and the journal is as
+    /// sensitive as the session it captures.
+    record: Option<PathBuf>,
+    /// Re-run a journal instead of calling a model. With `replay_live_tools` off this touches
+    /// nothing — no gateway, no network, no tools.
+    replay: Option<PathBuf>,
+    /// With `--replay`: the model comes from the journal, the TOOLS run for real. Stops at the
+    /// first tool result that differs, because every model reply after that point in the
+    /// journal was an answer to the old result.
+    replay_live_tools: bool,
 }
 
 fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
@@ -120,6 +135,9 @@ fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
         mcp_all: false,
         mcp_config: None,
         probe: false,
+        record: None,
+        replay: None,
+        replay_live_tools: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -130,12 +148,15 @@ fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
             "--no-confine" => o.confine = false,
             "--json" => o.json = true,
             "--mcp-all" => o.mcp_all = true,
+            "--replay-live-tools" => o.replay_live_tools = true,
             "--probe" => o.probe = true,
             "--workspace" | "--gateway" | "--model" | "--max-steps" | "--port" | "--token"
-            | "--bind" | "--mcp" | "--mcp-config" => {
+            | "--bind" | "--mcp" | "--mcp-config" | "--record" | "--replay" => {
                 let v = args.get(i + 1).ok_or_else(|| format!("{a} needs a value"))?;
                 match a {
                     "--workspace" => o.workspace = PathBuf::from(v),
+                    "--record" => o.record = Some(PathBuf::from(v)),
+                    "--replay" => o.replay = Some(PathBuf::from(v)),
                     "--gateway" => o.gateway = with_v1(v),
                     "--model" => o.model = v.clone(),
                     "--token" => o.token = v.clone(),
@@ -337,15 +358,110 @@ async fn main() {
     let mut budget = default_budget();
     budget.max_steps = opts.max_steps;
 
+    // Record / replay (`rozum_agent::replay`). Built here so the journal and the decorators
+    // outlive every borrow below; `Session` already takes `&dyn`, so the run path only needs to
+    // be handed a different reference, not restructured.
+    if opts.record.is_some() && opts.replay.is_some() {
+        eprintln!("nadia: --record and --replay are mutually exclusive");
+        std::process::exit(2);
+    }
+    if (opts.record.is_some() || opts.replay.is_some()) && mode != "run" {
+        // Refused, not ignored: a flag that silently does nothing is how an operator ends up
+        // believing a session was journaled when no file was ever written.
+        eprintln!("nadia: --record/--replay apply to `nadia run` only (got `{mode}`)");
+        std::process::exit(2);
+    }
+    if opts.replay_live_tools && opts.replay.is_none() {
+        eprintln!("nadia: --replay-live-tools needs --replay <PATH>");
+        std::process::exit(2);
+    }
+    let journal = match (&opts.record, &opts.replay) {
+        (Some(p), _) => match rozum_agent::replay::Journal::create(p) {
+            Ok(j) => Some(j),
+            Err(e) => {
+                eprintln!("nadia: cannot record to {}: {e}", p.display());
+                std::process::exit(2);
+            }
+        },
+        (_, Some(p)) => match rozum_agent::replay::Journal::open(p) {
+            Ok(j) => Some(j),
+            Err(e) => {
+                eprintln!("nadia: cannot replay {}: {e}", p.display());
+                std::process::exit(2);
+            }
+        },
+        _ => None,
+    };
+    let recording = opts.record.is_some();
+    let replaying = opts.replay.is_some();
+    let rec_backend = journal
+        .as_ref()
+        .filter(|_| recording)
+        .map(|j| rozum_agent::replay::RecordingBackend::new(&backend, j));
+    let rec_tools = journal
+        .as_ref()
+        .filter(|_| recording)
+        .map(|j| rozum_agent::replay::RecordingTools::new(&tools, j));
+    let rep_backend = journal
+        .as_ref()
+        .filter(|_| replaying)
+        .map(rozum_agent::replay::ReplayBackend::new);
+    let rep_tools_strict = journal
+        .as_ref()
+        .filter(|_| replaying && !opts.replay_live_tools)
+        .map(|j| rozum_agent::replay::ReplayTools::new(j, tools.tools()));
+    let rep_tools_live = journal
+        .as_ref()
+        .filter(|_| replaying && opts.replay_live_tools)
+        .map(|j| rozum_agent::replay::ReplayLiveTools::new(j, &tools));
+    let run_backend: &dyn rozum_core::backend::ChatBackend = match (&rec_backend, &rep_backend) {
+        (Some(b), _) => b,
+        (_, Some(b)) => b,
+        _ => &backend,
+    };
+    let run_tools: &dyn ToolSource = match (&rec_tools, &rep_tools_strict, &rep_tools_live) {
+        (Some(t), _, _) => t,
+        (_, Some(t), _) => t,
+        (_, _, Some(t)) => t,
+        _ => &tools,
+    };
+    if let Some(p) = &opts.record {
+        eprintln!("nadia: recording this run to {}", p.display());
+    }
+    if let Some(p) = &opts.replay {
+        eprintln!(
+            "nadia: replaying {} ({} entries){}",
+            p.display(),
+            journal.as_ref().map(|j| j.len()).unwrap_or(0),
+            if opts.replay_live_tools {
+                " — model from the journal, tools LIVE; stops at the first result that differs"
+            } else {
+                " — no gateway, no model, no tools"
+            }
+        );
+    }
+
     match mode.as_str() {
         "run" => {
             if task.is_empty() {
                 eprintln!("nadia run needs a task\n\n{USAGE}");
                 std::process::exit(2);
             }
-            let mut session = Session::new(&backend, &tools, &system_prompt(&root), budget.clone());
+            let mut session =
+                Session::new(run_backend, run_tools, &system_prompt(&root), budget.clone());
             // What "done" means, decided before the run (`gate.rs`). NADIA_VERIFY=0 turns it off.
-            let check = nadia::gate::derive(&backend, &task, &root).await;
+            //
+            // Skipped entirely under --replay: the gate makes its OWN model calls, which the
+            // journal never recorded (it holds the session's calls, not the gate's), so running
+            // it would reach for the gateway in the one mode whose whole promise is that it does
+            // not. Said out loud rather than silently degraded — a replay that quietly lost its
+            // acceptance check would read as a pass that was never checked.
+            let check = if replaying {
+                eprintln!("nadia: replay — the acceptance gate is skipped (it needs a live model)");
+                None
+            } else {
+                nadia::gate::derive(&backend, &task, &root).await
+            };
             match (&check, nadia::gate::owner()) {
                 (Some(c), _) => eprintln!("nadia: acceptance check — {c}"),
                 // Say which gate owns the run rather than looking ungated: an operator reading
@@ -354,6 +470,21 @@ async fn main() {
                 (None, None) => {}
             }
             let mut outcome = session.turn(&task).await;
+            // Under --replay-live-tools the interesting event is a tool whose LIVE answer no
+            // longer matches the recording — and the agent loop, correctly, treats a tool error
+            // as ordinary feedback and hands it back to the model. So the precise message ends
+            // up inside `operations` while what surfaces at the end is the model-level
+            // divergence it caused one step later. Lift it back out: this line IS the answer the
+            // mode exists to produce, and burying it under a fingerprint mismatch would waste it.
+            if opts.replay_live_tools {
+                for op in &outcome.operations {
+                    if let Err(e) = &op.output
+                        && e.contains("live tool divergence")
+                    {
+                        eprintln!("nadia: {e}");
+                    }
+                }
+            }
             let mut report = nadia::gate::Report::default();
             // `rounds` REPAIRS, and one check more than that. The old shape ran a check before
             // each repair and then stopped, so the LAST repair's work was never judged: measured
@@ -363,8 +494,11 @@ async fn main() {
             let max_rounds = nadia::gate::rounds();
             let mut round = 0usize;
             loop {
-                let (r, repair) =
-                    nadia::gate::check(&backend, &task, &root, check.as_deref(), &outcome).await;
+                let (r, repair) = if replaying {
+                    (nadia::gate::Report::default(), None)
+                } else {
+                    nadia::gate::check(&backend, &task, &root, check.as_deref(), &outcome).await
+                };
                 report = nadia::gate::Report { rounds: round, ..r };
                 // A run that stopped WITHOUT finishing still gets its deterministic check — the
                 // artifact is on disk either way, and that run is the one the operator has most
@@ -400,7 +534,8 @@ async fn main() {
                 if fresh {
                     eprintln!("nadia: …the last turn was cut for repetition — restarting clean");
                     tools.inner().forget();
-                    session = Session::new(&backend, &tools, &system_prompt(&root), budget.clone());
+                    session =
+                        Session::new(run_backend, run_tools, &system_prompt(&root), budget.clone());
                     outcome = session.turn(&format!("{task}\n\n{prompt}")).await;
                 } else {
                     outcome = session.turn(&prompt).await;

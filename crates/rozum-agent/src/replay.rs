@@ -585,6 +585,111 @@ impl ToolSource for ReplayTools<'_> {
     }
 }
 
+/// Replay the MODEL from a journal while the TOOLS run for real against today's world.
+///
+/// The operator's framing was "transparent nondeterminism on the actual tool calls, as an
+/// optional mode — like transaction isolation levels", and the analogy holds with ONE
+/// correction that decides the whole design. A weaker DB isolation level tolerates an anomaly
+/// you accept in exchange for concurrency. The anomaly here cannot be accepted: the journal's
+/// NEXT model turn was produced while looking at the OLD tool result, so the moment a live tool
+/// answers differently, every model reply after it is an answer to a question this run is no
+/// longer asking. Continuing would not be a weaker guarantee, it would be a confidently wrong
+/// replay — the exact failure [`ReplayBackend`]'s fingerprints exist to prevent.
+///
+/// So this mode does not tolerate the divergence, it DETECTS it and stops:
+///
+/// - the tool CALL must still match the journal (the model is being replayed, so it must be
+///   asking the same thing — a mismatch here means the plan itself diverged);
+/// - the tool then runs for real;
+/// - if the real result equals the recorded one, the run continues, still sound;
+/// - if it differs, the run stops with both results in the message.
+///
+/// **Stopping is the feature, not a limitation.** The question this mode answers is "does the
+/// plan that failed last night still fail against today's tree?", and the answer is precisely
+/// the first step where reality stopped matching the recording — which is what the stop
+/// reports. The `bugs` fix loop wants exactly this: record the failing run, fix the code,
+/// replay the plan against the fix, and read where (or whether) it now diverges.
+///
+/// The [`ReplayTools`] above stays the strict mode: nothing executes, the world is not touched,
+/// and the same run reproduces forever. Use that one for a regression test of the agent loop;
+/// use this one to ask a question about the world.
+pub struct ReplayLiveTools<'a> {
+    journal: &'a Journal,
+    inner: &'a dyn ToolSource,
+}
+
+impl<'a> ReplayLiveTools<'a> {
+    pub fn new(journal: &'a Journal, inner: &'a dyn ToolSource) -> Self {
+        Self { journal, inner }
+    }
+}
+
+#[async_trait]
+impl ToolSource for ReplayLiveTools<'_> {
+    /// The LIVE definitions, not the journal's: this mode is about running the real thing, and
+    /// a tool that no longer exists should fail as a missing tool rather than be faked.
+    fn tools(&self) -> Vec<ToolDef> {
+        self.inner.tools()
+    }
+
+    async fn dispatch(&self, name: &str, args: Value) -> Result<Value, ToolError> {
+        let want = tool_fingerprint(name, &args);
+        let entry = self.journal.next().map_err(ToolError::new)?;
+        let (call, recorded_ok, recorded_err, recorded_name) = match entry {
+            Entry::Tool {
+                call,
+                ok,
+                err,
+                name,
+                ..
+            } => (call, ok, err, name),
+            Entry::Model { .. } => {
+                return Err(ToolError::new(format!(
+                    "replay diverged: the run called the tool '{name}', the journal's next entry                      is a model call"
+                )));
+            }
+        };
+        // The plan itself must match. This is the same check the strict mode makes, and it has
+        // to come FIRST: running a live tool for a call the recording never made would touch
+        // the world on behalf of a run that already diverged.
+        if call != want {
+            return Err(ToolError::new(diverged(
+                &format!("tool call '{name}' (journal has '{recorded_name}')"),
+                &want,
+                &call,
+            )));
+        }
+
+        let live = self.inner.dispatch(name, args).await;
+
+        // Compare what the world says NOW against what it said then. Both the ok and the error
+        // side matter: a tool that used to fail and now succeeds is exactly the "the fix
+        // works" signal this mode exists to produce, and it is still a divergence — the
+        // journal's later model turns were written against the failure.
+        let (now, then) = match (&live, &recorded_ok, &recorded_err) {
+            (Ok(v), Some(r), _) if v == r => return Ok(v.clone()),
+            (Err(e), _, Some(r)) if e.to_string() == *r => return Err(ToolError::new(r.clone())),
+            (Ok(v), _, Some(r)) => (format!("ok: {v}"), format!("error: {r}")),
+            (Ok(v), Some(r), _) => (format!("ok: {v}"), format!("ok: {r}")),
+            (Err(e), Some(r), _) => (format!("error: {e}"), format!("ok: {r}")),
+            (Err(e), _, Some(r)) => (format!("error: {e}"), format!("error: {r}")),
+            (Ok(v), None, None) => (format!("ok: {v}"), "neither a result nor an error".into()),
+            (Err(e), None, None) => {
+                (format!("error: {e}"), "neither a result nor an error".into())
+            }
+        };
+        Err(ToolError::new(format!(
+            "replay stopped at a live tool divergence: '{name}' returned {now}, the \
+             recording has {then}. The plan replayed identically up to here ({} of {} \
+             journal entries); the world underneath did not. Everything the journal holds \
+             after this point was the model answering the OLD result, so replaying further \
+             would be a confidently wrong run rather than a weaker one.",
+            self.journal.consumed(),
+            self.journal.len()
+        )))
+    }
+}
+
 fn diverged(what: &str, want: &str, got: &str) -> String {
     format!(
         "replay diverged at a {what}: this run's fingerprint is {want}, the journal's next \
@@ -984,6 +1089,113 @@ mod tests {
             journal.consumed(),
             journal.len(),
             "the whole journal was used"
+        );
+    }
+
+    /// The live-tools mode's happy path: the world still answers what it answered then, so the
+    /// run completes exactly as the strict replay would — same text, whole journal consumed.
+    #[tokio::test]
+    async fn live_tools_replay_completes_when_the_world_still_agrees() {
+        use crate::agent::{Budget, run_agent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.jsonl");
+        let add_def = ToolDef {
+            name: "add".into(),
+            description: "add one".into(),
+            input_schema: json!({"type":"object","properties":{"a":{"type":"integer"}}}),
+        };
+        let live_tools = CallbackToolSource::new().with_tool(add_def.clone(), |args| {
+            Ok(json!({ "sum": args["a"].as_i64().unwrap_or(0) + 1 }))
+        });
+        let live_model = Scripted::new(vec![
+            vec![
+                ChatEvent::ToolUseStart { id: "c1".into(), name: "add".into() },
+                ChatEvent::ToolUseDelta { id: "c1".into(), input_json_delta: "{\"a\":41}".into() },
+                ChatEvent::ToolUseEnd { id: "c1".into() },
+                ChatEvent::Done { input_tokens: 10, output_tokens: 5, stop_reason: StopReason::ToolUse },
+            ],
+            vec![ChatEvent::TextDelta { text: "the sum is 42".into() }, done()],
+        ]);
+        let budget = Budget { max_steps: 4, ..Budget::default() };
+
+        let recorded = {
+            let journal = Journal::create(&path).unwrap();
+            let backend = RecordingBackend::new(&live_model, &journal);
+            let tools = RecordingTools::new(&live_tools, &journal);
+            run_agent(&backend, "be brief", "add one to 41", &tools, &budget).await
+        };
+        assert_eq!(recorded.text, "the sum is 42");
+
+        // The same tool, still answering the same way.
+        let unchanged = CallbackToolSource::new().with_tool(add_def, |args| {
+            Ok(json!({ "sum": args["a"].as_i64().unwrap_or(0) + 1 }))
+        });
+        let journal = Journal::open(&path).unwrap();
+        let backend = ReplayBackend::new(&journal);
+        let tools = ReplayLiveTools::new(&journal, &unchanged);
+        let replayed = run_agent(&backend, "be brief", "add one to 41", &tools, &budget).await;
+
+        assert_eq!(replayed.text, recorded.text, "the world agreed, so the run reproduced");
+        assert_eq!(journal.consumed(), journal.len(), "the whole journal was used");
+    }
+
+    /// The point of the mode: the plan is identical, the WORLD changed, and that is reported as
+    /// the thing that changed — not replayed over with the recording's stale answer.
+    #[tokio::test]
+    async fn live_tools_replay_stops_at_the_first_result_that_changed() {
+        use crate::agent::{Budget, run_agent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.jsonl");
+        let add_def = ToolDef {
+            name: "add".into(),
+            description: "add one".into(),
+            input_schema: json!({"type":"object","properties":{"a":{"type":"integer"}}}),
+        };
+        let before = CallbackToolSource::new()
+            .with_tool(add_def.clone(), |_| Err(ToolError::new("disk on fire")));
+        let live_model = Scripted::new(vec![
+            vec![
+                ChatEvent::ToolUseStart { id: "c1".into(), name: "add".into() },
+                ChatEvent::ToolUseDelta { id: "c1".into(), input_json_delta: "{\"a\":41}".into() },
+                ChatEvent::ToolUseEnd { id: "c1".into() },
+                ChatEvent::Done { input_tokens: 10, output_tokens: 5, stop_reason: StopReason::ToolUse },
+            ],
+            vec![ChatEvent::TextDelta { text: "it failed".into() }, done()],
+        ]);
+        let budget = Budget { max_steps: 4, ..Budget::default() };
+
+        {
+            let journal = Journal::create(&path).unwrap();
+            let backend = RecordingBackend::new(&live_model, &journal);
+            let tools = RecordingTools::new(&before, &journal);
+            let out = run_agent(&backend, "be brief", "add one to 41", &tools, &budget).await;
+            assert_eq!(out.text, "it failed");
+        }
+
+        // The fix landed: the same call now succeeds. That IS a divergence, and the useful one.
+        let after = CallbackToolSource::new().with_tool(add_def, |args| {
+            Ok(json!({ "sum": args["a"].as_i64().unwrap_or(0) + 1 }))
+        });
+        let journal = Journal::open(&path).unwrap();
+        let backend = ReplayBackend::new(&journal);
+        let tools = ReplayLiveTools::new(&journal, &after);
+        let out = run_agent(&backend, "be brief", "add one to 41", &tools, &budget).await;
+
+        let seen = out
+            .operations
+            .iter()
+            .filter_map(|op| op.output.as_ref().err().cloned())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            seen.contains("live tool divergence"),
+            "the run must report WHERE reality stopped matching, got: {seen:?}"
+        );
+        assert!(
+            seen.contains("disk on fire"),
+            "and what the recording had, got: {seen:?}"
         );
     }
 
