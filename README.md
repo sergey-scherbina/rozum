@@ -8,6 +8,9 @@ stdio MCP proxy; web browsers, Telegram chats, and Discord channels join
 through dedicated bridges. Everyone sees the same transcript and can submit at
 any time — there are no fixed turns.
 
+**Full command reference:** [`docs/REFERENCE.md`](docs/REFERENCE.md) — everything both
+binaries do, by area, with the commands spelled the way they are spelled.
+
 ## What it is
 
 - **A meeting room runtime.** One Unix process = one room with a Unix-domain
