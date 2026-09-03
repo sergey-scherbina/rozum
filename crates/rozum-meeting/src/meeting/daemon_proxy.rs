@@ -854,7 +854,15 @@ impl DaemonProxy {
     )]
     pub async fn state_get(&self) -> CallToolResult {
         match &self.task_state {
-            Some(store) => tool_text(&store.get().await),
+            Some(store) => {
+                let v = store.get().await;
+                // Read-only and the state is itself inspectable on disk (`.rozum/state.json`),
+                // so this line is about confirming the CALL happened, not the content — keys
+                // (not values) is enough, and stays cheap even if a field holds something large.
+                let keys = v.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>());
+                tracing::info!(target: "task_state", op = "get", ?keys, "state.get");
+                tool_text(&v)
+            }
             None => err_result("no project detected (no .git found above the current directory)"),
         }
     }
@@ -870,8 +878,22 @@ impl DaemonProxy {
     pub async fn state_update(&self, params: Parameters<StateUpdateParams>) -> CallToolResult {
         match &self.task_state {
             Some(store) => match store.update(&params.0.patch).await {
-                Ok(merged) => tool_text(&merged),
-                Err(e) => err_result(&e),
+                Ok(merged) => {
+                    // The patch itself, not the merged result: the patch is what's small and
+                    // what explains a later "why does state look like this" — the merged value
+                    // is already the whole point of `state.get`'s own log line.
+                    tracing::info!(
+                        target: "task_state",
+                        op = "update",
+                        patch = %params.0.patch,
+                        "state.update"
+                    );
+                    tool_text(&merged)
+                }
+                Err(e) => {
+                    tracing::info!(target: "task_state", op = "update", error = %e, "state.update refused");
+                    err_result(&e)
+                }
             },
             None => err_result("no project detected (no .git found above the current directory)"),
         }
@@ -885,10 +907,19 @@ impl DaemonProxy {
     )]
     pub async fn state_reset(&self) -> CallToolResult {
         match &self.task_state {
-            Some(store) => match store.reset().await {
-                Ok(empty) => tool_text(&empty),
-                Err(e) => err_result(&e),
-            },
+            Some(store) => {
+                // The DESTRUCTIVE one of the three, and the only place worth capturing what was
+                // lost: the key count before the clear, since a future "state is empty and I
+                // don't know why" is exactly what this line has to answer.
+                let had_keys = store.get().await.as_object().map(|m| m.len()).unwrap_or(0);
+                match store.reset().await {
+                    Ok(empty) => {
+                        tracing::info!(target: "task_state", op = "reset", had_keys, "state.reset");
+                        tool_text(&empty)
+                    }
+                    Err(e) => err_result(&e),
+                }
+            }
             None => err_result("no project detected (no .git found above the current directory)"),
         }
     }
