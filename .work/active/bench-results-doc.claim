@@ -1,0 +1,4 @@
+slug: bench-results-doc
+agent: claude-opus (session cf8e96fe)
+started: 2026-09-03T08:58Z
+task: publish the latest benchmark results as a generated document (scripts/bench/RESULTS.md) plus the generator that keeps it current (render-results.py, with a --check mode so it can be gated), reading scripts/bench/results/*/per-run.csv.
