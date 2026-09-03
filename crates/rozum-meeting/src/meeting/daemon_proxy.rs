@@ -90,6 +90,15 @@ pub struct SubmitParams {
     pub content: String,
 }
 
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StateUpdateParams {
+    /// The JSON Merge Patch (RFC 7396) object to merge into the durable
+    /// task state. An object field merges recursively; setting a field to
+    /// null DELETES it; any other value replaces it wholesale. Omit
+    /// fields that did not change.
+    pub patch: serde_json::Value,
+}
+
 struct State {
     sock: PathBuf,
     project: Option<String>,
@@ -155,6 +164,13 @@ pub struct DaemonProxy {
     /// watchdog reaps a proxy whose agent has gone silent (abandoned it on reconfig) so it
     /// doesn't linger — an MCP stdio proxy otherwise only exits on stdin-EOF.
     last_active: Arc<AtomicU64>,
+    /// The pinned project's durable task state (`state.get`/`state.update`/`state.reset`;
+    /// `super::task_state`). Computed once at construction from the SAME `project` `build()`
+    /// resolves the room from — detected from cwd for the stdio proxy, or the HTTP transport's
+    /// `?project=` pin — so it is correct per-session even though many `DaemonProxy` instances
+    /// (one per HTTP session, per project) share one long-lived daemon process. `None` when no
+    /// project resolved (no `.git` above cwd, and no `?project=` given).
+    task_state: super::task_state::SharedTaskState,
 }
 
 fn now_epoch() -> u64 {
@@ -250,6 +266,9 @@ impl DaemonProxy {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let task_state = project
+            .as_deref()
+            .map(|p| Arc::new(super::task_state::TaskState::for_project_path(p)));
         Self {
             state: Arc::new(Mutex::new(State {
                 sock,
@@ -271,6 +290,7 @@ impl DaemonProxy {
             rag_embedding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_router: Self::tool_router(),
             last_active: Arc::new(AtomicU64::new(now_epoch())),
+            task_state,
         }
     }
 
@@ -821,6 +841,56 @@ impl DaemonProxy {
         s.self_pid = None;
         s.cursor = None;
         r
+    }
+
+    /// Read the durable task state (a JSON object), independent of the
+    /// conversation. Call at the start of a task, and always right after a
+    /// compaction or a fresh session, to recover exactly where the task
+    /// stood — the conversation history may be gone or summarized; this
+    /// is not. Scoped to this project (`<project>/.rozum/state.json`).
+    #[tool(
+        name = "state.get",
+        description = "Read the durable per-project task state (a JSON object), independent of the conversation. Call at the start of a task and after any compaction or fresh session."
+    )]
+    pub async fn state_get(&self) -> CallToolResult {
+        match &self.task_state {
+            Some(store) => tool_text(&store.get().await),
+            None => err_result("no project detected (no .git found above the current directory)"),
+        }
+    }
+
+    /// Merge a JSON Merge Patch (RFC 7396) into the durable task state and
+    /// persist it. Call whenever a fact is learned or a decision is made
+    /// that must survive to the next turn or a fresh session — do not
+    /// rely on the conversation to carry it.
+    #[tool(
+        name = "state.update",
+        description = "Merge a JSON Merge Patch (RFC 7396) into the durable per-project task state and persist it. An object field merges recursively; null deletes a field; anything else replaces it. Omit fields that did not change."
+    )]
+    pub async fn state_update(&self, params: Parameters<StateUpdateParams>) -> CallToolResult {
+        match &self.task_state {
+            Some(store) => match store.update(&params.0.patch).await {
+                Ok(merged) => tool_text(&merged),
+                Err(e) => err_result(&e),
+            },
+            None => err_result("no project detected (no .git found above the current directory)"),
+        }
+    }
+
+    /// Clear the durable task state back to `{}`. Call this only when
+    /// starting a genuinely new task, not between steps of the same one.
+    #[tool(
+        name = "state.reset",
+        description = "Clear the durable per-project task state back to an empty object. Call only when starting a genuinely new task."
+    )]
+    pub async fn state_reset(&self) -> CallToolResult {
+        match &self.task_state {
+            Some(store) => match store.reset().await {
+                Ok(empty) => tool_text(&empty),
+                Err(e) => err_result(&e),
+            },
+            None => err_result("no project detected (no .git found above the current directory)"),
+        }
     }
 }
 
@@ -1792,5 +1862,115 @@ mod tests {
             .and_then(|a| a.iter().find_map(|c| c.get("text").and_then(Value::as_str)))
             .unwrap_or("");
         serde_json::from_str(text).unwrap_or(Value::Null)
+    }
+
+    fn is_error(r: &CallToolResult) -> bool {
+        serde_json::to_value(r)
+            .ok()
+            .and_then(|v| v.get("isError").and_then(Value::as_bool))
+            .unwrap_or(false)
+    }
+
+    // ── state.get / state.update / state.reset ──────────────────────────────
+
+    #[test]
+    fn state_tools_are_registered_in_the_tool_router() {
+        let names: Vec<String> = DaemonProxy::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for n in ["state.get", "state.update", "state.reset"] {
+            assert!(names.iter().any(|x| x == n), "{n} must be served; got {names:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn state_get_update_reset_over_the_real_dispatch() {
+        // `for_project(Some(path))` pins the project explicitly — the SAME mechanism
+        // the HTTP transport's `?project=` uses — so this never touches THIS repo's
+        // own `.rozum/state.json`, only a scratch project directory.
+        let dir = tempfile::tempdir().unwrap();
+        let proxy = DaemonProxy::for_project(Some(dir.path().display().to_string()));
+
+        assert_eq!(tool_result_json(&proxy.state_get().await), json!({}));
+
+        let updated = proxy
+            .state_update(Parameters(StateUpdateParams {
+                patch: json!({"task": "pack-orders", "picked": 3}),
+            }))
+            .await;
+        assert_eq!(tool_result_json(&updated), json!({"task": "pack-orders", "picked": 3}));
+
+        // a second patch merges, it does not replace
+        proxy
+            .state_update(Parameters(StateUpdateParams { patch: json!({"picked": 5}) }))
+            .await;
+        assert_eq!(
+            tool_result_json(&proxy.state_get().await),
+            json!({"task": "pack-orders", "picked": 5})
+        );
+
+        let reset = proxy.state_reset().await;
+        assert_eq!(tool_result_json(&reset), json!({}));
+        assert_eq!(tool_result_json(&proxy.state_get().await), json!({}));
+
+        // and it is on disk, at the project's own .rozum/state.json — not this repo's
+        let on_disk = dir.path().join(".rozum").join("state.json");
+        assert!(on_disk.exists());
+    }
+
+    #[tokio::test]
+    async fn state_update_refuses_a_non_object_patch_without_touching_sigma() {
+        let dir = tempfile::tempdir().unwrap();
+        let proxy = DaemonProxy::for_project(Some(dir.path().display().to_string()));
+        proxy
+            .state_update(Parameters(StateUpdateParams { patch: json!({"kept": "yes"}) }))
+            .await;
+
+        let result = proxy
+            .state_update(Parameters(StateUpdateParams { patch: json!([1, 2, 3]) }))
+            .await;
+        assert!(is_error(&result), "{result:?}");
+        assert_eq!(tool_result_json(&proxy.state_get().await), json!({"kept": "yes"}));
+    }
+
+    #[tokio::test]
+    async fn state_survives_a_restart_a_fresh_proxy_over_the_same_project_sees_the_last_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().display().to_string();
+        DaemonProxy::for_project(Some(project.clone()))
+            .state_update(Parameters(StateUpdateParams { patch: json!({"survived": true}) }))
+            .await;
+
+        // a NEW DaemonProxy over the SAME project — exactly what a second HTTP session,
+        // or a stdio proxy restarted after a crash, looks like from here
+        let restarted = DaemonProxy::for_project(Some(project));
+        assert_eq!(tool_result_json(&restarted.state_get().await), json!({"survived": true}));
+    }
+
+    #[tokio::test]
+    async fn state_tools_without_a_resolvable_project_answer_a_named_refusal() {
+        let proxy = DaemonProxy::for_project(None);
+        // In this test process cwd is somewhere under the `rozum` repo, so
+        // `detect_project` (the `None` fallback) actually resolves — the
+        // no-project path is exercised directly against the field instead.
+        let proxy = DaemonProxy { task_state: None, ..proxy };
+        let result = proxy.state_get().await;
+        assert!(is_error(&result));
+        assert!(tool_result_text(&result).contains("no project detected"), "{result:?}");
+    }
+
+    fn tool_result_text(r: &CallToolResult) -> String {
+        serde_json::to_value(r)
+            .ok()
+            .and_then(|v| {
+                v.get("content")?
+                    .as_array()?
+                    .iter()
+                    .find_map(|c| c.get("text").and_then(Value::as_str))
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
     }
 }

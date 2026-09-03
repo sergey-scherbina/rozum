@@ -27,6 +27,7 @@ pub mod room_path;
 pub mod sandbox_tools;
 pub mod state;
 pub mod store;
+pub mod task_state;
 pub mod tui_client;
 
 pub use list::list_rooms;
