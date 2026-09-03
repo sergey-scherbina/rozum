@@ -1,5 +1,40 @@
 # Changelog
 
+## durable-task-state-mcp — state.get / state.update / state.reset over MCP
+Completed: 2026-09-03
+
+A bounded, per-project JSON fact store, independent of the conversation — the operator asked
+whether a companion project's (`okay`, Scala) `StateMcp`/`Compact.skillState` design (SKILL.state,
+arxiv 2608.26263: an agent's future decisions depend on a small structured fact, not on the
+transcript that produced it) made sense here too, reimplemented natively since the two codebases
+share no runtime.
+
+Three tools on `DaemonProxy` — `state.get`, `state.update` (an RFC 7396 JSON Merge Patch: an object
+field merges recursively, `null` deletes it, anything else replaces), `state.reset` — backed by
+`task_state.rs`: a pure `merge_patch` (tested against the RFC's own §3 examples plus its own
+composition caveat, DEMONSTRATED with a case where combine-then-apply disagrees with
+apply-then-apply, not just asserted) and `TaskState`, an in-memory cache backed by
+`<project>/.rozum/state.json`. A non-object patch is refused outright rather than silently
+replacing the whole state.
+
+**Wired onto the right server the first time it mattered, not the first guess.** A first pass
+added the tools to `ProxyServer`/`run_proxy` (`proxy.rs`) before finding that binary has zero call
+sites in the workspace — the actually-live server behind both the stdio `mcp-proxy` and the
+`mcp-http` `?project=` per-project router is `DaemonProxy` (`daemon_proxy.rs`), confirmed against
+this machine's own `~/.claude.json` (`"rozum": {"type":"http", ...}`). Reverted before landing; the
+task state is computed once in `build()` from the SAME resolved `project` the room itself uses —
+cwd-detected for the stdio proxy, the HTTP transport's explicit `?project=` pin otherwise — so
+concurrent per-project HTTP sessions on one long-lived daemon each see their own project's state,
+never the daemon's own cwd.
+
+Tested at three levels: `task_state`'s own unit tests; `DaemonProxy`-level tests via
+`for_project(Some(tempdir))` — the SAME pinning mechanism the HTTP transport uses — proving the
+real dispatch without ever touching this repo's own `.rozum/state.json`; and a manual end-to-end
+run of the real `rozum-meet mcp-http` binary over the actual streamable-HTTP transport with
+`?project=<scratch dir>`, confirming the session handshake, three tool calls, and the file landing
+at the scratch project's own `.rozum/state.json`. `cargo test -p rozum-meeting`: 262/262. `cargo
+build --workspace`: clean.
+
 ## ssc-rust-string-repr — closed by measurement; the real defect was 25 lines away
 Completed: 2026-08-31
 
