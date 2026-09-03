@@ -1,0 +1,4 @@
+slug: docs-refresh
+agent: claude-opus (session cf8e96fe)
+started: 2026-09-03T08:42Z
+task: update and extend the EXISTING docs in place (README, INSTALL, TUTORIAL, USER_MANUAL, docs/nadia.md, docs/models.md) — keep each file's own structure and level of detail, fill the gaps left by everything added since they were written (RAG, task state, run journals + replay, gateway record/replay, messenger admin, incidents, doctor --services, admission).
