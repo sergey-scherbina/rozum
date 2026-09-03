@@ -102,6 +102,56 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   `uniml/markdown` campaign did on the vendor side (`ssc-rust-persistent-vector`) — this
   session profiled round 1's build, not round 2's, and stopped once the concat/CasesBlock fixes
   landed rather than chasing a third round.
+
+  **ROUND 3 — the contributor is NAMED, and it is not another peephole (measured 2026-09-03,
+  `ssc-perf-round3-diagnosis`).** Profiled round 2's own build, as this entry asked. The
+  remaining superlinearity is the accumulator itself: `BlockState.out: Vec<VmToken>` grows with
+  the document, and whole-state copies scattered through the var-free style deep-clone it —
+  every token, every `String` inside it — once per line. Not one site. The representation.
+
+  Proven by a diagnostic that changes nothing else: freeze the accumulator (`__ap.clear()`
+  before the push, so `out` never grows; output is wrong, that is the point) and the growth
+  **linearises immediately** — allocations ×2.03 and ×1.99 per doubling against ×3.8 before,
+  1600 lines 1.009 s → **0.028 s**. Nothing else was touched, so nothing else is the exponent.
+
+  Chasing sites is a constant-factor game, and the numbers say so rather than a hunch. Four
+  hand-verified move fixes in the generated Rust, each output-identical (five documents, chunk
+  digests byte-equal — `examples/mddigest.rs`):
+  1. `countOpens` ended `..(st).clone()` — a whole-state spread clone to change two scalars;
+  2. `track`'s Close and Reframe arms, same shape (`std::mem::take` on `frames`, then move);
+  3. `matchContainers`' `let st1 = scan.state.clone()` — a full deep clone PER LINE, where the
+     field can simply be moved out of the local `scan`;
+  4. `listAwareKeep(st: BlockState, …) -> i64` takes the state BY VALUE and only reads it, to
+     return an integer — a read-only param that wants `&BlockState`.
+  Together: **allocations 64.6M → 46.8M (−27 %), time 1.337 s → 1.009 s (−25 %) at 1600 lines,
+  and the doubling ratio moved 3.89 → 3.86, i.e. not at all.** That is the whole finding in one
+  line: a quarter of the work removed, the exponent untouched.
+
+  **So the ordering in this backlog is measurably backwards for this workload**:
+  `ssc-rust-reduce-clone-volume` was promoted ahead of `ssc-rust-persistent-vector`, and
+  reduce-clone-volume is exactly what these four patches are — worth having, never parity.
+  `ssc-rust-persistent-vector` (this file already calls it "the O(n²) class itself") is the item
+  that reaches parity, because it makes cloning the accumulator O(1) instead of O(tokens).
+
+  Attribution came from `examples/mdwhere.rs`, a sampling allocator that captures a backtrace
+  every 2048th allocation and attributes it to the innermost GENERATED function rather than to
+  the `Clone` impl that allocated — "Vec<VmToken> as Clone" is the symptom in every profile and
+  never says which caller runs n² times. It put `matchContainers` at 27.8 % → 30.0 % (growing
+  with size = the quadratic), `run` at ~17 %, `emit` at ~6 %. THREE hypotheses read off the code
+  died before it: `countOpens` (5 %), `listAwareKeep` (0 % — that branch never executes on a
+  document without lists, allocation counts came back identical to the digit), `track`'s arms
+  (7 %). Same lesson as the vendor-side campaign: profile every round, and read the ratio, not
+  the total.
+
+  Separate pre-existing defect, control-verified: main's generated markdown code **overflows
+  the stack in the DEBUG test profile** (`cargo test -p rozum-agent --lib rag_chunk`), with and
+  without the four patches — the release lane is fine, so the round-2 TCO work did not cover
+  whatever debug's larger frames reach. Not caused by this session; worth its own entry.
+
+  Instruments committed rather than left in a scratch dir, because this campaign has already
+  lost one harness to that: `examples/mdalloc.rs` (allocation COUNT vs BYTES separately — the
+  two grow differently and the difference is the diagnosis), `examples/mdwhere.rs` (attribution)
+  and `examples/mddigest.rs` (output equality across two builds of the generated crate).
 - [x] **rag-ann-threshold-watch — MEASURED 2026-09-02, exact search stays, but the FIRST number
   reported here was wrong and is corrected below.** Fused `rag.search` latency against the
   standalone MCP server, live over scalascript's FULL 94,981-chunk corpus (fresh process, 40
