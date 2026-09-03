@@ -1,0 +1,4 @@
+slug: bench-docs
+agent: claude-opus (session cf8e96fe)
+started: 2026-09-03T08:48Z
+task: document the benchmark harness — extend scripts/bench/README.md from one narrow topic to a real guide (matrix, knobs, the other probes, results layout, the honesty rules), add a measurement section to docs/REFERENCE.md, and point at it from README's Development section.
