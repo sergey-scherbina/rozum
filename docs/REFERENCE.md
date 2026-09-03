@@ -59,8 +59,10 @@ rozum gateway reload                  # graceful re-exec from the current binary
 ```
 
 **Or through the OpenAI API, with no rozum command at all.** `GET /v1/models` lists every model
-on disk — not just the loaded one — each by the spec you pass back in `model`, with `resident`
-marking the one serving now:
+on disk — not just the loaded one — exactly once each, with `resident` marking the one serving
+now. The resident's row comes first and its `id` is a `claude-…` alias rather than its bare spec,
+because that is the only id Claude Code's discovery will accept; both spellings work when you send
+one back. Every other row is the real spec:
 
 ```bash
 curl -s localhost:8080/v1/models | jq '.data[] | {id, resident, size_bytes}'

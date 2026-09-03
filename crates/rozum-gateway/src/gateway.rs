@@ -592,23 +592,41 @@ async fn admit_handler(State(state): State<GatewayState>) -> impl IntoResponse {
 /// Pure so the SHAPE is testable without a gateway — the parts that break clients are ordering
 /// and ids, and both are decided here.
 fn models_payload(model_id: &str, installed: &[(String, u64)], created: u64) -> serde_json::Value {
-    // The RESIDENT model, under its Claude alias, stays FIRST and unchanged: Claude Code's
-    // discovery only adds ids beginning with `claude`/`anthropic`, so this entry is the one it
-    // can see, and moving or renaming it would break a working client to tidy a list.
-    let mut data = vec![json!({
+    // ONE ROW PER MODEL. The resident's row comes first and wears the Claude alias as its `id`,
+    // which is not decoration: Claude Code's discovery only adds ids beginning with
+    // `claude`/`anthropic`, and `first_model_display_name` — how a meeting participant learns
+    // what the gateway is actually serving — reads `data[0].display_name`. Both are satisfied by
+    // this one row, so the resident is NOT listed a second time under its bare spec.
+    //
+    // The first cut did list it twice, and it read exactly as wrong as it was: the same weights
+    // appearing under two names, one of them an opaque `claude-rozum-…`. A catalogue with a
+    // duplicate in it invites picking the "other" one.
+    let resident_size = installed
+        .iter()
+        .find(|(spec, _)| rozum_models::model_source::same_model(spec, model_id))
+        .map(|(_, size)| *size);
+    let mut resident_row = json!({
         "id": claude_model_alias(model_id),
         "object": "model",
         "created": created,
         "owned_by": "rozum",
         "display_name": model_id,
         "resident": true,
-    })];
-    // Then every model ON DISK, by the spec you would pass back in `model`. Listing only the
+    });
+    if let Some(size) = resident_size {
+        resident_row["size_bytes"] = json!(size);
+    }
+    let mut data = vec![resident_row];
+    // Then every OTHER model on disk, by the spec you pass back in `model`. Listing only the
     // resident one made this endpoint answer a different question than the one clients ask:
     // "what can this gateway serve" is the catalogue, not "what is loaded this second" — and a
     // caller had no way to discover a model it could switch to (`rozum models list` knew, the
-    // API did not). `resident` says which one is loaded now, so the distinction stays visible.
+    // API did not). A model that is not resident is always here under its real spec; the moment
+    // it becomes resident it moves to the row above, so every model is listed exactly once.
     for (spec, size_bytes) in installed {
+        if rozum_models::model_source::same_model(spec, model_id) {
+            continue;
+        }
         data.push(json!({
             "id": spec,
             "object": "model",
@@ -616,7 +634,7 @@ fn models_payload(model_id: &str, installed: &[(String, u64)], created: u64) -> 
             "owned_by": "rozum",
             "display_name": spec,
             "size_bytes": size_bytes,
-            "resident": rozum_models::model_source::same_model(spec, model_id),
+            "resident": false,
         }));
     }
     // `data` is the OpenAI shape. `models` is the key Codex's model-list refresh requires — but
@@ -4218,7 +4236,7 @@ mod tests {
         ];
         let v = models_payload("mlx-community:Qwen3.5-4B-MLX-4bit", &installed, 7);
         let data = v["data"].as_array().expect("data array");
-        assert_eq!(data.len(), 3, "the alias entry plus one per installed model: {v}");
+        assert_eq!(data.len(), 2, "one row per model, never the resident twice: {v}");
 
         // First entry unchanged in shape, and that is load-bearing twice over: Claude Code finds
         // a gateway by an id starting with `claude`, and `first_model_display_name` (how a
@@ -4227,25 +4245,32 @@ mod tests {
         assert!(data[0]["id"].as_str().unwrap().starts_with("claude-"), "{v}");
         assert_eq!(data[0]["display_name"], "mlx-community:Qwen3.5-4B-MLX-4bit");
 
-        // The rest are real specs — the string a client passes back in `model`.
-        assert_eq!(data[1]["id"], "mlx-community:Qwen3.5-4B-MLX-4bit");
-        assert_eq!(data[1]["resident"], serde_json::json!(true), "the loaded one is marked");
-        assert_eq!(data[2]["id"], "mlx-community:Qwen3.8-27B-4bit");
-        assert_eq!(data[2]["resident"], serde_json::json!(false), "on disk, not loaded");
-        assert_eq!(data[2]["size_bytes"], serde_json::json!(15_000_000_000u64));
+        // The resident's own size travels on its row, so the alias entry is a complete one.
+        assert_eq!(data[0]["size_bytes"], serde_json::json!(3_000_000_000u64));
+        // The rest are real specs — the string a client passes back in `model` — and the resident
+        // does NOT appear again among them.
+        assert_eq!(data[1]["id"], "mlx-community:Qwen3.8-27B-4bit");
+        assert_eq!(data[1]["resident"], serde_json::json!(false), "on disk, not loaded");
+        assert_eq!(data[1]["size_bytes"], serde_json::json!(15_000_000_000u64));
+        let ids: Vec<&str> = data.iter().filter_map(|m| m["id"].as_str()).collect();
+        assert!(
+            !ids.contains(&"mlx-community:Qwen3.5-4B-MLX-4bit"),
+            "the resident is represented by its alias row alone: {ids:?}"
+        );
 
         // Codex reads `models` and validates every entry; an empty list is what keeps it quiet.
         assert_eq!(v["models"], serde_json::json!([]));
     }
 
-    /// Behavior: a model whose spec is spelled differently from the resident's is still marked
-    /// resident — `org/repo` and `org:repo` are one model, and showing it twice as "not loaded"
-    /// would invite a pointless swap.
+    /// Behavior: a model whose spec is spelled differently from the resident's is the SAME model
+    /// — `org/repo` and `org:repo` are one — so it must not appear as a second, "not loaded" row
+    /// that invites a pointless swap to what is already running.
     #[test]
-    fn models_payload_marks_an_equivalent_spelling_as_resident() {
+    fn models_payload_does_not_duplicate_the_resident_under_another_spelling() {
         let installed = vec![("mlx-community/Qwen3.5-4B-MLX-4bit".to_string(), 1u64)];
         let v = models_payload("mlx-community:Qwen3.5-4B-MLX-4bit", &installed, 0);
-        assert_eq!(v["data"][1]["resident"], serde_json::json!(true), "{v}");
+        assert_eq!(v["data"].as_array().unwrap().len(), 1, "one model, one row: {v}");
+        assert_eq!(v["data"][0]["resident"], serde_json::json!(true), "{v}");
     }
 
     #[tokio::test]
