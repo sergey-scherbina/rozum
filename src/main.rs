@@ -1328,6 +1328,24 @@ enum GatewayAction {
     Reload,
     /// Free the resident model but keep the daemon (lazy-reload on next request).
     Unload,
+    /// Journal the MODEL side of everything this gateway serves, or answer from a journal
+    /// instead of the model — live, without restarting the daemon under a running session.
+    ///
+    /// This is how a client that runs its OWN loop and its OWN tools (Claude Code, say) can be
+    /// recorded at all: the gateway is the only part of rozum in that path. A gateway replay is
+    /// therefore always the `live-tools` shape — the client's tools still run for real, and the
+    /// first tool result that differs changes the next request and diverges, loudly.
+    ///
+    /// Examples: `rozum gateway record start`, `rozum gateway record status`,
+    /// `rozum gateway record replay <id>`, `rozum gateway record stop`.
+    Record {
+        /// `start` (default) | `stop` | `status` | `replay`.
+        #[arg(default_value = "status")]
+        action: String,
+        /// For `start`: `auto` (default, into `.rozum/runs/<id>.jsonl`) or a path.
+        /// For `replay`: a run id or a path.
+        target: Option<String>,
+    },
     /// Run a RAM-heavy NON-rozum command (e.g. the python `mlx_lm` oracle, a bench sweep) THROUGH the
     /// host-wide admission queue, so it can't overcommit RAM behind rozum's back. Acquires a reservation
     /// for `--footprint` (or `--model`'s estimate), WAITS its turn in the queue, runs the command holding
@@ -1578,6 +1596,9 @@ async fn main() {
             }) => run_gateway_switch(model, n_ctx, backend).await,
             Some(GatewayAction::Reload) => run_gateway_reload().await,
             Some(GatewayAction::Unload) => run_gateway_unload().await,
+            Some(GatewayAction::Record { action, target }) => {
+                run_gateway_record(&action, target.as_deref()).await
+            }
             Some(GatewayAction::Admit { footprint, model, batch, program }) => {
                 run_gateway_admit(footprint, model, batch, program).await
             }
@@ -6264,6 +6285,26 @@ async fn run_gateway_unload() {
         ),
         Err(e) => {
             eprintln!("rozum gateway unload: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `rozum gateway record …` — drive the gateway's journal from the command line.
+async fn run_gateway_record(action: &str, target: Option<&str>) {
+    let mut body = serde_json::json!({ "action": action });
+    if let Some(t) = target {
+        body["target"] = serde_json::Value::String(t.to_string());
+    }
+    match gateway_control_post("/control/record", body).await {
+        Ok(j) => {
+            // Print the whole answer: it carries the path, the id to feed back to `replay`, and
+            // for a replay the caveat about the client's own tools. Swallowing any of that into
+            // a one-word "ok" would hide exactly what the operator needs next.
+            println!("{}", serde_json::to_string_pretty(&j).unwrap_or_else(|_| j.to_string()));
+        }
+        Err(e) => {
+            eprintln!("rozum gateway record: {e}");
             std::process::exit(1);
         }
     }

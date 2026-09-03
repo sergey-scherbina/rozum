@@ -117,6 +117,9 @@ fn test_state(seen: Arc<StdMutex<Option<String>>>) -> GatewayState {
         auth_token: None,
         observer: crate::obs::Observer::new(),
         activity: Arc::new(Activity::default()),
+        // These goldens are about the WIRE shape, which recording must not change: off here,
+        // and the recording path has its own tests.
+        journal: Arc::new(tokio::sync::Mutex::new(None)),
     }
 }
 

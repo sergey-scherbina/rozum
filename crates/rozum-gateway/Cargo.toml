@@ -16,6 +16,12 @@ ucc = ["dep:webauthn-rs"]
 [dependencies]
 base64 = "0.22"
 rozum-core = { path = "../rozum-core" }
+# L2 -> L3 is allowed by docs/specs/workspace-split.md ("lower or equal tier"), and
+# rozum-meeting already depends on it the same way. Used for ONE thing: the run journal
+# (`replay::{Journal, Entry, RecordingBackend, ReplayBackend}`) and its `.rozum/runs` store, so
+# a gateway-recorded session lands on the SAME shelf as a nadia run instead of inventing a
+# second journal format that would drift from the first.
+rozum-agent = { path = "../rozum-agent" }
 # One resolution order for "where does this user keep files", shared with rozum-meeting (which
 # cannot depend on rozum-core) — docs/specs/windows-user-paths.md.
 rozum-paths = { path = "../rozum-paths" }

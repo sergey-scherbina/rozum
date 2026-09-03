@@ -93,6 +93,123 @@ struct GatewayState {
     observer: Arc<crate::obs::Observer>,
     /// Liveness for the shared-daemon idle watchdog.
     activity: Arc<Activity>,
+    /// Record / replay of the MODEL side of every request this gateway serves
+    /// (`docs/specs/` — the `replay` skill). `None` is the default and the overwhelmingly
+    /// common case: nothing journals unless someone asked for it.
+    ///
+    /// Behind a lock because it is toggled at RUNTIME through the control plane: a session
+    /// already in flight (a Claude Code run, say) can start being recorded without restarting
+    /// the gateway under it, which is the whole point of putting the switch here rather than
+    /// in a startup flag.
+    journal: Arc<tokio::sync::Mutex<Option<JournalMode>>>,
+}
+
+/// What the gateway is doing with a journal right now.
+enum JournalMode {
+    /// Every model call is forwarded and appended.
+    Recording(Arc<rozum_agent::replay::Journal>),
+    /// Every model call is answered FROM the journal; the backend is not called at all.
+    ///
+    /// Only the MODEL side can be replayed here, and that is not a limitation of this code but
+    /// of where the gateway sits: the client (Claude Code, say) runs its own tools, and the
+    /// gateway never sees them except as text arriving in the next request. So a gateway replay
+    /// is always the `live-tools` shape — and it diverges, loudly, the moment a tool answers
+    /// differently, because that changes the very next request's fingerprint.
+    Replaying(Arc<rozum_agent::replay::Journal>),
+}
+
+/// Resolve a record target and create the journal. `auto` picks
+/// `<cwd>/.rozum/runs/<id>.jsonl` — the same shelf `nadia runs list` reads, so a gateway
+/// recording and an agent recording are the same kind of object in the same place.
+fn open_record_journal(target: &str) -> std::io::Result<rozum_agent::replay::Journal> {
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let path = if target == "auto" {
+        rozum_agent::replay::new_run_path(&root)
+    } else {
+        std::path::PathBuf::from(target)
+    };
+    let j = rozum_agent::replay::Journal::create(&path)?;
+    // The header, so this shows up in `runs list` with a task and a model rather than blank.
+    // The gateway does not know the user's task — it only ever sees a conversation — so it
+    // says what it does know, plainly, instead of guessing.
+    j.write_meta(
+        "(gateway recording: whatever client was served)",
+        &root.to_string_lossy(),
+        "gateway",
+        None,
+        None,
+    );
+    Ok(j)
+}
+
+/// A [`ChatBackend`] that owns its parts, so it can go into the `Arc<dyn ChatBackend>` the
+/// serving path takes. The recording logic itself is NOT duplicated here — it delegates to
+/// `rozum_agent::replay`'s borrowing decorator for the duration of the one call.
+struct RecordingArc {
+    inner: Arc<dyn ChatBackend>,
+    journal: Arc<rozum_agent::replay::Journal>,
+}
+
+#[async_trait::async_trait]
+impl ChatBackend for RecordingArc {
+    async fn chat(&self, req: ChatRequest) -> Result<ChatStream, crate::backend::ModelError> {
+        rozum_agent::replay::RecordingBackend::new(self.inner.as_ref(), &self.journal)
+            .chat(req)
+            .await
+    }
+    fn context_window(&self) -> u32 {
+        self.inner.context_window()
+    }
+    fn max_context_window(&self) -> u32 {
+        self.inner.max_context_window()
+    }
+    fn try_grow_context(&self, want: u32) -> u32 {
+        self.inner.try_grow_context(want)
+    }
+    fn shrink_idle_context(&self) -> Option<(u32, u32)> {
+        self.inner.shrink_idle_context()
+    }
+    fn label(&self) -> &'static str {
+        self.inner.label()
+    }
+    fn concurrency_capacity(&self) -> Option<usize> {
+        self.inner.concurrency_capacity()
+    }
+}
+
+/// The replay twin of [`RecordingArc`]. Context-window questions still go to the real backend:
+/// they are about what this gateway can serve, not about what the recording did.
+struct ReplayArc {
+    inner: Arc<dyn ChatBackend>,
+    journal: Arc<rozum_agent::replay::Journal>,
+}
+
+#[async_trait::async_trait]
+impl ChatBackend for ReplayArc {
+    async fn chat(&self, req: ChatRequest) -> Result<ChatStream, crate::backend::ModelError> {
+        rozum_agent::replay::ReplayBackend::new(&self.journal)
+            .with_context_window(self.inner.context_window())
+            .chat(req)
+            .await
+    }
+    fn context_window(&self) -> u32 {
+        self.inner.context_window()
+    }
+    fn max_context_window(&self) -> u32 {
+        self.inner.max_context_window()
+    }
+    fn try_grow_context(&self, want: u32) -> u32 {
+        self.inner.try_grow_context(want)
+    }
+    fn shrink_idle_context(&self) -> Option<(u32, u32)> {
+        self.inner.shrink_idle_context()
+    }
+    fn label(&self) -> &'static str {
+        self.inner.label()
+    }
+    fn concurrency_capacity(&self) -> Option<usize> {
+        self.inner.concurrency_capacity()
+    }
 }
 
 /// Tracks request activity so the shared gateway can idle-exit (free the model)
@@ -685,8 +802,23 @@ async fn serve_wire<D: WireDialect>(
     // One fingerprint for both guards: the stall counter in `chat_or_loopbreak` and the stream
     // watchdog that feeds it. Taken before the request moves into the backend.
     let sig = crate::serving::request_signature_of(&chat_req);
+    // Record / replay sits HERE, between the assembled request and the backend, because this is
+    // the one point where the request is already the internal `ChatRequest` the journal speaks
+    // and the response has not yet been turned back into wire bytes. Nothing to journal in the
+    // overwhelmingly common case, and then this is one lock and one `None`.
+    let served: Arc<dyn ChatBackend> = match &*state.journal.lock().await {
+        Some(JournalMode::Recording(j)) => Arc::new(RecordingArc {
+            inner: lease.backend.clone(),
+            journal: j.clone(),
+        }),
+        Some(JournalMode::Replaying(j)) => Arc::new(ReplayArc {
+            inner: lease.backend.clone(),
+            journal: j.clone(),
+        }),
+        None => lease.backend.clone(),
+    };
     let started = start_chat_bounded(
-        &lease.backend,
+        &served,
         chat_req,
         &cancel,
         crate::serving::gen_inactivity_timeout(),
@@ -1176,6 +1308,91 @@ async fn control_unload(State(state): State<GatewayState>) -> Response {
     }
 }
 
+/// `POST /control/record` — start, stop, or replay a run journal, live, without restarting the
+/// gateway under whatever session is already talking to it.
+///
+/// Body: `{"action":"start","target":"auto|<path>"}` / `{"action":"stop"}` /
+/// `{"action":"replay","target":"<id|path>"}` / `{"action":"status"}`.
+async fn control_record(
+    State(state): State<GatewayState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("status");
+    let target = body.get("target").and_then(|v| v.as_str()).unwrap_or("auto");
+    let mut slot = state.journal.lock().await;
+    match action {
+        "start" => match open_record_journal(target) {
+            Ok(j) => {
+                let path = j.path().to_path_buf();
+                let id = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+                *slot = Some(JournalMode::Recording(Arc::new(j)));
+                axum::Json(json!({
+                    "status": "recording", "path": path.display().to_string(), "id": id,
+                }))
+                .into_response()
+            }
+            Err(e) => error_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("cannot record to {target}: {e}"),
+                "record_failed",
+            ),
+        },
+        "replay" => {
+            let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let path = rozum_agent::replay::resolve_run(&root, target);
+            match rozum_agent::replay::Journal::open(&path) {
+                Ok(j) => {
+                    let entries = j.len();
+                    *slot = Some(JournalMode::Replaying(Arc::new(j)));
+                    axum::Json(json!({
+                        "status": "replaying",
+                        "path": path.display().to_string(),
+                        "entries": entries,
+                        // Said in the response, not only in a doc: a gateway replay can only
+                        // ever be the live-tools shape, because the client runs its own tools.
+                        "note": "model answers come from the journal; the client's own tools \
+                                 still run for real, and the first tool result that differs \
+                                 will diverge the next request",
+                    }))
+                    .into_response()
+                }
+                Err(e) => error_json(
+                    StatusCode::BAD_REQUEST,
+                    &format!("cannot replay {}: {e}", path.display()),
+                    "replay_failed",
+                ),
+            }
+        }
+        "stop" => {
+            let was = describe_journal(&slot);
+            *slot = None;
+            axum::Json(json!({ "status": "stopped", "was": was })).into_response()
+        }
+        "status" => axum::Json(json!({ "status": describe_journal(&slot) })).into_response(),
+        other => error_json(
+            StatusCode::BAD_REQUEST,
+            &format!("unknown action `{other}` (start | stop | replay | status)"),
+            "record_failed",
+        ),
+    }
+}
+
+/// One line describing what the journal slot is doing, for `status` and for `stop`'s "was".
+fn describe_journal(slot: &Option<JournalMode>) -> serde_json::Value {
+    match slot {
+        Some(JournalMode::Recording(j)) => json!({
+            "mode": "recording", "path": j.path().display().to_string(), "written": j.written(),
+        }),
+        Some(JournalMode::Replaying(j)) => json!({
+            "mode": "replaying",
+            "path": j.path().display().to_string(),
+            "consumed": j.consumed(),
+            "entries": j.len(),
+        }),
+        None => json!({ "mode": "off" }),
+    }
+}
+
 /// `POST /control/reload` — graceful restart from the current binary (picks up an
 /// upgraded `rozum`). Drains, then re-execs with the current model/port. The
 /// brief port gap is covered by the proxies' replay path, like a failover.
@@ -1418,6 +1635,22 @@ pub async fn serve_on(
         auth_token: std::env::var("ROZUM_GATEWAY_TOKEN").ok(),
         observer,
         activity: Arc::new(Activity::default()),
+        // Off unless a startup env var asks otherwise; the control plane can flip it later.
+        // `ROZUM_GATEWAY_RECORD=<path|auto>` exists for the launch path, where the gateway is
+        // spawned for one session and there is nobody to call the control endpoint first.
+        journal: Arc::new(tokio::sync::Mutex::new(match std::env::var("ROZUM_GATEWAY_RECORD") {
+            Ok(v) if !v.trim().is_empty() => match open_record_journal(&v) {
+                Ok(j) => {
+                    eprintln!("rozum gateway: recording model calls to {}", j.path().display());
+                    Some(JournalMode::Recording(Arc::new(j)))
+                }
+                Err(e) => {
+                    eprintln!("rozum gateway: cannot record to {v}: {e}");
+                    None
+                }
+            },
+            _ => None,
+        })),
     };
 
     // Lifecycle watchdog (shared daemon). Per 2 s tick, in order:
@@ -1654,6 +1887,7 @@ pub async fn serve_on(
         .route("/control/switch", post(control_switch))
         .route("/control/unload", post(control_unload))
         .route("/control/reload", post(control_reload))
+        .route("/control/record", post(control_record))
         .layer(middleware::from_fn(poison_layer))
         .layer(middleware::from_fn_with_state(state.clone(), auth_layer))
         .with_state(state.clone());

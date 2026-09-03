@@ -399,6 +399,12 @@ impl Journal {
         });
     }
 
+    /// Where this journal lives — so a caller that was handed one can say where it wrote
+    /// without having been told the path separately.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// How many entries this handle has appended (see the field's own comment).
     pub fn written(&self) -> usize {
         self.written.load(std::sync::atomic::Ordering::SeqCst)
