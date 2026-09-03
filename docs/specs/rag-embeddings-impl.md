@@ -240,6 +240,15 @@ fused.** Not comparable to the lost 21/26 (different questions); this is the num
 retrieval changes are measured against. The three top-5-only questions are the genuinely
 hard phrasings (auto_context "shortening", constrain grammar-vs-driver, verify gate).
 
+**Re-verified 2026-09-03: 22/25 and 25/25, unchanged** — and the same three questions are
+the top-5-only ones. Run deliberately after a large PROSE addition to the corpus (the
+documentation refresh: README, USER_MANUAL, REFERENCE, models.md, RESULTS.md), because
+"prose outranks the code it describes" is this stack's documented failure mode and those
+files were written in exactly the areas the eval asks about. It did not fire; the
+implementation slots held. Two things this makes cheap to know: the baseline is
+reproducible rather than a one-off fit, and re-running the eval is the right reflex after
+writing docs, not only after touching ranking.
+
 ### Multi-repo coverage + the expansion verdict (2026-09-01, `rag-scalascript-and-expansion`)
 
 - **scalascript is indexed**: 7,845 files → **94,849 chunks** — and its first indexing run paid
