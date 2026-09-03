@@ -1,0 +1,4 @@
+slug: publish-results
+agent: claude-opus (session cf8e96fe)
+started: 2026-09-03T09:12Z
+task: finish publishing the benchmark results into the user-facing docs — README did not link RESULTS.md at all (the link predates the file), and models.md carries no measured numbers where a reader picks a model.
