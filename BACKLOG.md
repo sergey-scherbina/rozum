@@ -234,6 +234,16 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   from main: **1.337 s → 0.038 s (35×), 64.6M → 1.58M allocations (41×)** — and about 5× faster
   than the vendored prestage10 lane at the same size.
 
+  **Branch pushed and fully green (2026-09-03):** `feature/rust-fold-accumulator-move` at
+  `fb0aeb022`, one commit ahead of `origin/main`, fast-forwardable. 532 backend tests plus the
+  whole `scripts/smoke-ci` suite — **148/148, zero failures** (125 ok, 23 skip). Three earlier
+  reds all explained rather than waved off: `v1-jit-size` caught `renderTerm` 43948 → 44841 and
+  the freeze was RAISED with attribution, exactly as round 2's own entry did; `bin/jssc missing`
+  was a fresh worktree where `cli/installBin` builds only some launchers (`./install.sh --dev`
+  builds the rest); and `build-ram-guards-guard` was host state, green on the re-run. Not merged
+  to `main` — round 2 went there only on the operator's explicit say-so, and this is the owner's
+  repo with concurrent v3 work in it.
+
   Remaining for phase 2, and the reason it is not just "swap the type": the type must PROPAGATE.
   Only 6 sites needed a conversion by hand here because `BlockState.out` barely escapes, but in
   general a field whose representation changes flows into `Vec`-typed slots, and the backend has
