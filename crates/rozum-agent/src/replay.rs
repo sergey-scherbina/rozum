@@ -66,6 +66,26 @@ pub enum Entry {
         /// Set when the stream itself failed to start.
         error: Option<String>,
     },
+    /// The header line: what this run WAS, written once, first. Not a call — readers skip it
+    /// like [`Entry::Note`] — but unlike a note it is machine-readable, which is what lets
+    /// `list_runs` show a table without parsing whole journals, and what gives a fork real
+    /// lineage instead of a sentence a human has to read.
+    Meta {
+        /// The task the run was given.
+        task: String,
+        /// Where it was allowed to act. Replay needs the same one (it is in the fingerprint).
+        workspace: String,
+        /// The model id asked for, as recorded — informational; replay never calls a model.
+        model: String,
+        /// Unix seconds.
+        created: u64,
+        /// The journal this one was forked FROM, if any.
+        parent: Option<String>,
+        /// How long the parent journal was, in entries. NOT the fork index: this header is
+        /// written before the run starts, when where it will diverge is unknown. The precise
+        /// point is in the fork's own `Note`, written when it actually happens.
+        parent_entries: Option<usize>,
+    },
     /// A provenance line, not a call: written when a journal is FORKED from another one at a
     /// divergence (see [`ForkingTools`]). Readers skip it — it matches no call and consumes no
     /// cursor position for fingerprint purposes — so a forked journal replays exactly like any
@@ -355,6 +375,30 @@ impl Journal {
         }
     }
 
+    /// Write the header line. Call once, first, before anything else is appended — `list_runs`
+    /// reads exactly the first line and a journal whose header is not first is a journal that
+    /// does not appear in the list correctly.
+    pub fn write_meta(
+        &self,
+        task: &str,
+        workspace: &str,
+        model: &str,
+        parent: Option<String>,
+        parent_entries: Option<usize>,
+    ) {
+        self.append(&Entry::Meta {
+            task: task.to_string(),
+            workspace: workspace.to_string(),
+            model: model.to_string(),
+            created: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            parent,
+            parent_entries,
+        });
+    }
+
     /// How many entries this handle has appended (see the field's own comment).
     pub fn written(&self) -> usize {
         self.written.load(std::sync::atomic::Ordering::SeqCst)
@@ -368,7 +412,10 @@ impl Journal {
     fn next(&self) -> Result<Entry, String> {
         let mut guard = self.replay.lock().expect("journal cursor poisoned");
         let (entries, at) = &mut *guard;
-        while matches!(entries.get(*at), Some(Entry::Note { .. })) {
+        while matches!(
+            entries.get(*at),
+            Some(Entry::Note { .. } | Entry::Meta { .. })
+        ) {
             *at += 1;
         }
         match entries.get(*at) {
@@ -550,7 +597,9 @@ impl ChatBackend for ReplayBackend<'_> {
                 "replay diverged: the run asked the MODEL, the journal's next entry is the tool \
                  call '{name}'"
             ))),
-            Entry::Note { .. } => unreachable!("Journal::next skips notes"),
+            Entry::Note { .. } | Entry::Meta { .. } => {
+                unreachable!("Journal::next skips notes and meta")
+            }
         }
     }
 
@@ -609,7 +658,9 @@ impl ToolSource for ReplayTools<'_> {
                 "replay diverged: the run called the tool '{name}', the journal's next entry is \
                  a model call"
             ))),
-            Entry::Note { .. } => unreachable!("Journal::next skips notes"),
+            Entry::Note { .. } | Entry::Meta { .. } => {
+                unreachable!("Journal::next skips notes and meta")
+            }
         }
     }
 }
@@ -677,7 +728,9 @@ impl ToolSource for ReplayLiveTools<'_> {
                     "replay diverged: the run called the tool '{name}', the journal's next entry                      is a model call"
                 )));
             }
-            Entry::Note { .. } => unreachable!("Journal::next skips notes"),
+            Entry::Note { .. } | Entry::Meta { .. } => {
+                unreachable!("Journal::next skips notes and meta")
+            }
         };
         // The plan itself must match. This is the same check the strict mode makes, and it has
         // to come FIRST: running a live tool for a call the recording never made would touch
@@ -718,6 +771,135 @@ impl ToolSource for ReplayLiveTools<'_> {
             self.journal.len()
         )))
     }
+}
+
+// ─── Where journals live ──────────────────────────────────────────────────────
+
+/// The managed home for a project's run journals: `<project>/.rozum/runs`.
+///
+/// A path the caller picks by hand is fine for one journal and becomes `run.jsonl`,
+/// `run2.jsonl`, `run-fixed-final.jsonl` by the end of the week — and with forking, journals
+/// have LINEAGE, which loose filenames cannot carry. Same `.rozum/` the index and the task
+/// state already use, for the same reason: one place per project, discoverable without being
+/// told where to look.
+pub fn runs_dir(project_root: impl AsRef<Path>) -> PathBuf {
+    project_root.as_ref().join(".rozum").join("runs")
+}
+
+/// A fresh run id: sortable timestamp + a short random-ish suffix, so two runs started in the
+/// same second do not collide and `ls` is chronological without parsing anything.
+pub fn new_run_id() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    format!("{secs}-{}", short_hash(&format!("{secs}{nanos}"))[..6].to_string())
+}
+
+/// Where a new run's journal goes under [`runs_dir`].
+pub fn new_run_path(project_root: impl AsRef<Path>) -> PathBuf {
+    runs_dir(project_root).join(format!("{}.jsonl", new_run_id()))
+}
+
+/// Resolve what a user typed into a journal path: an existing file is taken as-is, anything
+/// else is looked up as an id under [`runs_dir`]. Lets `--replay <id>` and `--replay <path>`
+/// both work without a second flag to say which one it is.
+pub fn resolve_run(project_root: impl AsRef<Path>, id_or_path: &str) -> PathBuf {
+    let direct = PathBuf::from(id_or_path);
+    if direct.is_file() {
+        return direct;
+    }
+    let named = runs_dir(&project_root).join(id_or_path);
+    if named.is_file() {
+        return named;
+    }
+    runs_dir(project_root).join(format!("{id_or_path}.jsonl"))
+}
+
+/// One row of `list_runs`: what a journal says about itself, read from its header alone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunInfo {
+    pub id: String,
+    pub path: PathBuf,
+    pub task: String,
+    pub workspace: String,
+    pub model: String,
+    pub created: u64,
+    pub parent: Option<String>,
+    pub parent_entries: Option<usize>,
+    /// Total lines in the file — entries, including the header and any notes.
+    pub entries: usize,
+}
+
+/// Every journal in a project's runs directory, newest first.
+///
+/// Reads each file's FIRST line only (the header) plus a line count — listing twenty runs must
+/// not mean parsing twenty whole transcripts. A file with no header still appears, with empty
+/// fields: a journal written before headers existed, or by a caller that did not write one, is
+/// still a journal, and hiding it would make the list lie.
+pub fn list_runs(project_root: impl AsRef<Path>) -> Vec<RunInfo> {
+    let dir = runs_dir(project_root);
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let entries = text.lines().filter(|l| !l.trim().is_empty()).count();
+        let header = text
+            .lines()
+            .next()
+            .and_then(|l| serde_json::from_str::<Entry>(l).ok());
+        let info = match header {
+            Some(Entry::Meta {
+                task,
+                workspace,
+                model,
+                created,
+                parent,
+                parent_entries,
+            }) => RunInfo {
+                id,
+                path,
+                task,
+                workspace,
+                model,
+                created,
+                parent,
+                parent_entries,
+                entries,
+            },
+            _ => RunInfo {
+                id,
+                path,
+                task: String::new(),
+                workspace: String::new(),
+                model: String::new(),
+                created: 0,
+                parent: None,
+                parent_entries: None,
+                entries,
+            },
+        };
+        out.push(info);
+    }
+    out.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
+    out
 }
 
 /// Shared "have we forked yet" flag between [`ForkingBackend`] and [`ForkingTools`]. One run
@@ -823,7 +1005,9 @@ impl ChatBackend for ForkingBackend<'_> {
                 "replay diverged: the run asked the model, the journal's next entry is a call \
                  to the tool '{name}'"
             ))),
-            Entry::Note { .. } => unreachable!("Journal::next skips notes"),
+            Entry::Note { .. } | Entry::Meta { .. } => {
+                unreachable!("Journal::next skips notes and meta")
+            }
         }
     }
 
@@ -883,7 +1067,9 @@ impl ToolSource for ForkingTools<'_> {
                      is a model call"
                 )));
             }
-            Entry::Note { .. } => unreachable!("Journal::next skips notes"),
+            Entry::Note { .. } | Entry::Meta { .. } => {
+                unreachable!("Journal::next skips notes and meta")
+            }
         };
         // The PLAN must still match even here: a live tool run for a call the recording never
         // made would touch the world on behalf of a run that already diverged, and there would
@@ -1444,6 +1630,70 @@ mod tests {
         assert!(
             seen.contains("disk on fire"),
             "and what the recording had, got: {seen:?}"
+        );
+    }
+
+    /// The store: a header that survives a round trip, a listing that reads it without parsing
+    /// the whole file, an id that resolves back to a path, and a headerless journal that still
+    /// appears rather than being hidden.
+    #[test]
+    fn runs_are_listed_from_their_headers_and_resolve_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let first = new_run_path(root);
+        let j = Journal::create(&first).unwrap();
+        j.write_meta("add one to 41", "/tmp/ws", "local", None, None);
+        j.append(&Entry::Note { text: "body".into() });
+
+        // A fork of it, carrying lineage in the header rather than in prose.
+        let second = new_run_path(root);
+        let parent_id = first.file_stem().unwrap().to_str().unwrap().to_string();
+        let j2 = Journal::create(&second).unwrap();
+        j2.write_meta("add one to 41", "/tmp/ws", "local", Some(parent_id.clone()), Some(2));
+
+        // And one with no header at all — written before headers existed, say.
+        let bare = runs_dir(root).join("bare.jsonl");
+        let j3 = Journal::create(&bare).unwrap();
+        j3.append(&Entry::Note { text: "no header".into() });
+
+        let runs = list_runs(root);
+        assert_eq!(runs.len(), 3, "every journal is listed, header or not: {runs:?}");
+
+        let forked = runs.iter().find(|r| r.parent.is_some()).expect("the fork is listed");
+        assert_eq!(forked.parent.as_deref(), Some(parent_id.as_str()));
+        assert_eq!(forked.parent_entries, Some(2));
+        assert_eq!(forked.task, "add one to 41");
+
+        let headerless = runs.iter().find(|r| r.id == "bare").expect("listed anyway");
+        assert!(headerless.task.is_empty(), "and says nothing rather than inventing it");
+        assert_eq!(headerless.entries, 1);
+
+        // An id resolves; so does a full path; an unknown id resolves to where it WOULD live.
+        assert_eq!(resolve_run(root, &parent_id), first);
+        assert_eq!(resolve_run(root, first.to_str().unwrap()), first);
+        assert_eq!(resolve_run(root, "nope"), runs_dir(root).join("nope.jsonl"));
+    }
+
+    /// The header must not be visible to a replay: it matches no call, so a journal that has
+    /// one replays exactly like a journal that does not.
+    #[tokio::test]
+    async fn a_header_does_not_shift_the_replay_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.jsonl");
+        let live = Scripted::new(vec![vec![ChatEvent::TextDelta { text: "hi".into() }, done()]]);
+        {
+            let j = Journal::create(&path).unwrap();
+            j.write_meta("say hi", "/tmp/ws", "local", None, None);
+            let backend = RecordingBackend::new(&live, &j);
+            let _ = backend.chat(req("say hi")).await.unwrap().collect::<Vec<_>>().await;
+        }
+        let j = Journal::open(&path).unwrap();
+        let backend = ReplayBackend::new(&j);
+        let events: Vec<_> = backend.chat(req("say hi")).await.unwrap().collect().await;
+        assert!(
+            matches!(events.first(), Some(Ok(ChatEvent::TextDelta { text })) if text == "hi"),
+            "the header was skipped and the model entry answered: {events:?}"
         );
     }
 

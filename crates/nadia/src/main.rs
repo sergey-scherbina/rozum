@@ -28,6 +28,8 @@ USAGE:
     nadia chat            interactive session (default when no arguments)
     nadia serve           expose the subagent protocol over HTTP
     nadia mcp list        the configured MCP servers (--probe also lists their tools)
+    nadia runs list       recorded run journals in this project (.rozum/runs)
+    nadia runs rm <ID>    delete one
     nadia help            this text
 
 OPTIONS:
@@ -41,13 +43,16 @@ OPTIONS:
     --mcp <NAME>          connect this MCP server's tools (repeatable)
     --mcp-all             connect every server in the config
     --mcp-config <PATH>   [default: <workspace>/.mcp.json, else ~/.config/nadia/mcp.json]
-    --record <PATH>       journal this run (model replies + tool results) as JSONL
-    --replay <PATH>       re-run that journal: no gateway, no model, no tools
+    --record <PATH|auto>  journal this run (model replies + tool results) as JSONL;
+                          `auto` places it in .rozum/runs and prints the id
+    --replay <ID|PATH>    re-run that journal: no gateway, no model, no tools
     --replay-live-tools   with --replay: replay the PLAN, run tools for real, and stop at
                           the first tool result that differs from the recording
-    --replay-fork <PATH>  with --replay: like --replay-live-tools, but instead of stopping at
+    --replay-fork <PATH|auto>
+                          with --replay: like --replay-live-tools, but instead of stopping at
                           the divergence, carry on with a LIVE model and write the whole run
-                          (replayed prefix + a note + the continuation) to PATH
+                          (replayed prefix + a note + the continuation) out; `auto` places it
+                          in .rozum/runs, with the parent id recorded in its header
     --port <N>            serve: listen here                  [default: 8790]
     --token <T>           serve: required in x-nadia-token; mandatory off loopback
     --bind <ADDR>         serve: address to bind              [default: 127.0.0.1]
@@ -394,9 +399,27 @@ async fn main() {
         eprintln!("nadia: --replay-fork and --replay-live-tools are mutually exclusive");
         std::process::exit(2);
     }
-    let journal = match (&opts.record, &opts.replay) {
+    // `auto` means "you pick the name": .rozum/runs/<id>.jsonl, printed so the id can be fed
+    // straight back to --replay. A literal path still works and is left exactly where it is.
+    let record_path = opts.record.as_ref().map(|p| {
+        if p.as_os_str() == "auto" {
+            rozum_agent::replay::new_run_path(&root)
+        } else {
+            p.clone()
+        }
+    });
+    // A replay argument is an id OR a path — resolved without a second flag to say which.
+    let replay_path = opts
+        .replay
+        .as_ref()
+        .map(|p| rozum_agent::replay::resolve_run(&root, &p.to_string_lossy()));
+    let journal = match (&record_path, &replay_path) {
         (Some(p), _) => match rozum_agent::replay::Journal::create(p) {
-            Ok(j) => Some(j),
+            Ok(j) => {
+                // The header, first line, before anything else is appended.
+                j.write_meta(&task, &root.to_string_lossy(), &opts.model, None, None);
+                Some(j)
+            }
             Err(e) => {
                 eprintln!("nadia: cannot record to {}: {e}", p.display());
                 std::process::exit(2);
@@ -436,9 +459,31 @@ async fn main() {
     // The fork's OUTPUT journal, and the shared "have we forked yet" flag its two halves agree
     // on. Created eagerly so the file exists (and any permission problem is reported) before a
     // single model call is spent.
-    let fork_out = match &opts.replay_fork {
+    let fork_path = opts.replay_fork.as_ref().map(|p| {
+        if p.as_os_str() == "auto" {
+            rozum_agent::replay::new_run_path(&root)
+        } else {
+            p.clone()
+        }
+    });
+    let fork_out = match &fork_path {
         Some(p) => match rozum_agent::replay::Journal::create(p) {
-            Ok(j) => Some(j),
+            Ok(j) => {
+                // Lineage in the header, machine-readable — the note inside says the same in
+                // prose, but `nadia runs list` cannot read prose.
+                let parent = replay_path
+                    .as_ref()
+                    .and_then(|p| p.file_stem())
+                    .map(|s| s.to_string_lossy().into_owned());
+                j.write_meta(
+                    &task,
+                    &root.to_string_lossy(),
+                    &opts.model,
+                    parent,
+                    journal.as_ref().map(|old| old.len()),
+                );
+                Some(j)
+            }
             Err(e) => {
                 eprintln!("nadia: cannot write the fork to {}: {e}", p.display());
                 std::process::exit(2);
@@ -480,10 +525,10 @@ async fn main() {
             (_, _, _, Some(t)) => t,
             _ => &tools,
         };
-    if let Some(p) = &opts.record {
+    if let Some(p) = &record_path {
         eprintln!("nadia: recording this run to {}", p.display());
     }
-    if let Some(p) = &opts.replay {
+    if let Some(p) = &replay_path {
         eprintln!(
             "nadia: replaying {} ({} entries){}",
             p.display(),
@@ -534,7 +579,7 @@ async fn main() {
             // up inside `operations` while what surfaces at the end is the model-level
             // divergence it caused one step later. Lift it back out: this line IS the answer the
             // mode exists to produce, and burying it under a fingerprint mismatch would waste it.
-            if let Some(p) = &opts.replay_fork {
+            if let Some(p) = &fork_path {
                 // Say which of the two things happened, because both are useful and they mean
                 // opposite things: a fork is "the world moved and here is the new run", no fork
                 // is "today's world still answers exactly as the recording did".
@@ -689,6 +734,48 @@ async fn main() {
                 std::process::exit(2);
             }
             std::process::exit(run_mcp_list(&opts, &root).await);
+        }
+        // `nadia runs list` / `nadia runs rm <id>`. Same shape as `mcp`: the verb is required,
+        // because a bare `nadia runs` is a half-typed command more often than a request.
+        "runs" => {
+            let mut words = task.split_whitespace();
+            match (words.next(), words.next()) {
+                (Some("list"), None) => {
+                    let runs = rozum_agent::replay::list_runs(&root);
+                    if runs.is_empty() {
+                        println!("no recorded runs in {}", rozum_agent::replay::runs_dir(&root).display());
+                    }
+                    for r in &runs {
+                        // The lineage is the reason this listing exists, so it is on the line,
+                        // not in a --verbose nobody passes.
+                        let from = match (&r.parent, r.parent_entries) {
+                            (Some(p), Some(n)) => format!("  forked from {p} ({n} entries)"),
+                            (Some(p), None) => format!("  forked from {p}"),
+                            _ => String::new(),
+                        };
+                        let task = if r.task.is_empty() { "(no header)" } else { r.task.as_str() };
+                        println!("{}  {:>4} entries  {}{}", r.id, r.entries, task, from);
+                    }
+                    std::process::exit(0);
+                }
+                (Some("rm"), Some(id)) => {
+                    let path = rozum_agent::replay::resolve_run(&root, id);
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {
+                            println!("removed {}", path.display());
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("nadia: cannot remove {}: {e}", path.display());
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("nadia runs list | nadia runs rm <ID>\n\n{USAGE}");
+                    std::process::exit(2);
+                }
+            }
         }
         other => {
             eprintln!("unknown mode `{other}`\n\n{USAGE}");
