@@ -1,4 +1,0 @@
-slug: task-state-logging
-agent: claude-fable (session cf8e96fe)
-started: 2026-09-03T06:37Z
-task: add info-level default-visible logging to state.get/state.update/state.reset (daemon_proxy.rs), same pattern as rag.search's rag_search=info target — operator asked after discussing whether it was needed.
