@@ -375,6 +375,30 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
   through `MultiToolSource` — it has no `rag.search`. That participant was never named in this
   spec (it is a chat sandbox, not a coding agent), so it is not this item's unfinished half; file
   separately if the operator wants it there.
+- [x] **rag-shipped-policy-everywhere — DONE 2026-09-03, and it found a defect bigger than the
+  item.** Filed to close the gap above (the meeting participant had no retrieval); measuring the
+  surfaces first turned up that they were not serving the SAME retrieval. `project_retrieval_tools`
+  — nadia's, the one this board argued needs retrieval most — handed back the generic
+  `search_documents` over the raw index: BM25, no implementation slots, no fusion, default k=3.
+  That is the configuration the eval measures at **4/26 top-1** against the MCP servers' **22/25**.
+  Cause is structural, not a slip: *deep pool → balance → fuse → fill texts → rebalance* existed as
+  THREE copies (meeting proxy, standalone MCP, eval harness) and the fourth caller simply never
+  received it. Now ONE function, `rag_embed::rank_fused`, with every surface calling it — the eval
+  included, so the instrument measures what the servers run. The query VECTOR stays a parameter,
+  because how a surface reaches an embedder is what legitimately differs (the proxy must use the
+  gateway: in-process embedding aborts the server at Metal init under the agent jail). Verified
+  behaviour-preserving: **22/25 and 25/25 after the refactor, identical**, same three questions
+  top-5-only, ranking floor gate green.
+  The participant gap is closed too: `--rag-project <DIR>` (forwarded by `participant-pool`) gives
+  the room's model `rag_search`. Gated TWICE and needs both — the operator's flag (retrieval reads a
+  tree `--sandbox` does not confine, so a chat sandbox must not widen silently into "can read the
+  source") and the per-user `read` grant; needs no sandbox, since searching a project and having a
+  working directory are independent. Underscore not dot: that surface is OpenAI function-calling,
+  whose name grammar has none. GOTCHA worth keeping: the system prompt told the model to answer
+  project questions with TEXT and call no tool — correct when every tool touched the working
+  directory, and exactly wrong once the tool that answers project questions exists; it is
+  conditional now. Also caught by running the suite rather than `cargo check`: dropping a
+  now-unused `Retriever` import broke six TEST call sites that reach `.search` through the trait.
 - [x] **rag-index-freshness (P1) — DONE 2026-08-31.** Incremental reindex (mtime+length, chunks
   grouped per file in an on-disk v2 manifest), a refresh before every `rag.search`, and a
   background warmup at proxy startup so nobody waits for the first build. Measured on a 490-file

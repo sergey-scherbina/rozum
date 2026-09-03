@@ -94,3 +94,16 @@ who can reach these tools.
 confinement (`..`, absolute, symlink escape), read/write round-trip, list, and
 `run_command` output capture. Live Telegram E2E is operator-driven (needs a bot
 token + allowlist) and validates the model actually invoking the tools.
+
+
+## Project retrieval (2026-09-03)
+
+`--rag-project <DIR>` adds a fifth tool, `rag_search`, over that project's RAG index — the same
+retrieval the MCP surfaces serve, through the same ranking policy. It is deliberately NOT part
+of the sandbox: the sandbox *confines* a directory, this *reads* a different tree, and folding
+one into the other would let a sandbox grant widen quietly into "can search the source".
+
+It is gated twice and needs both — the operator's flag, and the same per-user `read` capability
+that governs file tools — and it requires no sandbox at all. Full reasoning, including why the
+advertised name is `rag_search` and why the system prompt had to change, is in
+`rag-expose-to-agents.md` § "The third surface".

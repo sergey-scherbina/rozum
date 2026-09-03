@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::rag_embed::{self, VectorIndex as _};
+use crate::rag_embed;
 use crate::rag_lite;
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -195,56 +195,15 @@ impl RagServer {
             }));
         };
 
-        // The fusion POOL is deeper than the answer (`rag-ab-failure-forensics`): RRF pays when
-        // a candidate sits mid-list in BOTH sources, and with a BM25 pool of only k such a
-        // candidate never reaches the fusion at all — the Q5 forensics run found the right file
-        // at rank 4 with a deep pool and absent entirely at the same query with pool=k. Both
-        // sources feed `pool` candidates; the final answer is rebalanced (impls above tests,
-        // now applied POST-fusion — the embedding half walks tests back up otherwise) and
-        // truncated to k.
-        let pool = k.max(5) * 4;
-        let bm25 = rag_lite::search_balanced(index.as_ref(), &query, pool);
-        let mut fused = false;
-        let picked = match &vecs {
-            Some(vs) => {
-                // The embedder is in-process here (the engine binary registers it); a build
-                // without it answers None and we stay lexical, visibly.
-                // GATEWAY FIRST, in-process second — order is load-bearing: under the agent
-                // jail the in-process path aborts the whole server at Metal init (the client
-                // sees only "Connection closed"), while 127.0.0.1 HTTP is allowed there.
-                let qv = match rag_embed::embed_via_gateway(&[query.clone()], true).await {
-                    Some(v) => Some(v),
-                    None => {
-                        let q = query.clone();
-                        tokio::task::spawn_blocking(move || {
-                            rozum_core::embedding::embed(&[q], true).and_then(Result::ok)
-                        })
-                        .await
-                        .ok()
-                        .flatten()
-                    }
-                };
-                match qv {
-                    Some(qv) if qv.first().is_some_and(|v| v.len() == vs.dim()) => {
-                        let ranked = vs.search(&qv[0], pool);
-                        let mut hits = rag_embed::fuse(&bm25, &ranked, pool);
-                        for h in &mut hits {
-                            if h.text.is_empty()
-                                && let Some(t) = index.text_of(&h.id)
-                            {
-                                h.text = t.to_string();
-                            }
-                        }
-                        fused = true;
-                        // Texts first, THEN rebalance: the test detector reads the chunk text,
-                        // and an embedding-only hit arrives with an empty one.
-                        rag_lite::rebalance(&hits, k)
-                    }
-                    _ => rag_lite::rebalance(&bm25, k),
-                }
-            }
-            None => rag_lite::rebalance(&bm25, k),
-        };
+        // One policy, one function (`rag_embed::rank_fused`) — this block used to be a copy.
+        let qv = rag_embed::embed_query(&query).await;
+        let (picked, fused) = rag_embed::rank_fused(
+            index.as_ref(),
+            vecs.as_ref().map(|v| v.as_ref() as &dyn rag_embed::VectorIndex),
+            qv.as_deref(),
+            &query,
+            k,
+        );
 
         let results: Vec<Value> = picked
             .into_iter()

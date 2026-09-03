@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 
-use rozum_agent::{rag_chunk, rag_embed, rag_lite};
+use rozum_agent::{rag_chunk, rag_embed};
 
 fn file_of(id: &str) -> &str {
     id.split('#').next().unwrap_or(id)
@@ -59,7 +59,6 @@ async fn main() {
     let vecs = rag_embed::VecStore::load(&rag_embed::vectors_path(&root), None);
 
     let k = 5usize;
-    let pool = k.max(5) * 4;
     let (mut top1, mut top5, mut fused_runs) = (0usize, 0usize, 0usize);
     for (q, expects) in &questions {
         // --expand: one short gateway completion turns the question into extra code-search
@@ -74,26 +73,16 @@ async fn main() {
             q.clone()
         };
         let q = &q_search;
-        let bm25 = rag_lite::search_balanced(&index, q, pool);
-        let hits = match &vecs {
-            Some(vs) => match rag_embed::embed_via_gateway(std::slice::from_ref(q), true).await {
-                Some(qv) if qv.first().is_some_and(|v| v.len() == rag_embed::VectorIndex::dim(vs)) => {
-                    let ranked = rag_embed::VectorIndex::search(vs, &qv[0], pool);
-                    let mut hits = rag_embed::fuse(&bm25, &ranked, pool);
-                    for h in &mut hits {
-                        if h.text.is_empty()
-                            && let Some(t) = index.text_of(&h.id)
-                        {
-                            h.text = t.to_string();
-                        }
-                    }
-                    fused_runs += 1;
-                    rag_lite::rebalance(&hits, k)
-                }
-                _ => rag_lite::rebalance(&bm25, k),
-            },
-            None => rag_lite::rebalance(&bm25, k),
-        };
+        let qv = rag_embed::embed_via_gateway(std::slice::from_ref(q), true)
+            .await
+            .and_then(|v| v.into_iter().next());
+        // The eval must measure the SHIPPED policy, so it calls the same function the servers
+        // do. It keeps the gateway-only embed (this example carries no model) rather than
+        // `embed_query`, which would fall back in-process and silently measure a second path.
+        let (hits, was_fused) = rag_embed::rank_fused(&index, vecs.as_ref().map(|v| v as &dyn rag_embed::VectorIndex), qv.as_deref(), q, k);
+        if was_fused {
+            fused_runs += 1;
+        }
         let files: Vec<&str> = hits.iter().map(|h| file_of(&h.id)).collect();
         let t1 = files.first().is_some_and(|f| expects.iter().any(|e| e == f));
         let t5 = files.iter().any(|f| expects.iter().any(|e| e == f));

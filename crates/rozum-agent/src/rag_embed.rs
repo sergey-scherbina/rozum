@@ -470,6 +470,80 @@ pub fn fuse(bm25: &[Hit], emb_ranked: &[(String, f32)], k: usize) -> Vec<Hit> {
         .collect()
 }
 
+/// **The shipped retrieval policy, in one place** — deep pool, balance, fuse, fill texts,
+/// rebalance, truncate. Every surface that answers a retrieval query must call this.
+///
+/// It exists because it did not: the sequence was copy-pasted into the meeting proxy, the
+/// standalone MCP server and the eval harness, and the fourth caller — the in-process agent
+/// tool that `nadia` registers — never got it at all. That one ranked with raw BM25 at k=3,
+/// the configuration measured at 4/26 top-1, while the two MCP surfaces served the fused 22/25.
+/// The agent with the smallest context window, which needs retrieval most, had the worst of it.
+/// Three copies of a policy are a policy that drifts; one function with four callers cannot.
+///
+/// The query VECTOR is a parameter rather than something this fetches, and that is deliberate:
+/// how a surface reaches an embedder is exactly what legitimately differs between them (the
+/// meeting proxy must use the gateway because the in-process path aborts the whole server at
+/// Metal init under the agent jail; the eval carries no model at all). Passing `None` is the
+/// first-class BM25-only state, not a degraded one — `fused` in the return says which happened,
+/// so a caller can report it rather than guess.
+///
+/// Synchronous and free of I/O, so the policy is unit-testable without a gateway, a store or a
+/// runtime — which is what makes it cheap to keep the callers honest.
+pub fn rank_fused(
+    index: &crate::rag_lite::LexicalIndex,
+    vecs: Option<&dyn VectorIndex>,
+    query_vec: Option<&[f32]>,
+    query: &str,
+    k: usize,
+) -> (Vec<Hit>, bool) {
+    // The fusion POOL is deeper than the answer (`rag-ab-failure-forensics`): RRF pays when a
+    // candidate sits mid-list in BOTH sources, and with a BM25 pool of only k such a candidate
+    // never reaches the fusion at all — the Q5 forensics run found the right file at rank 4 with
+    // a deep pool and absent entirely at the same query with pool=k.
+    let pool = k.max(5) * 4;
+    let bm25 = crate::rag_lite::search_balanced(index, query, pool);
+    let (Some(vs), Some(qv)) = (vecs, query_vec) else {
+        return (crate::rag_lite::rebalance(&bm25, k), false);
+    };
+    // A dimension mismatch is a MODEL mismatch: fall back to lexical rather than compare
+    // vectors from two different embedders, which would rank confidently and wrongly.
+    if qv.len() != vs.dim() {
+        return (crate::rag_lite::rebalance(&bm25, k), false);
+    }
+    let ranked = vs.search(qv, pool);
+    let mut hits = fuse(&bm25, &ranked, pool);
+    // Texts first, THEN rebalance: the test detector reads the chunk text, and an
+    // embedding-only hit arrives from `fuse` with an empty one.
+    for h in &mut hits {
+        if h.text.is_empty()
+            && let Some(t) = index.text_of(&h.id)
+        {
+            h.text = t.to_string();
+        }
+    }
+    (crate::rag_lite::rebalance(&hits, k), true)
+}
+
+/// The query embedding, gateway FIRST and in-process second — the order is load-bearing.
+/// Under the agent jail the in-process path aborts the whole process at Metal init (the client
+/// sees only "Connection closed"), while 127.0.0.1 HTTP is allowed there. `None` means the
+/// caller ranks lexically, which is a supported answer and not an error.
+pub async fn embed_query(query: &str) -> Option<Vec<f32>> {
+    if let Some(v) = embed_via_gateway(std::slice::from_ref(&query.to_string()), true).await
+        && let Some(first) = v.into_iter().next()
+    {
+        return Some(first);
+    }
+    let q = query.to_string();
+    tokio::task::spawn_blocking(move || {
+        rozum_core::embedding::embed(&[q], true).and_then(Result::ok)
+    })
+    .await
+    .ok()
+    .flatten()
+    .and_then(|v| v.into_iter().next())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,5 +814,44 @@ mod tests {
         assert_eq!(fused[0].id, "near");
         assert_eq!(fused[1].id, "far");
         assert_eq!(fused[1].text, "far text", "text survives fusion for BM25-carried hits");
+    }
+
+    /// Behavior: with no vectors, or with no query vector, `rank_fused` is the lexical policy
+    /// and SAYS so. BM25-only is a first-class state — the servers report it rather than
+    /// pretending the answer was fused.
+    #[test]
+    fn rank_fused_without_vectors_is_lexical_and_reports_it() {
+        let mut ix = crate::rag_lite::LexicalIndex::new();
+        ix.add("a.rs#fn one", "the cat sat on the warm windowsill");
+        ix.add("b.rs#fn two", "dogs are loyal companions");
+        let (hits, fused) = rank_fused(&ix, None, None, "cat windowsill", 2);
+        assert!(!fused);
+        assert_eq!(hits[0].id, "a.rs#fn one", "{hits:?}");
+
+        // A store present but no query vector (no gateway, no in-process embedder) is the same
+        // state: there is nothing to fuse WITH.
+        let st = VecStore::new(2);
+        let (_, fused) = rank_fused(&ix, Some(&st as &dyn VectorIndex), None, "cat", 2);
+        assert!(!fused);
+    }
+
+    /// Behavior: a query vector of the wrong width falls back to lexical instead of fusing.
+    /// A different dimension is a different MODEL, and comparing vectors across embedders would
+    /// rank confidently and wrongly — the one outcome worse than ranking lexically.
+    #[test]
+    fn rank_fused_refuses_a_query_vector_of_another_model() {
+        let mut ix = crate::rag_lite::LexicalIndex::new();
+        ix.add("a.rs#fn one", "the cat sat on the warm windowsill");
+        let mut st = VecStore::new(2);
+        st.vecs.insert("a.rs#fn one".into(), vec![1.0, 0.0]);
+        let (hits, fused) = rank_fused(
+            &ix,
+            Some(&st as &dyn VectorIndex),
+            Some(&[1.0, 0.0, 0.0]),
+            "cat",
+            1,
+        );
+        assert!(!fused, "a 3-wide query against a 2-wide store must not fuse");
+        assert_eq!(hits[0].id, "a.rs#fn one");
     }
 }

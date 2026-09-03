@@ -255,6 +255,7 @@ rozum messenger bot-add | bot-remove
 rozum meetings participant --room <r> --model <spec>     # a chat model as a participant
 rozum meetings agent-participant --room <r> …            # a CODING agent per reply
 rozum meetings participant-pool --room <r> …             # one participant per room, supervised
+rozum meetings participant --rag-project <dir>          # …and let it search that project (§5)
 ```
 
 `participant` answers with a `/v1/chat/completions` call. `agent-participant` runs a real
@@ -277,9 +278,13 @@ rozum rag mcp                               # serve rag.search alone, over stdio
 
 The index is `<root>/.rozum/rag-index.json`, the vectors `<root>/.rozum/rag-vectors.bin`.
 
-**Where it is served from:** the meeting-room MCP proxy serves `rag.search` next to the
-room tools (so any agent already connected has it), and `rozum rag mcp` is the
-retrieval-only alternative for a client that wants nothing else.
+**Where it is served from:** four surfaces, one ranking policy
+(`rag_embed::rank_fused`). The meeting-room MCP proxy serves `rag.search` next to the room
+tools (so any agent already connected has it); `rozum rag mcp` is the retrieval-only
+alternative for a client that wants nothing else; `nadia` registers it in its own agent
+loop whenever the project has an index, no configuration; and a meeting-room model gets it
+as `rag_search` when started with `--rag-project` (§4). The name differs only on that last
+one, because OpenAI function names admit no dot.
 
 **When it earns a call:** the exact token is unknown (a concept, a symptom), the answer is
 spread over files that share no literal string, or you are new to an area. When you know

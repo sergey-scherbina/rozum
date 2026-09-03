@@ -423,7 +423,9 @@ rozum rag mcp                    # serve rag.search alone, for a client that wan
 
 The index lives at `<project>/.rozum/rag-index.json` with vectors beside it.
 Agents already connected to the meeting proxy have `rag.search` without any
-extra configuration.
+extra configuration, and `nadia` registers it in its own loop whenever the
+project has an index. All of them rank through one shared policy, so what an
+agent sees does not depend on which door it came through.
 
 **When it earns the call:** the exact token is unknown (a concept, a symptom),
 the answer is spread over files sharing no literal string, or you are new to an
@@ -522,6 +524,11 @@ rozum meetings participant \
   on-topic instead of generically.
 - `--peer <handle>` — other models in the room, so `always` never loops
   model↔model.
+- `--rag-project <dir>` — let the model SEARCH that project's code and docs
+  (`rag_search`) when someone asks how something works. Off by default, and
+  deliberately: it reads a tree the `--sandbox` confinement does not cover, so
+  turning it on is a decision that the room may see that source. It also honours
+  the per-user `read` grant from `--acl`, and needs no sandbox of its own.
 
 ### A whole conference in one command
 

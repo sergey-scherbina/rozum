@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::rag_lite::{retrieval_tools, LexicalIndex, Retriever};
+use crate::rag_lite::LexicalIndex;
 use uniml_md::generated::ssc_program as u;
 
 /// One retrievable unit. `id` doubles as a human-usable citation: `"<path>#<heading-slug>"`
@@ -886,16 +886,144 @@ pub fn load_project_index(root: &Path) -> Option<LexicalIndex> {
     Some(index)
 }
 
-/// The existing `search_documents` agent tool, backed by the persisted project index when one
-/// exists — this is how an agent session that never ran the indexer still gets retrieval.
-pub fn project_retrieval_tools(root: &Path) -> Option<crate::agent::CallbackToolSource> {
+/// Project retrieval for an IN-PROCESS agent loop, serving the same `rag.search` the MCP
+/// surfaces serve, through the same ranking policy and the same freshness rule.
+///
+/// It used to hand back the generic [`retrieval_tools`] over the raw index, and that was a real
+/// defect rather than a simplification: the generic tool ranks with raw BM25 at a default `k` of
+/// 3 — the configuration the eval measures at 4/26 top-1 — while both MCP servers ran the fused,
+/// slot-balanced path measured at 22/25. `nadia` was the only caller, so the agent whose model
+/// has the least context to fall back on was served the worst retrieval in the system, silently.
+/// [`retrieval_tools`] keeps its own meaning (any [`Retriever`], any corpus); this is the
+/// project-shaped one, and the two are no longer the same thing wearing one name.
+///
+/// `None` when the project has no index — deliberately silent. An absent tool costs the model
+/// nothing, while a present one that always answers "no index" burns schema tokens on every
+/// request to say so. (The MCP tool answers instead of vanishing, because there it was ASKED.)
+pub fn project_retrieval_tools(root: &Path) -> Option<ProjectRetrieval> {
     let index = load_project_index(root)?;
-    Some(retrieval_tools(Arc::new(index) as Arc<dyn Retriever>))
+    Some(ProjectRetrieval {
+        root: root.to_path_buf(),
+        cache: tokio::sync::Mutex::new(Cached {
+            index: Arc::new(index),
+            indexed_at: fs::metadata(index_path(root)).and_then(|m| m.modified()).ok(),
+            vecs: crate::rag_embed::VecStore::load(&crate::rag_embed::vectors_path(root), None)
+                .map(Arc::new),
+            vecs_at: fs::metadata(crate::rag_embed::vectors_path(root))
+                .and_then(|m| m.modified())
+                .ok(),
+        }),
+    })
 }
+
+struct Cached {
+    index: Arc<LexicalIndex>,
+    indexed_at: Option<std::time::SystemTime>,
+    vecs: Option<Arc<crate::rag_embed::VecStore>>,
+    vecs_at: Option<std::time::SystemTime>,
+}
+
+/// `rag.search` for the in-process agent loop — see [`project_retrieval_tools`].
+pub struct ProjectRetrieval {
+    root: PathBuf,
+    cache: tokio::sync::Mutex<Cached>,
+}
+
+impl ProjectRetrieval {
+    /// Refresh the index if the tree moved, then reload whichever of the two files changed.
+    /// Same order as the servers: the answer should describe the tree as it is now, but a
+    /// refresh that fails must degrade to searching what is on disk, never to failing the call.
+    async fn fresh(&self) -> (Arc<LexicalIndex>, Option<Arc<crate::rag_embed::VecStore>>) {
+        if index_path(&self.root).exists() {
+            let root = self.root.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                reindex_incremental(&root, &mut |_, _, _| {})
+            })
+            .await;
+        }
+        let mut c = self.cache.lock().await;
+        let ipath = index_path(&self.root);
+        let i_mtime = fs::metadata(&ipath).and_then(|m| m.modified()).ok();
+        if i_mtime.is_some() && i_mtime != c.indexed_at {
+            if let Some(ix) = load_project_index(&self.root) {
+                c.index = Arc::new(ix);
+            }
+            c.indexed_at = i_mtime;
+        }
+        let vpath = crate::rag_embed::vectors_path(&self.root);
+        let v_mtime = fs::metadata(&vpath).and_then(|m| m.modified()).ok();
+        if v_mtime != c.vecs_at {
+            c.vecs = crate::rag_embed::VecStore::load(&vpath, None).map(Arc::new);
+            c.vecs_at = v_mtime;
+        }
+        (c.index.clone(), c.vecs.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::agent::ToolSource for ProjectRetrieval {
+    fn tools(&self) -> Vec<crate::backend::ToolDef> {
+        vec![crate::backend::ToolDef {
+            name: "rag.search".into(),
+            description: RAG_SEARCH_DESCRIPTION.into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What you are looking for, in words."},
+                    "top_k": {"type": "integer", "description": "How many results (default 5, max 20)."}
+                },
+                "required": ["query"]
+            }),
+        }]
+    }
+
+    async fn dispatch(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, crate::agent::ToolError> {
+        if name != "rag.search" {
+            return Err(crate::agent::ToolError::new(format!("unknown tool: {name}")));
+        }
+        let query = args["query"]
+            .as_str()
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .ok_or_else(|| crate::agent::ToolError::new("`query` (non-empty string) is required"))?
+            .to_string();
+        // Capped for the same reason the servers cap it: this tool exists to SAVE context, and
+        // an uncapped top_k spends more of the window than the reading it replaces.
+        let k = args.get("top_k").and_then(serde_json::Value::as_u64).unwrap_or(5).clamp(1, 20)
+            as usize;
+        let (index, vecs) = self.fresh().await;
+        let qv = crate::rag_embed::embed_query(&query).await;
+        let (hits, fused) = crate::rag_embed::rank_fused(
+            index.as_ref(),
+            vecs.as_deref().map(|v| v as &dyn crate::rag_embed::VectorIndex),
+            qv.as_deref(),
+            &query,
+            k,
+        );
+        let results: Vec<serde_json::Value> = hits
+            .into_iter()
+            .map(|h| serde_json::json!({ "id": h.id, "score": h.score, "text": h.text }))
+            .collect();
+        Ok(serde_json::json!({ "results": results, "fused": fused }))
+    }
+}
+
+/// The description is load-bearing, not decoration — it is the same text both MCP surfaces
+/// carry, and it earns its length by saying when NOT to reach for this tool. Retrieval competes
+/// with grep, glob and Read, which are exact, instant and never stale; a model that calls it for
+/// lookups grep answers better learns to distrust it.
+const RAG_SEARCH_DESCRIPTION: &str =
+    "Search THIS project's code and docs by meaning, over syntactic chunks (a markdown section,      a Rust `fn`/`impl`/`struct`). Use it when you do NOT know the exact token to grep for: a      concept (\"where is admission decided\"), a symptom, or an unfamiliar area whose shape you      need before the detail. Do NOT use it when you already know the string, the symbol, or the      path — grep and Read are exact, instant and always current, and this index can be stale.      Results name `path#item`, so treat a hit as a pointer to open, not as the answer.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `.search` is a Retriever method; the non-test code reaches it through `rank_fused`.
+    use crate::rag_lite::Retriever;
 
     // ─── RAG phase 2: code chunking (docs/specs/rag-rust-dialect.md) ──────────────────
 
@@ -1219,6 +1347,44 @@ mod tests {
         assert_eq!(hits[0].id, "n.md#notes");
         assert!(project_retrieval_tools(root).is_some());
         assert!(project_retrieval_tools(&root.join("nowhere")).is_none());
+    }
+
+    /// Behavior: the in-process project tool serves `rag.search`, ranks through the shipped
+    /// policy, and reports that it did not fuse when there are no vectors on disk.
+    ///
+    /// The name is the assertion that matters. This used to be the generic `search_documents`
+    /// over raw BM25 at k=3 while both MCP surfaces served `rag.search` through the fused,
+    /// slot-balanced path — one system, two retrieval qualities, and the weaker one went to the
+    /// agent with the least context to spare.
+    #[tokio::test]
+    async fn project_retrieval_serves_rag_search_through_the_shipped_policy() {
+        use crate::agent::ToolSource;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("n.md"), "# Notes
+residency admission queue design
+").unwrap();
+        fs::write(root.join("o.md"), "# Other
+unrelated prose about walking dogs
+").unwrap();
+        index_and_save(root).unwrap();
+
+        let rag = project_retrieval_tools(root).expect("index exists");
+        let names: Vec<String> = rag.tools().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["rag.search"]);
+
+        let out = rag
+            .dispatch("rag.search", serde_json::json!({ "query": "residency admission" }))
+            .await
+            .expect("search runs");
+        assert_eq!(out["fused"], serde_json::json!(false), "no vectors on disk → lexical");
+        let first = out["results"][0]["id"].as_str().unwrap_or_default().to_string();
+        assert_eq!(first, "n.md#notes", "{out}");
+
+        // A blank query and an unknown tool are errors the model can read and correct, not
+        // panics and not empty successes.
+        assert!(rag.dispatch("rag.search", serde_json::json!({ "query": "  " })).await.is_err());
+        assert!(rag.dispatch("nope", serde_json::json!({ "query": "x" })).await.is_err());
     }
 
     /// The correctness gate for the whole incremental path, and the one that matters most: an

@@ -69,6 +69,10 @@ struct ModelReplier {
     handle: String,
     persona: Option<String>,
     sandbox: Option<super::sandbox_tools::Sandbox>,
+    /// Project retrieval, when the operator passed `--rag-project`. Separate from `sandbox` on
+    /// purpose: the sandbox CONFINES a directory, this one READS a different tree, and merging
+    /// the two would let a sandbox grant quietly widen into "can search the source".
+    rag: Option<std::sync::Arc<rozum_agent::rag_chunk::ProjectRetrieval>>,
     shell: bool,
     acl_path: Option<std::path::PathBuf>,
     mention_alias: Option<String>,
@@ -103,6 +107,7 @@ impl ReplyGenerator for ModelReplier {
                 &self.handle,
                 self.persona.as_deref(),
                 self.sandbox.as_ref(),
+                self.rag.as_deref(),
                 can_read,
                 can_write,
                 can_shell,
@@ -132,6 +137,7 @@ pub async fn run(
     gateway_url: String,
     peers: Vec<String>,
     persona: Option<String>,
+    rag_project: Option<std::path::PathBuf>,
     sandbox: Option<std::path::PathBuf>,
     shell: bool,
     shell_network: bool,
@@ -158,6 +164,25 @@ pub async fn run(
             None
         }
     });
+    // Project retrieval is opt-in and says what it did either way: an operator who passed the
+    // flag and silently got no tool (no index in that tree yet) would otherwise be left guessing
+    // why the model never searches.
+    let rag = rag_project.and_then(|p| {
+        match rozum_agent::rag_chunk::project_retrieval_tools(&p) {
+            Some(r) => {
+                eprintln!("[participant] rag: rag_search over {}", p.display());
+                Some(std::sync::Arc::new(r))
+            }
+            None => {
+                eprintln!(
+                    "[participant] rag {}: no index there (run `rozum rag index` in it) — \
+                     running without retrieval",
+                    p.display()
+                );
+                None
+            }
+        }
+    });
     if let Some(path) = &acl_path {
         eprintln!(
             "[participant] per-user capabilities from ACL {} (shell {})",
@@ -172,6 +197,7 @@ pub async fn run(
         handle: handle.clone(),
         persona,
         sandbox,
+        rag,
         shell,
         acl_path,
         mention_alias: mention_alias.clone(),
@@ -186,6 +212,80 @@ pub async fn run(
         identity_prefix: "model-participant",
     };
     run_participant_loop(cfg, replier).await
+}
+
+/// The tool set advertised for one reply: the sandbox's, plus retrieval when it is granted.
+///
+/// A function rather than three lines inline so the GATING is testable without a gateway —
+/// which capability produces which tool is the part that must not drift, since each of these is
+/// a grant someone decided to give.
+fn tool_defs_for(read: bool, write: bool, shell: bool, search: bool) -> serde_json::Value {
+    let mut defs = super::sandbox_tools::Sandbox::tool_defs(read, write, shell);
+    if search && let Some(arr) = defs.as_array_mut() {
+        arr.push(rag_search_def());
+    }
+    defs
+}
+
+/// The `rag_search` schema offered to the room's model.
+///
+/// Named with an UNDERSCORE while both MCP surfaces call it `rag.search`, and that is not an
+/// oversight: this path is OpenAI function-calling, whose name grammar is `[A-Za-z0-9_-]{1,64}`
+/// — a dot is outside it, and the small local models these rooms run are the least forgiving
+/// consumers of a name their template did not expect. Same tool, same policy, spelled for the
+/// dialect that carries it.
+fn rag_search_def() -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "rag_search",
+            "description": "Search this project's code and documentation by meaning and return \
+                            the most relevant snippets. Use it to answer questions about how the \
+                            project works when you do not already know the answer.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What you are looking for, in plain words."
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "How many snippets to return (default 5, max 20)."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    })
+}
+
+/// Run one `rag_search` call and render it for a CHAT model.
+///
+/// Text, not JSON, and that is the difference from the agent-loop tool: a 4B model in a group
+/// chat reads a numbered list far better than a nested object, and the room's context is small
+/// enough that the braces are a real cost. Snippets are clipped for the same reason — the model
+/// needs enough to recognise the right chunk, not the whole function.
+async fn rag_search(rag: &rozum_agent::rag_chunk::ProjectRetrieval, args: &serde_json::Value) -> String {
+    use rozum_agent::agent::ToolSource;
+    // Dispatched under the tool's CANONICAL name: the underscore spelling exists only in the
+    // schema this dialect advertises, and the argument validation lives in the shared tool
+    // rather than being restated here.
+    let out = match rag.dispatch("rag.search", args.clone()).await {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let hits = out["results"].as_array().cloned().unwrap_or_default();
+    if hits.is_empty() {
+        return "no matches in this project's index".to_string();
+    }
+    let mut s = String::new();
+    for (i, h) in hits.iter().enumerate() {
+        let id = h["id"].as_str().unwrap_or("?");
+        let text: String = h["text"].as_str().unwrap_or("").chars().take(600).collect();
+        s.push_str(&format!("{}. {id}\n{}\n\n", i + 1, text.trim()));
+    }
+    s
 }
 
 /// Max model→tool→model rounds per reply before we stop and return text. Bounds a
@@ -204,6 +304,7 @@ async fn generate(
     handle: &str,
     persona: Option<&str>,
     sandbox: Option<&super::sandbox_tools::Sandbox>,
+    rag: Option<&rozum_agent::rag_chunk::ProjectRetrieval>,
     can_read: bool,
     can_write: bool,
     can_shell: bool,
@@ -215,7 +316,13 @@ async fn generate(
         Some(_) => (can_read, can_write, can_shell),
         None => (false, false, false),
     };
-    let tools_on = read || write || shell;
+    // Retrieval has TWO gates and needs both. `--rag-project` is the operator's decision that
+    // this room may see that tree at all; `can_read` is the same per-user grant that governs
+    // files, because a user who may not read the sandbox has no business reading the source
+    // through a search box. It does NOT require a sandbox: searching a project and having a
+    // working directory are independent grants.
+    let search = rag.is_some() && can_read;
+    let tools_on = read || write || shell || search;
 
     // Chat mechanics are always present; an operator-supplied `--persona` prepends WHO the model
     // is + any domain context (e.g. about rozum/busi) so it answers on-topic instead of generically.
@@ -229,7 +336,7 @@ async fn generate(
     };
     // With tools available, tell the model which ones so it USES them instead of claiming it has
     // no filesystem access. Only advertise the capabilities this user actually has.
-    if tools_on {
+    if read || write || shell {
         let mut names = Vec::new();
         if read {
             names.push("list_files, read_file");
@@ -242,15 +349,35 @@ async fn generate(
         }
         // Discriminate strictly: a weak model otherwise reflexively calls a tool for every message
         // (and loops). Tools ONLY for actual file/command actions; questions get a text answer.
+        //
+        // The "not even about the project" clause is CONDITIONAL now. It used to be absolute,
+        // which was right when the only tools touched the working directory — and would be
+        // exactly wrong with retrieval available, since it tells the model never to use the one
+        // tool that answers project questions.
+        let questions = if search {
+            "For questions about YOURSELF or general chat, answer with TEXT. For a question \
+             about this PROJECT's code or docs, use rag_search (below) rather than these."
+        } else {
+            "For ordinary questions — including about the project, yourself, or general chat — \
+             answer with TEXT and do NOT call any tool."
+        };
         system.push_str(&format!(
             "\n\nYou have a working directory with these tools: {}. Paths are relative to it. \
              Call a tool ONLY when the user asks to DO something with files or run a command \
-             (create/read/change/list a file, run a command). For ordinary questions — including \
-             about the project, yourself, or general chat — answer with TEXT and do NOT call any \
-             tool. After a tool returns, give a short text answer; never call the same tool twice \
-             in a row.",
+             (create/read/change/list a file, run a command). {questions} After a tool returns, \
+             give a short text answer; never call the same tool twice in a row.",
             names.join(", ")
         ));
+    }
+    if search {
+        system.push_str(
+            "\n\nYou can search this project's source with `rag_search` — it finds code and \
+             docs by MEANING, so use it when the user asks about the project and you do not \
+             already know the answer: what something does, where it is handled, how a part \
+             works. Search ONCE, read the results, then answer in TEXT citing the `path#item` \
+             ids you used. Do not search for small talk, and do not search twice for the same \
+             question.",
+        );
     }
     let messages = build_context(system, transcript, handle, mention_alias);
     // A strict chat template (e.g. Qwen3.6) errors without a user message — if the context held
@@ -262,11 +389,7 @@ async fn generate(
 
     let url = format!("{}/chat/completions", gateway_url.trim_end_matches('/'));
     let http = reqwest::Client::new();
-    let tools = if tools_on {
-        Some(super::sandbox_tools::Sandbox::tool_defs(read, write, shell))
-    } else {
-        None
-    };
+    let tools = tools_on.then(|| tool_defs_for(read, write, shell, search));
     // Tool mode may need to emit file contents (tool arguments count as output) — give it more
     // room than a chat one-liner.
     let max_tokens = if tools_on { 2048 } else { 400 };
@@ -298,8 +421,9 @@ async fn generate(
         let content = msg["content"].as_str().unwrap_or("").to_string();
         let calls = msg["tool_calls"].as_array().filter(|c| !c.is_empty());
 
-        // No sandbox, or the model answered instead of calling a tool → return its text.
-        let (Some(sb), Some(calls)) = (sandbox, calls) else {
+        // The model answered instead of calling a tool → return its text. (A tool call can now
+        // arrive with no sandbox at all: retrieval is grantable on its own.)
+        let Some(calls) = calls else {
             return Ok(content);
         };
 
@@ -334,7 +458,12 @@ async fn generate(
                 .as_str()
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or_else(|| serde_json::json!({}));
-            let result = sb.dispatch(name, &args).await;
+            let result = match (name, rag, sandbox) {
+                ("rag_search", Some(r), _) => rag_search(r, &args).await,
+                ("rag_search", None, _) => "error: search is not available here".to_string(),
+                (_, _, Some(sb)) => sb.dispatch(name, &args).await,
+                (_, _, None) => format!("error: no tool named {name} is available here"),
+            };
             eprintln!("[participant] tool {name} → {} bytes", result.len());
             messages.push(serde_json::json!({
                 "role": "tool",
@@ -404,5 +533,63 @@ mod tests {
         assert!(!msgs.iter().any(|m| m["content"].as_str().unwrap_or("").contains("joined:")));
         assert!(!msgs.iter().any(|m| m["content"].as_str().unwrap_or("").contains("[redacted")));
         assert_eq!(msgs.iter().filter(|m| m["role"] == "user").count(), 2);
+    }
+}
+
+
+#[cfg(test)]
+mod rag_tests {
+    use super::*;
+
+    fn names(v: &serde_json::Value) -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// Behavior: retrieval is its own grant. It appears without a sandbox (searching a project
+    /// and having a working directory are independent), and it never appears unasked.
+    #[test]
+    fn rag_search_is_offered_only_when_granted() {
+        assert_eq!(names(&tool_defs_for(false, false, false, true)), vec!["rag_search"]);
+        assert!(!names(&tool_defs_for(true, true, true, false)).contains(&"rag_search".into()));
+        let all = names(&tool_defs_for(true, true, true, true));
+        assert_eq!(all, vec!["list_files", "read_file", "write_file", "run_command", "rag_search"]);
+        assert!(tool_defs_for(false, false, false, false).as_array().unwrap().is_empty());
+    }
+
+    /// Behavior: the advertised name fits the OpenAI function-name grammar. The MCP surfaces
+    /// call this tool `rag.search`, and a dot here would be rejected or mangled by the very
+    /// small local models these rooms run.
+    #[test]
+    fn the_advertised_name_fits_the_dialects_grammar() {
+        let n = rag_search_def()["function"]["name"].as_str().unwrap().to_string();
+        assert_eq!(n, "rag_search");
+        assert!(
+            n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') && n.len() <= 64,
+            "{n} is outside [A-Za-z0-9_-]{{1,64}}"
+        );
+    }
+
+    /// Behavior: results are rendered as a numbered list of `path#item` + snippet, not JSON —
+    /// a 4B model in a group chat reads that far better, and the room's context is small.
+    #[tokio::test]
+    async fn results_render_as_a_numbered_list_for_a_chat_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("n.md"), "# Notes\nresidency admission queue design\n").unwrap();
+        rozum_agent::rag_chunk::index_and_save(root).unwrap();
+        let rag = rozum_agent::rag_chunk::project_retrieval_tools(root).expect("index");
+
+        let out = rag_search(&rag, &serde_json::json!({ "query": "residency admission" })).await;
+        assert!(out.starts_with("1. n.md#notes"), "{out}");
+        assert!(out.contains("admission queue"), "{out}");
+        assert!(!out.contains('{'), "rendered for a chat model, not as JSON: {out}");
+
+        // A blank query is the shared tool's error, surfaced as readable text rather than a panic.
+        let bad = rag_search(&rag, &serde_json::json!({ "query": "" })).await;
+        assert!(bad.starts_with("error:"), "{bad}");
     }
 }

@@ -118,3 +118,61 @@ lever on the same problem — filed as `rag-index-scope`.
   there.
 - A compact on-disk index format. 31 MB of JSON per project is a real cost once several agents
   each hold one; note it, do not fix it here.
+
+
+## The third surface, and the policy that had drifted (2026-09-03)
+
+This spec named two surfaces — MCP and the in-process agent loop — and both were wired. What
+it did not say is that they were not serving the same retrieval, and one caller had been left
+out entirely.
+
+**The in-process tool was not the shipped policy.** `project_retrieval_tools` handed back the
+generic `search_documents` over the raw index: BM25, no reserved slots for implementations, no
+fusion, and a default `k` of 3. That is the configuration the eval measures at **4/26 top-1**,
+while both MCP servers ran the fused, slot-balanced path measured at **22/25**. The caller was
+`nadia` — the local agent whose model has the least context to fall back on, which is precisely
+the argument this spec gives for why it needs retrieval most. It had the worst retrieval in the
+system, and nothing said so, because the two paths were different code that merely shared a
+name.
+
+The cause is worth naming because it is structural, not a slip: the sequence *deep pool →
+balance → fuse → fill texts → rebalance* existed as **three copies** (meeting proxy, standalone
+MCP server, eval harness). Three copies of a policy are a policy that drifts, and the fourth
+caller simply never received it. The fix is one function, `rag_embed::rank_fused`, with every
+surface calling it — including the eval, so the instrument measures what the servers run.
+
+The query VECTOR stays a parameter rather than something that function fetches, because how a
+surface reaches an embedder is what legitimately differs: the meeting proxy must go through the
+gateway (in-process embedding aborts the whole server at Metal init under the agent jail), the
+eval carries no model at all, and the in-process tool tries the gateway first and falls back.
+`None` is the first-class BM25-only state, and the returned `fused` flag is how a caller reports
+which happened instead of guessing.
+
+Verified behaviour-preserving: the eval scores **22/25 and 25/25 after the refactor, identical
+to before**, with the same three questions top-5-only.
+
+**The meeting-room participant now has retrieval too** — the gap this spec explicitly filed as
+"not this item's unfinished half; file separately if the operator wants it there". The operator
+did. `rozum meetings participant --rag-project <DIR>` (forwarded by `participant-pool` to every
+room it supervises) offers the room's model a `rag_search` tool over that project's index.
+
+Three decisions in it, each one load-bearing:
+
+- **Two gates, and it needs both.** `--rag-project` is the operator's decision that the room may
+  see that tree at all — retrieval reads a tree the sandbox does not confine, so a chat sandbox
+  could otherwise widen silently into "can read the source". The per-user `read` grant from the
+  ACL is the second: a user who may not read files has no business reading them through a search
+  box. It does *not* require a sandbox — searching a project and having a working directory are
+  independent grants, and the tool appears with neither, either, or both.
+- **`rag_search`, not `rag.search`.** This surface is OpenAI function-calling, whose name grammar
+  is `[A-Za-z0-9_-]{1,64}`; a dot is outside it, and the small local models these rooms run are
+  the least forgiving consumers of a name their template did not expect. Same tool, same policy,
+  spelled for the dialect carrying it — it dispatches under the canonical name internally.
+- **The system prompt had to change, or the tool would never fire.** With only sandbox tools the
+  prompt told the model, correctly, to answer project questions with TEXT and call no tool — a
+  rule that becomes exactly wrong once the tool that answers project questions exists. That
+  sentence is now conditional on retrieval being granted.
+
+Results are rendered as a numbered list of `path#item` plus a clipped snippet rather than JSON:
+a 4B model in a group chat reads that far better, and the room's context is small enough that
+the braces are a real cost.

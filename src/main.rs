@@ -990,6 +990,13 @@ enum MeetingsAction {
         /// Read the persona from a file (takes precedence over `--persona`). Handy for a long one.
         #[arg(long = "persona-file")]
         persona_file: Option<std::path::PathBuf>,
+        /// Let the model SEARCH a project's code and docs (`rag_search`), over the index at
+        /// `<DIR>/.rozum`. Omitted → no retrieval, which is the default because this reads a tree
+        /// the sandbox does not confine: the room can then be told about code that is not in it.
+        /// Per-user read grants from `--acl` still apply — a user who may not read files may not
+        /// search either.
+        #[arg(long = "rag-project")]
+        rag_project: Option<std::path::PathBuf>,
         /// Give the model file tools (list/read/write) confined to this directory. Omitted →
         /// chat only, no filesystem access. Spec: docs/specs/assistant-sandbox-tools.md.
         #[arg(long = "sandbox")]
@@ -1093,6 +1100,13 @@ enum MeetingsAction {
         persona: Option<String>,
         #[arg(long = "persona-file")]
         persona_file: Option<std::path::PathBuf>,
+        /// Let the model SEARCH a project's code and docs (`rag_search`), over the index at
+        /// `<DIR>/.rozum`. Omitted → no retrieval, which is the default because this reads a tree
+        /// the sandbox does not confine: the room can then be told about code that is not in it.
+        /// Per-user read grants from `--acl` still apply — a user who may not read files may not
+        /// search either.
+        #[arg(long = "rag-project")]
+        rag_project: Option<std::path::PathBuf>,
         #[arg(long = "sandbox")]
         sandbox: Option<std::path::PathBuf>,
         #[arg(long = "shell", default_value_t = false)]
@@ -1734,6 +1748,7 @@ async fn main() {
                 peers,
                 persona,
                 persona_file,
+                rag_project,
                 sandbox,
                 shell,
                 shell_no_network,
@@ -1749,6 +1764,7 @@ async fn main() {
                     peers,
                     persona,
                     persona_file,
+                    rag_project,
                     sandbox,
                     shell,
                     shell_no_network,
@@ -1797,6 +1813,7 @@ async fn main() {
                 peers,
                 persona,
                 persona_file,
+                rag_project,
                 sandbox,
                 shell,
                 shell_no_network,
@@ -1813,6 +1830,7 @@ async fn main() {
                     peers,
                     persona,
                     persona_file,
+                    rag_project,
                     sandbox,
                     shell,
                     shell_no_network,
@@ -5245,6 +5263,7 @@ async fn run_meetings_participant(
     peers: Vec<String>,
     persona: Option<String>,
     persona_file: Option<std::path::PathBuf>,
+    rag_project: Option<std::path::PathBuf>,
     sandbox: Option<std::path::PathBuf>,
     shell: bool,
     shell_no_network: bool,
@@ -5288,7 +5307,7 @@ async fn run_meetings_participant(
         None => persona,
     };
     if let Err(e) = run(
-        model, room, handle, policy, gateway_url, peers, persona, sandbox, shell,
+        model, room, handle, policy, gateway_url, peers, persona, rag_project, sandbox, shell,
         !shell_no_network, acl, mention_alias,
     )
     .await
@@ -5362,6 +5381,7 @@ async fn run_meetings_participant_pool(
     peers: Vec<String>,
     persona: Option<String>,
     persona_file: Option<std::path::PathBuf>,
+    rag_project: Option<std::path::PathBuf>,
     sandbox: Option<std::path::PathBuf>,
     shell: bool,
     shell_no_network: bool,
@@ -5461,6 +5481,12 @@ async fn run_meetings_participant_pool(
             }
             if let Some(s) = &sandbox {
                 cmd.arg("--sandbox").arg(s);
+            }
+            // Every room this pool supervises searches the SAME project — the flag is the
+            // operator's, not the room's, and a per-room choice would need the registry to
+            // carry one.
+            if let Some(p) = &rag_project {
+                cmd.arg("--rag-project").arg(p);
             }
             if shell {
                 cmd.arg("--shell");

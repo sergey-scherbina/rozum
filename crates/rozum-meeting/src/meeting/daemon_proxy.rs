@@ -770,38 +770,21 @@ impl DaemonProxy {
             }));
         };
 
-        // Code gets reserved slots — see `rag_lite::search_balanced`. The fusion POOL is deeper
-        // than the answer (`rag-ab-failure-forensics`): RRF pays when a candidate sits mid-list
-        // in BOTH sources, and a BM25 pool of only k never hands such a candidate to the fusion
-        // at all. Both sources feed `pool`; the final k is rebalanced POST-fusion (the
-        // embedding half walks test chunks back up otherwise) after texts are filled in.
-        let pool = k.max(5) * 4;
-        let bm25 = rozum_agent::rag_lite::search_balanced(index.as_ref(), &query, pool);
-        // Fusion (docs/specs/rag-embeddings-impl.md): vectors on disk + a gateway that answers =
-        // fuse; anything missing or failing = BM25 exactly as before, visibly marked. The query
-        // embed is one short HTTP call; its failure must never fail the search.
-        let mut fused = false;
-        let picked = match (&vecs, rag_embed_enabled()) {
-            (Some(vs), true) => match embed_query_via_gateway(&query).await {
-                // `vs` is used through the `VectorIndex` seam, so an external store slots in
-                // here without this call site changing.
-                Some(qv) if qv.len() == rozum_agent::rag_embed::VectorIndex::dim(vs.as_ref()) => {
-                    let ranked = rozum_agent::rag_embed::VectorIndex::search(vs.as_ref(), &qv, pool);
-                    let mut hits = rozum_agent::rag_embed::fuse(&bm25, &ranked, pool);
-                    for h in &mut hits {
-                        if h.text.is_empty()
-                            && let Some(t) = index.text_of(&h.id)
-                        {
-                            h.text = t.to_string();
-                        }
-                    }
-                    fused = true;
-                    rozum_agent::rag_lite::rebalance(&hits, k)
-                }
-                _ => rozum_agent::rag_lite::rebalance(&bm25, k),
-            },
-            _ => rozum_agent::rag_lite::rebalance(&bm25, k),
+        // One policy, one function (`rozum_agent::rag_embed::rank_fused`) — this block used to
+        // be a copy of it. The query embed stays gateway-only and behind `rag_embed_enabled()`:
+        // in this process the in-process embedder aborts the server at Metal init under the
+        // agent jail, which is exactly why the vector is a parameter and not fetched in there.
+        let qv = match rag_embed_enabled() {
+            true => embed_query_via_gateway(&query).await,
+            false => None,
         };
+        let (picked, fused) = rozum_agent::rag_embed::rank_fused(
+            index.as_ref(),
+            vecs.as_ref().map(|v| v.as_ref() as &dyn rozum_agent::rag_embed::VectorIndex),
+            qv.as_deref(),
+            &query,
+            k,
+        );
         let results: Vec<Value> = picked
             .into_iter()
             .map(|h| json!({ "id": h.id, "score": h.score, "text": h.text }))
