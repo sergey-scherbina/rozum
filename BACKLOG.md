@@ -152,6 +152,52 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   lost one harness to that: `examples/mdalloc.rs` (allocation COUNT vs BYTES separately — the
   two grow differently and the difference is the diagnosis), `examples/mdwhere.rs` (attribution)
   and `examples/mddigest.rs` (output equality across two builds of the generated crate).
+
+  **ROUND 4 — PARITY REACHED AND EXCEEDED, in a prototype, and round 3's conclusion above is
+  corrected (measured 2026-09-03, `ssc-parity-decomposition`).** Round 3 said persistent-vector
+  "is the item that reaches parity". Necessary — but NOT sufficient, and the difference is the
+  whole finding. There are **two independent quadratic terms**, and killing either alone leaves
+  the slope untouched:
+
+  | prototype (main source, 1600 lines) | time | doubling |
+  |---|---|---|
+  | main as generated | 1.337 s | ×3.89 |
+  | + the four round-3 move fixes only | 1.009 s | ×3.86 |
+  | + the fold `++` fix only | 1.052 s | ×3.85 |
+  | + fold fix AND the four move fixes | 0.595 s | ×3.77 |
+  | **+ persistent accumulator AND fold fix** | **0.032 s** | **×1.93** |
+
+  **42× on main's own source, linear, output byte-identical** (chunk digests over README,
+  REFERENCE.md and the synthetic corpus). It also beats the vendored prestage10 lane measured
+  the same day (0.009 s vs 0.019 s at 400 lines), so this is not "catching up to the vendor" —
+  main's var-free source with both fixes is faster than the vendor's var-based one.
+
+  The two terms, each found by attribution rather than by reading:
+  1. **The block accumulator.** `BlockState.out: Vec<VmToken>` grows, and whole-state copies
+     scattered through the var-free style deep-clone it per line. Fixed by REPRESENTATION —
+     `out` (and `VmFrame.edges`, the TreeVM frame accumulator) as a persistent vector, where a
+     clone is O(1). Alone: ×3.68. Chasing the clone SITES instead does not substitute: fold +
+     four hand-proven move fixes still measured ×3.77.
+  2. **The fold accumulators.** `UniML_parse`'s VM fold does
+     `roots: [&(acc.roots)[..], &(batch.values)[..]].concat()` **per token**, and `roots:
+     Vec<UniNode>` holds built subtrees — so that concat is a deep clone of the whole
+     partially-built tree, every token. 93 % of allocations at 1600 lines traced here. Fixed by
+     LOWERING: `xs ++ ys` where `xs` is the fold accumulator at its last use becomes a move plus
+     `extend`. The lexer fold has the identical shape.
+
+  Attribution needed two instrument upgrades, both kept: report WHAT was cloned together with
+  the OUTERMOST generated frames, not the innermost. A recursive structure clone is 5–7 frames
+  of `Clone` impls, so the innermost frame only ever names a type (`Vec<UniEdge> as Clone`) and
+  the single outermost is always the entry point — neither discriminates. The frames just inside
+  the entry point are what named `UniML_parse::{closure#1}`.
+
+  **What this means for the two items below.** Both are needed and neither is optional:
+  `ssc-rust-persistent-vector` for term 1 (and phase 1's measured 6–9 % read tax is affordable
+  here because the accumulator is appended constantly and read rarely — it should be applied to
+  APPENDED-AND-CLONED fields, not to `Vector[T]` globally), and a `++`-on-a-moveable-accumulator
+  lowering for term 2, which belongs with `ssc-rust-reduce-clone-volume`. The prototype is
+  hand-edited generated Rust, not compiler work: it proves the target is reachable and says
+  exactly which two changes reach it.
 - [x] **rag-ann-threshold-watch — MEASURED 2026-09-02, exact search stays, but the FIRST number
   reported here was wrong and is corrected below.** Fused `rag.search` latency against the
   standalone MCP server, live over scalascript's FULL 94,981-chunk corpus (fresh process, 40
