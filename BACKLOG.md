@@ -192,10 +192,13 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   the entry point are what named `UniML_parse::{closure#1}`.
 
   **What this means for the two items below.** Both are needed and neither is optional:
-  `ssc-rust-persistent-vector` for term 1 (and phase 1's measured 6–9 % read tax is affordable
-  here because the accumulator is appended constantly and read rarely — it should be applied to
-  APPENDED-AND-CLONED fields, not to `Vector[T]` globally), and a `++`-on-a-moveable-accumulator
-  lowering for term 2, which belongs with `ssc-rust-reduce-clone-volume`. The prototype is
+  `ssc-rust-persistent-vector` for term 1 — phase 1's read tax is **6–9×, not 6–9 %** (an error in
+  this entry's first draft, corrected here because it inverts the trade-off): that is exactly why
+  it must be applied to APPENDED-AND-CLONED fields and not to `Vector[T]` globally. In this
+  prototype the tax cost nothing measurable, because an accumulator is appended constantly and
+  read rarely — but that is a property of these two fields, not a general licence. And a
+  `++`-on-a-moveable-accumulator lowering for term 2, which belongs with
+  `ssc-rust-reduce-clone-volume`. The prototype is
   hand-edited generated Rust, not compiler work: it proves the target is reachable and says
   exactly which two changes reach it.
 - [x] **rag-ann-threshold-watch — MEASURED 2026-09-02, exact search stays, but the FIRST number
