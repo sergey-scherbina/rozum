@@ -786,6 +786,21 @@ impl DaemonProxy {
             .into_iter()
             .map(|h| json!({ "id": h.id, "score": h.score, "text": h.text }))
             .collect();
+        let stale = age.map(|a| a > RAG_STALE_AFTER_SECS).unwrap_or(true);
+        // The only signal that this tool is being called at all — nothing else logs a
+        // successful search. `info`, not `debug`: on by DEFAULT (the default filter carries a
+        // `rag_search=info` override for exactly this target), because "is this used?" is a
+        // question an operator asks by tailing a log, not by first setting RUST_LOG.
+        tracing::info!(
+            target: "rag_search",
+            query = %query,
+            top_k = k,
+            fused,
+            hits = results.len(),
+            chunks,
+            stale,
+            "rag.search"
+        );
         tool_text(&json!({
             "results": results,
             "fused": fused,
@@ -793,7 +808,7 @@ impl DaemonProxy {
             "index_age_secs": age,
             // Freshness is `rag-index-freshness` (P1) and is NOT solved here. What IS solved is
             // that a stale answer says so instead of passing for current.
-            "stale": age.map(|a| a > RAG_STALE_AFTER_SECS).unwrap_or(true),
+            "stale": stale,
         }))
     }
 

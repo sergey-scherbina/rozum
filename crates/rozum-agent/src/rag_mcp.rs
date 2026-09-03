@@ -250,12 +250,25 @@ impl RagServer {
             .into_iter()
             .map(|h| json!({"id": h.id, "score": h.score, "text": h.text}))
             .collect();
+        let stale = age.map(|a| a > STALE_AFTER_SECS).unwrap_or(true);
+        // Same signal as the meeting proxy's own `rag.search` — see its comment. The standalone
+        // server has no other caller-visible log line at all.
+        tracing::info!(
+            target: "rag_search",
+            query = %query,
+            top_k = k,
+            fused,
+            hits = results.len(),
+            chunks,
+            stale,
+            "rag.search"
+        );
         text(&json!({
             "results": results,
             "fused": fused,
             "chunks": chunks,
             "index_age_secs": age,
-            "stale": age.map(|a| a > STALE_AFTER_SECS).unwrap_or(true),
+            "stale": stale,
         }))
     }
 }
