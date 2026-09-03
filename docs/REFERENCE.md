@@ -426,6 +426,10 @@ Three rules that decide whether a number means anything:
 - **A shared-gateway run reports pass/fail only.** Its timings are contended (67 s, 193 s
   and 163 s for the same task in one run) and the footprint column is deliberately empty.
 
+The latest numbers live in
+[`scripts/bench/RESULTS.md`](../scripts/bench/RESULTS.md), regenerated from the CSVs by
+`scripts/bench/render-results.py` rather than maintained by hand.
+
 Every run worth keeping goes in [`scripts/bench/HISTORY.md`](../scripts/bench/HISTORY.md)
 with the host's load — that is what makes a later "we got 2× faster" checkable. The
 discipline itself is the `performance` skill in `vendor/agent-plugins/`.

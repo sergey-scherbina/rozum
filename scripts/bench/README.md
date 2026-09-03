@@ -158,6 +158,11 @@ scripts/bench/results/<name>-<stamp>/
   runs/           per-cell logs (with KEEP=1, the workdirs too)
 ```
 
+[`RESULTS.md`](RESULTS.md) carries the latest numbers as a **generated** page — after a
+run, `scripts/bench/render-results.py` rewrites it from the CSVs on disk
+(`--check` exits 1 when it is stale). It reports each run as itself and refuses a
+cross-run leaderboard, for the reason the next paragraph gives.
+
 **A run that is not in [`HISTORY.md`](HISTORY.md) did not happen.** That file is the
 project's benchmark history — what was measured, on what, and what changed since the
 previous entry. It is what makes a later "we got 2× faster" checkable rather than
