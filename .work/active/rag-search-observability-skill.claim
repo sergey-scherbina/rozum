@@ -1,0 +1,4 @@
+slug: rag-search-observability-skill
+agent: claude-fable (session cf8e96fe)
+started: 2026-09-03T06:03Z
+task: add default-visible logging of rag.search calls (daemon_proxy + standalone rag_mcp), and write a shared agent-plugins skill documenting when/how to use rag.search well, wired into vendor/agent-plugins per its existing skill conventions.
