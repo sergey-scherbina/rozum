@@ -201,6 +201,45 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   `ssc-rust-reduce-clone-volume`. The prototype is
   hand-edited generated Rust, not compiler work: it proves the target is reachable and says
   exactly which two changes reach it.
+
+  **ROUND 4b — term 2 IMPLEMENTED IN THE COMPILER, and the representation candidates re-measured
+  on top of it (2026-09-03).** Three move rules landed in scalascript's Rust backend (branch
+  `feature/rust-fold-accumulator-move`, 532 tests green, output byte-identical across 70 real
+  documents):
+  1. a fold lambda's accumulator field moves and extends instead of concatenating — term 2;
+  2. `p.copy(...)` at the receiver's LAST USE spreads by move, with no self-append required
+     (round 2 required one; the self-append was never what made the move sound). Whole-state
+     spread clones in the emitted markdown crate: **18 → 2**;
+  3. `_localFieldMovePos` is filled for LIFTED local defs and read under the lift's own name, like
+     its three sibling tables already were — it was the only one missing that, which is why
+     `matchContainers`' `val st1 = scan.state` cloned a whole state per line.
+  Together, with stock `Vec` everywhere: **1600 lines 1.337 s → 0.243 s (5.5×), allocations
+  64.6M → 11.9M**, doubling ratio 3.89 → 3.56 — better, still not linear.
+
+  **Then the representation candidates were re-measured ON TOP of those rules, and that changes
+  what phase 1 concluded — for one of them.** All three on the same baseline, same corpus,
+  output byte-identical:
+
+  | accumulator representation | 1600 lines | doubling |
+  |---|---|---|
+  | stock `Vec` | 0.243 s | ×3.56 |
+  | `Rc<Vec>` copy-on-write | 0.091 s | ×2.94 |
+  | **`imbl::Vector`** | **0.038 s** | **×2.00** |
+
+  `Rc` CoW is now worth 2.7× where phase 1 measured it degenerating to `Vec` exactly — the move
+  rules removed most of the clones that used to outlive the next mutation, so copy-on-write
+  finally gets to be cheap. It is still NOT linear: the clones that remain are the ones where the
+  state is genuinely read again in the same expression, and each one forces one deep copy at the
+  next push. **Phase 1's actual verdict stands: only the persistent vector is linear.** Cumulative
+  from main: **1.337 s → 0.038 s (35×), 64.6M → 1.58M allocations (41×)** — and about 5× faster
+  than the vendored prestage10 lane at the same size.
+
+  Remaining for phase 2, and the reason it is not just "swap the type": the type must PROPAGATE.
+  Only 6 sites needed a conversion by hand here because `BlockState.out` barely escapes, but in
+  general a field whose representation changes flows into `Vec`-typed slots, and the backend has
+  to insert the conversions. Applying the persistent type uniformly to every `Vector[T]` instead
+  would dodge that and pay the 6–9× read tax everywhere, which is the trade this item exists to
+  refuse.
 - [x] **rag-ann-threshold-watch — MEASURED 2026-09-02, exact search stays, but the FIRST number
   reported here was wrong and is corrected below.** Fused `rag.search` latency against the
   standalone MCP server, live over scalascript's FULL 94,981-chunk corpus (fresh process, 40
