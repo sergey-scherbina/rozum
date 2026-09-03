@@ -71,6 +71,27 @@ kill %1                          # tear it down
 `list` shows nothing while a `rozum` is running, check that the directory
 exists and is writable.
 
+For a fuller check — and the one to run when something behaves oddly later:
+
+```bash
+rozum doctor                # read-only readiness report for the local demo path
+rozum doctor --services     # also: every com.rozum.* job, and whether its endpoint answers
+```
+
+The second form matters because a launchd/systemd job that cannot exec looks
+exactly like a healthy one in `launchctl list` until something probes the
+endpoint it exists to serve. `rozum services` prints what this build declares:
+each label, the binary it should run, and how it is probed.
+
+If you plan to serve a model, check it fits before you rely on it:
+
+```bash
+rozum gateway --model <spec> --dry-run
+```
+
+RAM is admitted, not hoped for — see [docs/models.md](docs/models.md) for the
+levers when a model does not fit.
+
 ## Model-engine features
 
 ```bash

@@ -365,6 +365,142 @@ bot with the same commands, gated by the chat's `write` + `shell` grants.
 
 Full reference: [docs/nadia.md](docs/nadia.md).
 
+### Recording a run so it can be re-run
+
+An agent run has exactly two nondeterministic inputs: what the model said and
+what a tool answered. Journal both and the run replays later.
+
+```bash
+nadia run "<task>" --record auto          # journal it; prints the run id
+nadia runs list                           # what is recorded here, and what forked from what
+nadia run "<task>" --replay <id>          # strict: no gateway, no model, no tools
+nadia run "<task>" --replay <id> --replay-live-tools   # plan replayed, tools run for real
+nadia run "<task>" --replay <id> --replay-fork auto    # continue live from the divergence
+```
+
+Strict replay is a regression test — it reproduces forever and needs no model.
+Live-tools answers "does the plan that failed last night still fail against
+today's tree?" and stops at the first tool result that differs. Fork does not
+stop: it keeps the identical prefix for free, notes why it diverged, and carries
+on with a live model into a new journal — rebase for runs.
+
+Two things bite: a replay needs the **same `--workspace`** and the **same tool
+set**, because both are part of the model-call fingerprint. Journals hold the
+whole session (prompt, replies, tool results) — treat them as sensitive, and
+delete with `nadia runs rm <id>`.
+
+### The gateway can record too
+
+For a client that runs its own loop and its own tools — Claude Code, for
+instance — the gateway is the only part of rozum in the path, so recording
+happens there:
+
+```bash
+rozum gateway record start        # prints the run id; live, no restart needed
+rozum gateway record status
+rozum gateway record replay <id>  # answer from the journal instead of the model
+rozum gateway record stop
+```
+
+Only for a model rozum serves: on upstream Anthropic nothing of rozum's is in
+the path. And a gateway replay is always the live-tools shape — the client still
+runs its own tools, so the first tool result that differs diverges the next
+request, loudly.
+
+---
+
+## Project retrieval (RAG)
+
+Search a project's code and docs by meaning, over chunks that follow structure
+rather than byte offsets: markdown split along its parse tree (heading-bounded
+sections, fences opaque), code split by item.
+
+```bash
+rozum rag index                  # build (incremental by default; --full to re-parse everything)
+rozum rag search "<query>" -k 5  # the same hits an agent's tool sees
+rozum rag mcp                    # serve rag.search alone, for a client that wants only it
+```
+
+The index lives at `<project>/.rozum/rag-index.json` with vectors beside it.
+Agents already connected to the meeting proxy have `rag.search` without any
+extra configuration.
+
+**When it earns the call:** the exact token is unknown (a concept, a symptom),
+the answer is spread over files sharing no literal string, or you are new to an
+area and need its shape. When you know the string or the path, `grep` is exact,
+instant, and never stale — use that instead. Every result carries the index's
+age, so a stale answer says so.
+
+---
+
+## Durable task state
+
+One small JSON object per project, independent of the conversation, served over
+MCP as `state.get` / `state.update` / `state.reset` and stored at
+`<project>/.rozum/state.json`.
+
+`state.update` takes an RFC 7396 merge patch: an object field merges
+recursively, `null` deletes a key, anything else replaces it. A non-object patch
+is refused rather than silently replacing the whole state.
+
+Read it when a task starts and after any fresh session; write the moment a fact
+is learned that the next turn will need; reset only for a genuinely new task. It
+is not the planning boards (those are human-visible and outlive one task) and
+not a log of its own history — only the current object is kept.
+
+---
+
+## Support and incident work
+
+Rooms double as a support surface: threads carry severity, roles, and a
+worst-first queue, drivable from the shell as well as agent-natively over MCP.
+
+```bash
+rozum meetings incident open|escalate|resolve|list|show|metrics
+rozum meetings queue                  # open threads, worst first
+rozum meetings phase active|paused|ended
+rozum meetings role grant|revoke …    # reporter | assignee | on_call | observer | admin
+rozum meetings token …                # console access tokens (identity + RBAC)
+rozum meetings search "<query>"       # whole history, by text and support metadata
+rozum meetings inbox                  # messages addressed to you since last look
+rozum meetings react | redact         # redaction hides content for readers; bytes stay on disk
+rozum meetings repair-threads         # rebuild threads.json from the log (disaster recovery)
+```
+
+### Administering the messenger bots
+
+```bash
+rozum messenger status                # bots, groups per registry, rooms with rosters
+rozum messenger bots | groups | acl
+rozum messenger service start|stop|restart <bot>
+rozum messenger bot-add | bot-remove  # validates the token, stores it 0600, wires the services
+```
+
+---
+
+## Health and services
+
+```bash
+rozum doctor                # read-only readiness report for the local demo path
+rozum doctor --services     # every com.rozum.* job AND whether its endpoint answers
+rozum doctor --services-only --post-room <room>   # for the periodic job: post only on change
+rozum services              # what this build declares: labels, binaries, how each is probed
+```
+
+The `--services` distinction is the point: a launchd job that cannot exec looks
+exactly like a healthy one until something probes the endpoint it exists to
+serve.
+
+Where the logs are:
+
+| What | Where |
+|---|---|
+| Gateway, per-request events (JSONL) | `~/.rozum/gateway.jsonl` |
+| Gateway service stdout/stderr | `~/.local/state/rozum/gateway/service.log` |
+| MCP proxy: lifecycle, `rag.search`, `state.*` | `~/.run/rozum/mcp-proxy.log` |
+| Meeting daemon | `~/.rozum-meeting-daemon.log` |
+| Any other `com.rozum.*` job | `rozum doctor --services` prints each job's path |
+
 ---
 
 ## Local models in a room: the conference
@@ -422,6 +558,15 @@ everything the script started.
 | `DISCORD_ALLOWED_USER_IDS` | `rozum discord`       | Required sender IDs; comma-separated or `*`   |
 | `ROZUM_SANDBOX`         | `rozum launch`           | Agent jail: on (default) / `0` off / a path = workspace |
 | `ROZUM_SANDBOX_BACKEND` | `rozum launch`           | `seatbelt` (macOS, default) or `docker`       |
+| `ROZUM_GATEWAY_URL`     | `nadia`, agents          | Gateway base URL to talk to                   |
+| `NADIA_MODEL`           | `nadia`                  | Model id to ask the gateway for               |
+| `ROZUM_GATEWAY_RECORD`  | `rozum gateway`          | `auto` or a path: journal what it serves, from startup |
+| `ROZUM_MCP_PROXY_LOG`   | MCP proxy                | `0` disables the proxy's own log              |
+| `ROZUM_MEETING_ROOM`    | MCP proxy                | Override the room an agent auto-joins         |
+
+Every `ROZUM_*` tuning knob can also be set as `--set KEY=VALUE` on the command
+line or in the config's `[options]` table. Precedence is `--set` > environment >
+config > default.
 
 ---
 

@@ -8,9 +8,6 @@ stdio MCP proxy; web browsers, Telegram chats, and Discord channels join
 through dedicated bridges. Everyone sees the same transcript and can submit at
 any time — there are no fixed turns.
 
-**Full command reference:** [`docs/REFERENCE.md`](docs/REFERENCE.md) — everything both
-binaries do, by area, with the commands spelled the way they are spelled.
-
 ## What it is
 
 - **A meeting room runtime.** One Unix process = one room with a Unix-domain
@@ -48,6 +45,26 @@ binaries do, by area, with the commands spelled the way they are spelled.
   --room <name>` joins a model that reads the room and replies like anyone else,
   and `scripts/demo-conference.sh` brings up a whole sandboxed conference
   (several models + humans) in one command. See the user manual.
+- **Project retrieval (RAG).** `rozum rag index` chunks a project *syntactically*
+  — markdown along its parse tree, code by item — and `rag.search` serves it to
+  every connected agent, ranking BM25 fused with embeddings. For the questions
+  `grep` loses: a concept, a symptom, an unfamiliar area.
+- **Durable task state.** `state.get` / `state.update` / `state.reset` over MCP:
+  one small JSON object per project at `.rozum/state.json`, changed by RFC 7396
+  merge patch. A task's facts survive a `/clear`, a compaction, a fresh session.
+- **Run journals — record and replay.** An agent run has exactly two
+  nondeterministic inputs: what the model said and what a tool answered. Journal
+  both and the whole loop re-runs later with no gateway and no model
+  (`nadia run --record auto`, `--replay <id>`), or against today's tree with the
+  tools live, or forked onto it. The gateway can journal what it serves too, so a
+  client that owns its own loop is recordable as well.
+- **A support and incident surface.** Rooms carry threads with severity, roles
+  (`reporter`/`assignee`/`on_call`/`observer`/`admin`), a worst-first queue,
+  redaction, and a full-history search — driven from the shell
+  (`rozum meetings incident …`) or agent-natively over MCP.
+- **Health that actually probes.** `rozum doctor --services` checks every
+  `com.rozum.*` job *and* whether the endpoint it exists to serve answers — a job
+  that cannot exec looks identical to a healthy one until something asks.
 
 ## Quick start
 
@@ -136,8 +153,32 @@ Named cascades can also live in `rozum.toml` (`[cascade.<name>]`). See
 [docs/specs/cascade-router.md](docs/specs/cascade-router.md) and
 [docs/specs/runtime-config.md](docs/specs/runtime-config.md).
 
+**Running it, not just starting it.** The resident model can be swapped in place
+(`rozum gateway switch --model …` drains, unloads, loads, resumes — clients are
+held by their proxy across the gap, not failed), freed without losing the daemon
+(`unload`, lazy reload on the next request), or restarted onto an upgraded binary
+(`reload`). `rozum gateway status` says what is resident and who is attached.
+
+**RAM is admitted, not hoped for.** Loading past host RAM can panic or reboot the
+machine, so a load is admitted only if it fits; when it does not, adaptive load
+lowers `n_ctx` to the best fit instead of failing. The same queue is open to
+non-rozum commands, so a benchmark cannot overcommit behind rozum's back:
+
+```bash
+rozum gateway admit --footprint 8G -- <command>   # waits its turn, holds the reservation
+```
+
+**Recording what it serves.** `rozum gateway record start|replay <id>|stop`
+journals the model side of every request, live, without restarting the daemon
+under a running session — the only way to journal a client that owns its own
+loop and its own tools. Journals land in `.rozum/runs/`, the same shelf
+`nadia runs list` reads.
+
 ## Documentation
 
+- **[docs/REFERENCE.md](docs/REFERENCE.md)** — the complete capability and
+  command reference for both binaries, organised by what you are trying to do.
+  Start here when the question is "can it do X, and how do I spell it".
 - **[INSTALL.md](INSTALL.md)** — prerequisites, build, optional features.
 - **[TUTORIAL.md](TUTORIAL.md)** — hands-on walkthrough with examples and
   best practices around naming rooms, persistence, topics, and agents.
@@ -147,7 +188,13 @@ Named cascades can also live in `rozum.toml` (`[cascade.<name>]`). See
 - **[docs/nadia.md](docs/nadia.md)** — the nadia coding agent: the Rust one in
   `crates/nadia` (tools, sandbox, subagents, HTTP, Telegram, the matrix row) and
   the ScalaScript/Scala 3 ones in [its own repo](https://github.com/sergey-scherbina/nadia).
-- **`docs/specs/`** — per-feature specs.
+- **[docs/models.md](docs/models.md)** — model assets: what to download, where
+  they live, and the `rozum models` commands.
+- **`docs/specs/`** — per-feature specs (150+), each with the measurements behind
+  the decision.
+- **`vendor/agent-plugins/`** — agent working practices as loadable skills: `rag`,
+  `task-state`, `replay`, `isolate`, `bugs`, `scrumban`, `multi-agent`,
+  `multi-repo`, `performance`, `policy`, `rozum`.
 - **[CHANGELOG.md](CHANGELOG.md)** — completed work, newest first.
 
 ## Project layout

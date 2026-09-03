@@ -244,6 +244,79 @@ make the agent's replies more targeted than `"work stuff"`.
 
 ---
 
+## 6b. Recipe: asking the project a question you can't grep for
+
+Once a project is indexed, agents connected to the room can search it by
+meaning. Build the index once:
+
+```bash
+cd ~/code/myproject
+rozum rag index
+# indexed 2648 files into 46,733 chunks … → .rozum/rag-index.json
+```
+
+Then ask it something you would not know how to grep for:
+
+```bash
+rozum rag search "where is admission decided" -k 5
+```
+
+Each hit is `path#item` — a markdown section, or a `fn`/`struct`/`impl` — with a
+score and an excerpt. Treat a hit as **a pointer to open**, not as the answer.
+
+The index refreshes incrementally on every search, so an edited file is picked up
+in under a second rather than at the next restart. And when you *do* know the
+string, keep using `grep`: it is exact, instant, and never stale. The retrieval
+tool is for the other case.
+
+---
+
+## 6c. Recipe: turning a failed run into something you can re-run
+
+`nadia` can journal a run — both nondeterministic inputs, the model's replies and
+the tools' answers — so the whole loop can be replayed later.
+
+```bash
+cd ~/code/myproject
+nadia run "make the flaky test deterministic" --record auto
+# nadia: recording this run to .rozum/runs/1788422537-79d9f8.jsonl
+```
+
+It went wrong? Replay it exactly, with no gateway and no model at all — useful as
+a regression test, and it costs nothing to run:
+
+```bash
+nadia runs list
+nadia run "make the flaky test deterministic" --replay 1788422537-79d9f8
+```
+
+Now you fix the cause and want to know whether the *same plan* still fails
+against the fixed tree. Replay the plan, but let the tools run for real:
+
+```bash
+nadia run "…" --replay 1788422537-79d9f8 --replay-live-tools
+```
+
+It stops at the first tool whose answer differs, naming the tool, what it returns
+now, and what the recording had. **That stop is the answer** — it is exactly
+where reality stopped matching last night.
+
+If you would rather carry the run forward than stop at the divergence, fork it:
+the identical prefix is replayed for free, and a live model picks up from the
+fork into a brand-new journal.
+
+```bash
+nadia run "…" --replay 1788422537-79d9f8 --replay-fork auto
+nadia runs list
+# 1788422548-3da9af  12 entries  …  forked from 1788422537-79d9f8 (6 entries)
+```
+
+**Replay with the same `--workspace` and the same tools.** Both are part of the
+fingerprint that decides whether this is the same run, so changing either is
+(correctly) refused.
+
+---
+
 ## 7. Best practices
 
 **Use stable `--room` names for anything you'll revisit.** Random names are
@@ -334,6 +407,8 @@ room name, different conversations. Either:
 
 ## 9. Where to look next
 
+- **[docs/REFERENCE.md](docs/REFERENCE.md)** — every capability of both binaries,
+  by area: models and the gateway, agents, rooms, retrieval, state, journals, ops.
 - **[INSTALL.md](INSTALL.md)** — build prerequisites and platform notes.
 - **[USER_MANUAL.md](USER_MANUAL.md)** — reference for every CLI flag, every
   TUI key, every MCP tool.

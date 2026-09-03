@@ -74,6 +74,10 @@ nadia help                                                   # the same text as 
 | `--json` | off | Batch: the full result, including every tool call, as JSON. |
 | `--mcp <NAME>` | none | Connect this MCP server's tools for the run; repeatable. `--mcp-all` takes every server in the config, `--mcp-config <PATH>` says where it is. |
 | `--port` / `--bind` / `--token` | `8790` / `127.0.0.1` / `$NADIA_TOKEN` | `serve` only. |
+| `--record <PATH\|auto>` | off | Journal this run. `auto` places it in `.rozum/runs/<id>.jsonl` and prints the id. Nothing records by default. |
+| `--replay <ID\|PATH>` | off | Re-run a journal instead of calling a model. An id is resolved in `.rozum/runs`; a path is used as-is. |
+| `--replay-live-tools` | off | With `--replay`: replay the plan, run the tools for real, stop at the first result that differs. |
+| `--replay-fork <PATH\|auto>` | off | With `--replay`: instead of stopping, continue live from the divergence into a new journal. |
 
 `NADIA_DEBUG=1` prints the gateway, model and workspace a run actually used — the first
 question asked of any surprising matrix row, and not recoverable after the fact.
@@ -140,6 +144,61 @@ the names, not the page. `nadia help` from the shell prints the same usage as `-
 It is rendered from a command table (`crates/nadia/src/commands.rs`) rather than a string
 literal beside the dispatcher, because those are two lists that must agree and therefore
 eventually don't.
+
+### Record and replay — a run you can run again
+
+A run has exactly two nondeterministic inputs: what the model said, and what a
+tool answered. Everything else in the loop is a pure fold over those, so
+journaling both — in call order, as JSONL — is enough to re-run the whole thing
+later.
+
+```bash
+nadia run "<task>" --record auto      # → .rozum/runs/1788422537-79d9f8.jsonl
+nadia runs list                       # id, entries, task, and what forked from what
+nadia runs rm <id>
+```
+
+Three modes, and they answer different questions:
+
+| Mode | Model | Tools | Question |
+|---|---|---|---|
+| `--replay <id>` | journal | journal | Does the loop still behave the same, given identical inputs? |
+| `--replay <id> --replay-live-tools` | journal | **real** | Does the plan that failed still fail against today's tree? |
+| `--replay <id> --replay-fork auto` | journal, then **live** | **real** | Carry the run forward onto today's world, as a new journal. |
+
+Strict replay touches nothing — no gateway, no network, no tools, no writes —
+which is what makes it usable as a regression test in CI with no model at all.
+Prove it by pointing `--gateway` somewhere unreachable: if the same answer comes
+out, nothing called out.
+
+Live-tools is the fix loop. It stops at the first tool result that differs,
+naming the tool, what it returns now, what the recording had, and how far the
+plan replayed identically. **The stop is the answer**, not a failure to finish:
+"where did reality stop matching" is precisely what you were asking.
+
+Fork is live-tools that does not stop — read it as *rebase for runs*. The prefix
+that still matches costs no model calls, a note records why it stopped being a
+replay, and a live model carries on from there into a new, self-contained
+journal that replays strictly like any other.
+
+**Divergence is loud, never silent.** Every entry carries a fingerprint of the
+call that produced it; a call that does not match the next entry fails with both
+fingerprints rather than answering a different question. Running past the end of
+the journal is a divergence too.
+
+Two consequences worth knowing before you rely on it:
+
+- **Replay with the same `--workspace` and the same tools.** The workspace path
+  is in the system prompt and tool names are in the request, so both are part of
+  the fingerprint; changing either is correctly refused as a different run.
+- **The verify gate is skipped under `--replay`**, and says so. The gate makes
+  its own model calls, which the journal never recorded, so running it would
+  reach for a gateway in the one mode whose promise is that it does not. A
+  replay is not a verified run.
+
+A journal holds everything — system prompt, your words, every model reply, every
+tool result. It is exactly as sensitive as the session it recorded; recording is
+always explicit, and the file is yours to keep or delete.
 
 ### Containment
 
