@@ -1,0 +1,4 @@
+slug: reference-docs
+agent: claude-opus (session cf8e96fe)
+started: 2026-09-03T08:32Z
+task: write docs/REFERENCE.md — a complete structured capability/command reference for rozum and nadia, written from the binaries' actual --help surface rather than memory, and linked from README.
