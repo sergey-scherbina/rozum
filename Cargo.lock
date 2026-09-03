@@ -5300,6 +5300,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "reqwest 0.12.28",
+ "rozum-agent",
  "rozum-core",
  "rozum-models",
  "rozum-paths",
