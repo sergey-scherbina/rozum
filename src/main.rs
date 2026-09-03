@@ -1423,7 +1423,7 @@ async fn main() {
                     // Default: warn everywhere, but info for hf-hub and mistralrs
                     // so the user sees download progress and load events.
                     tracing_subscriber::EnvFilter::new(
-                        "warn,hf_hub=info,mistralrs=info,mistralrs_core=info,rag_search=info,task_state=info",
+                        "warn,hf_hub=info,mistralrs=info,mistralrs_core=info,rag_search=info",
                     )
                 }),
             )

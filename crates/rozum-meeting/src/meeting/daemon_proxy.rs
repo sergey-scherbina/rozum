@@ -808,19 +808,15 @@ impl DaemonProxy {
             .collect();
         let stale = age.map(|a| a > RAG_STALE_AFTER_SECS).unwrap_or(true);
         // The only signal that this tool is being called at all — nothing else logs a
-        // successful search. `info`, not `debug`: on by DEFAULT (the default filter carries a
-        // `rag_search=info` override for exactly this target), because "is this used?" is a
-        // question an operator asks by tailing a log, not by first setting RUST_LOG.
-        tracing::info!(
-            target: "rag_search",
-            query = %query,
-            top_k = k,
-            fused,
-            hits = results.len(),
-            chunks,
-            stale,
-            "rag.search"
-        );
+        // successful search. `proxy_log`, not `tracing::info!`: THIS server (`rozum-meet`, what
+        // the deployed MCP connection actually runs) never initialises a tracing subscriber —
+        // a `tracing::info!` here is a silent no-op, discovered only by checking the real log
+        // file instead of trusting that the call compiled. `proxy_log` is what every other
+        // line in this file already reaches an operator through (see `initialize` above).
+        proxy_log(&format!(
+            "rag.search query={query:?} top_k={k} fused={fused} hits={} chunks={chunks} stale={stale}",
+            results.len()
+        ));
         tool_text(&json!({
             "results": results,
             "fused": fused,
@@ -860,7 +856,7 @@ impl DaemonProxy {
                 // so this line is about confirming the CALL happened, not the content — keys
                 // (not values) is enough, and stays cheap even if a field holds something large.
                 let keys = v.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>());
-                tracing::info!(target: "task_state", op = "get", ?keys, "state.get");
+                proxy_log(&format!("state.get keys={keys:?}"));
                 tool_text(&v)
             }
             None => err_result("no project detected (no .git found above the current directory)"),
@@ -882,16 +878,11 @@ impl DaemonProxy {
                     // The patch itself, not the merged result: the patch is what's small and
                     // what explains a later "why does state look like this" — the merged value
                     // is already the whole point of `state.get`'s own log line.
-                    tracing::info!(
-                        target: "task_state",
-                        op = "update",
-                        patch = %params.0.patch,
-                        "state.update"
-                    );
+                    proxy_log(&format!("state.update patch={}", params.0.patch));
                     tool_text(&merged)
                 }
                 Err(e) => {
-                    tracing::info!(target: "task_state", op = "update", error = %e, "state.update refused");
+                    proxy_log(&format!("state.update refused error={e}"));
                     err_result(&e)
                 }
             },
@@ -914,7 +905,7 @@ impl DaemonProxy {
                 let had_keys = store.get().await.as_object().map(|m| m.len()).unwrap_or(0);
                 match store.reset().await {
                     Ok(empty) => {
-                        tracing::info!(target: "task_state", op = "reset", had_keys, "state.reset");
+                        proxy_log(&format!("state.reset had_keys={had_keys}"));
                         tool_text(&empty)
                     }
                     Err(e) => err_result(&e),
