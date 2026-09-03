@@ -1,5 +1,42 @@
 # Changelog
 
+## agent-record-replay — a run journal, and a replay that refuses to lie
+Completed: 2026-09-03
+
+An agent run has exactly two nondeterministic inputs: what the model said, and what a tool
+answered. Everything else in `run_agent_observed` is a pure fold over those. `replay.rs` journals
+both, in call order, as JSONL — so a whole loop re-runs later with no gateway, no network, no
+tools and no model, which is what turns "it failed once last night" into a test.
+
+Two decorator pairs over the traits that already exist, and **no change to `rozum-core`'s model
+SPI**: `RecordingBackend`/`RecordingTools` forward every call unchanged and append what came back;
+`ReplayBackend`/`ReplayTools` answer from the file. `ChatEvent` and friends carry no serde derives,
+and adding them would push a storage concern into the SPI, so the record types and their
+conversions live in the module that owns the storage.
+
+**Divergence is loud, never silent.** Each entry carries a fingerprint of the call that produced
+it: for a model call the messages' roles and text plus the tool names offered (deliberately not
+sampling seeds or session ids, which differ run to run without changing the question); for a tool
+call the name and its canonicalised arguments, so re-serialised key order cannot make one call look
+like two. A replayed call whose fingerprint does not match the next entry fails with both
+fingerprints rather than answering a different question. Running past the end of the journal, and
+asking the model where the journal holds a tool call (or the reverse), fail the same way and say
+which.
+
+The headline test is the claim: a real `run_agent` loop — model asks for a tool, tool answers,
+model answers the user — recorded once, then re-run from the file alone with no scripted model and
+no callback tools in sight, producing the same text, steps and operations, and consuming the whole
+journal. The negative is tested too: replaying against a different question refuses.
+
+**Two boundaries named up front rather than discovered later.** This proves the agent's OWN calls
+replay, not that the world underneath is unchanged: the journal holds what a tool RETURNED, not the
+file it read, so a changed working tree replays the old answer. And a journal is exactly as
+sensitive as the session it recorded, so recording is explicit, nothing records by default, and the
+file is the caller's to place and delete — the rules `meeting::repro` already states for incident
+bundles.
+
+`cargo test -p rozum-agent`: 179/179, clippy clean on the new file.
+
 ## durable-task-state-mcp — state.get / state.update / state.reset over MCP
 Completed: 2026-09-03
 
