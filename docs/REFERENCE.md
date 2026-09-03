@@ -395,7 +395,46 @@ rozum list                # active meeting rooms
 
 ---
 
-## 9. Where to read further
+## 9. Measuring it — benchmarks
+
+The harness in [`scripts/bench/`](../scripts/bench/) measures the stack **as a user runs
+it**: a real `rozum launch <agent>` against a real local model, sandbox and all.
+
+```bash
+scripts/bench/agentic.sh                                     # the agentic matrix
+AGENTS=nadia TASKS="greet build" REPS=3 scripts/bench/agentic.sh
+scripts/bench/run_full_matrix.sh                             # models × agents × tasks
+scripts/bench/summarize_matrix.py results/full-matrix-<stamp>
+```
+
+Cells are judged **deterministically** — `cargo run`/`cargo test` decides, not the model's
+own claim — over a ladder from `greet` (one word, no tools) to `debug` (failing test,
+run-read-fix loop), with harder tasks alongside.
+
+Focused probes answer one question each: `rag-ab.sh` (does retrieval help an agent locate
+code in a real repo), `contention.sh` (does admission survive a batch antagonist against
+an interactive run), `nondeterminism-probe.sh` (how many distinct completions from N
+identical requests), `smmrd-measure.sh` (does a big model's real prefill peak match what
+admission reserved).
+
+Three rules that decide whether a number means anything:
+
+- **`REPS` is the difference between a number and a pass rate.** One measurement is a
+  hypothesis.
+- **`BENCH_BIN` decides what is under test, not `PATH`.** A run against a stale install
+  reported 23/24 where the current binary reported 24/24 the same day.
+- **A shared-gateway run reports pass/fail only.** Its timings are contended (67 s, 193 s
+  and 163 s for the same task in one run) and the footprint column is deliberately empty.
+
+Every run worth keeping goes in [`scripts/bench/HISTORY.md`](../scripts/bench/HISTORY.md)
+with the host's load — that is what makes a later "we got 2× faster" checkable. The
+discipline itself is the `performance` skill in `vendor/agent-plugins/`.
+
+Full detail: [`scripts/bench/README.md`](../scripts/bench/README.md).
+
+---
+
+## 10. Where to read further
 
 - **Design and reasoning, one file per feature:** [`docs/specs/`](specs/) — 150+ documents,
   each with the measurements behind the decision.
