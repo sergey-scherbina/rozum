@@ -1,0 +1,4 @@
+slug: agent-record-replay
+agent: claude-fable (session okay-cross-repo)
+started: 2026-09-03T09:30Z
+task: deterministic record/replay for the agent runtime (rozum-agent): a JSONL journal of the two nondeterminism sources — every ChatBackend model call's event stream, every ToolSource dispatch's result — plus Recording/Replay decorators over both traits. Replay reruns a whole agent loop with no model and no tools, and refuses loudly on divergence (a call that does not match the recorded one). Boundary named, not hidden: the journal proves the agent's OWN calls replay, not that the world underneath is unchanged.
