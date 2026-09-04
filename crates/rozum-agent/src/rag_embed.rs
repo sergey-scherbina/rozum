@@ -283,6 +283,12 @@ pub fn gateway_less_warmup(root: &Path) -> std::io::Result<usize> {
     Ok(added)
 }
 
+/// The embedding model this CLIENT is configured for, if any. Same knob the engine reads, so a
+/// single `ROZUM_EMBED_MODEL` setting means one thing on both ends of the HTTP call.
+fn configured_embed_model() -> Option<String> {
+    std::env::var("ROZUM_EMBED_MODEL").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /// Embed texts through the GATEWAY's `/v1/embeddings`. `None` on any failure — no gateway, 501,
 /// timeout — the caller falls back or degrades, never errors.
 ///
@@ -307,9 +313,19 @@ pub async fn embed_via_gateway_at(
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .ok()?;
+    // Name the embedder the client is configured for, rather than taking whatever the gateway
+    // happens to serve. The two are usually the same process-wide setting, but they need not be:
+    // an eval comparing two embedders, or a project whose store was built with one while the
+    // gateway defaults to another, must be able to ask. `/v1/embeddings` answers 400 if it
+    // cannot serve the named one, which is what turns a mismatch into a visible refusal instead
+    // of vectors from the wrong space.
+    let mut body = serde_json::json!({ "input": texts, "query": is_query });
+    if let Some(m) = configured_embed_model() {
+        body["model"] = serde_json::Value::String(m);
+    }
     let resp = client
         .post(format!("{url}/v1/embeddings"))
-        .json(&serde_json::json!({ "input": texts, "query": is_query }))
+        .json(&body)
         .send()
         .await
         .ok()?;

@@ -114,6 +114,7 @@ session. Journals land in `.rozum/runs/` — the same shelf `nadia runs list` re
 ```bash
 rozum models list [--remote]      # installed, or the curated download list
 rozum models info <spec>
+rozum models pull <spec>          # download into the hub's own cache, without loading it
 rozum models rm <spec>            # refused if it is the active gateway model
 ```
 

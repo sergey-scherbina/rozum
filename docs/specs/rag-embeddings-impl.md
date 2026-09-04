@@ -249,6 +249,40 @@ implementation slots held. Two things this makes cheap to know: the baseline is
 reproducible rather than a one-off fit, and re-running the eval is the right reflex after
 writing docs, not only after touching ranking.
 
+### A bigger embedder was measured and REJECTED (2026-09-04)
+
+`Qwen3-Embedding-4B-4bit-DWQ` against the shipped `Qwen3-Embedding-0.6B-4bit-DWQ`, both on the
+SAME isolated corpus (a `git archive` of master into a temp dir — 11,069 chunks — so no daemon
+could touch the store mid-run), same 25 questions, same machine, both fused:
+
+| embedder | top-1 | top-5 | vector | weights | corpus re-embed |
+|---|---|---|---|---|---|
+| **0.6B (shipped)** | **22/25** | 25/25 | 1024 | ~0.6 GB | minutes |
+| 4B | 21/25 | 25/25 | 2560 | 2.28 GB | ~53 min |
+
+**Nearly seven times the parameters answers one question WORSE and none better.** The 0.6B leg
+reproduced the recorded baseline exactly, which is what makes the comparison trustworthy rather
+than a single run's noise.
+
+The misses are DIFFERENT, not a superset: 0.6B leaves auto_context "shortening", the
+constrain-grammar question and the verify gate in top-5; 4B leaves spec-decode, the embedding
+backend, the resident-model manager and the same verify gate. A bigger model does not see
+everything the smaller one sees plus more — it has its own blind spots, and at a ceiling of
+three or four questions out of twenty-five that reads as phrasing noise rather than capability.
+
+**So model size buys nothing on this set, and the reason is structural**: top-5 is already 25/25,
+so the only headroom is top-1, and the questions that stay there are ones whose wording matches
+the answer neither lexically nor semantically. Do not re-propose a larger embedder without a new
+eval delta — and note the cost that would have been paid for the regression: 2.28 GB on disk,
+2.5× wider vectors (this corpus's store 12 → 28 MB, and every live agent holds a copy), ~2.3 GB
+more resident RAM, and a full re-embed — about 7.5 hours for scalascript's 94.9k chunks.
+
+Found on the way and fixed, both independently useful: `rozum models` had no `pull` verb, so the
+only way to GET a model was to make something load it (for an embedder that meant swapping the
+gateway's chat model); and the retrieval client could not NAME its embedder in a
+`/v1/embeddings` request, which made comparing two of them impossible — the gateway would answer
+every query with its own default while the store had been built with another.
+
 ### Multi-repo coverage + the expansion verdict (2026-09-01, `rag-scalascript-and-expansion`)
 
 - **scalascript is indexed**: 7,845 files → **94,849 chunks** — and its first indexing run paid

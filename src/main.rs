@@ -1410,6 +1410,18 @@ enum ModelsAction {
         json: bool,
     },
 
+    /// Download a model into the local cache without loading it.
+    ///
+    /// The verb this menu was missing: `list`, `info` and `rm` all existed, so the only way to
+    /// GET a model was to make something load it — which for an embedding model meant swapping
+    /// the gateway's chat model to it, and for anything else meant a resident load nobody asked
+    /// for. Fetches into the hub's own cache layout, so the download is shared with that hub's
+    /// tools rather than hidden in a rozum-private directory.
+    Pull {
+        /// Model spec: `mlx-community:...`, `hf:<user>/<repo>`, `modelscope:<owner>/<repo>`
+        spec: String,
+    },
+
     /// Delete a cached model (frees disk). Refused if it is the active gateway
     /// model. HuggingFace/LMStudio dirs are removed directly; Ollama is delegated
     /// to `ollama rm` (its blobs are content-addressed and shared).
@@ -8506,6 +8518,32 @@ async fn run_models(action: ModelsAction) {
                 run_info_json(&spec).await;
             } else {
                 run_info(&spec).await;
+            }
+        }
+
+        ModelsAction::Pull { spec } => {
+            if let Some(dir) = rozum::model_source::resolve_model_dir(&spec) {
+                println!("already installed: {}", dir.display());
+                return;
+            }
+            println!("Downloading {spec} ...");
+            // The gate accepts anything: `pull` is "put this on disk", not "prove the engine can
+            // run it". Refusing here would make the honest answer to "can I try this model"
+            // depend on a check that belongs at LOAD time, and `models info` already reports
+            // what a repo is before the bytes move.
+            match rozum::model_source::ensure_model_dir(&spec, |_| Ok(())).await {
+                Some(dir) => {
+                    let size = models::scan_all_installed()
+                        .into_iter()
+                        .find(|m| rozum::model_source::same_model(&m.spec, &spec))
+                        .map(|m| models::format_size(m.size_bytes))
+                        .unwrap_or_default();
+                    println!("Installed: {} {}", dir.display(), size);
+                }
+                None => {
+                    eprintln!("rozum models pull: could not download '{spec}'");
+                    std::process::exit(1);
+                }
             }
         }
 
