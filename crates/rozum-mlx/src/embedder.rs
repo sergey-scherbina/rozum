@@ -43,23 +43,129 @@ enum Req {
     },
 }
 
-static WORKER: OnceLock<mpsc::Sender<Req>> = OnceLock::new();
+fn obs_log_evicted(model: &str) {
+    // The pool is a RAM decision, so its evictions should be visible in the same place every
+    // other residency decision is.
+    rozum_core::obs::log_event(serde_json::json!({ "event": "embed_model_evicted", "model": model }));
+}
+
+/// How many embedding models may be resident at once. Each is a model's weights held for the
+/// life of its worker, so this is a RAM bound, not a tidiness one: the default embedder is
+/// ~0.6 GB and a caller switching between two should not have to reload on every alternation.
+/// The least recently used is dropped when a third is asked for.
+const MAX_RESIDENT_EMBEDDERS: usize = 2;
+
+struct Pool {
+    /// Spec → its worker, ordered by use: the FRONT is the least recently used.
+    workers: Vec<(String, mpsc::Sender<Req>)>,
+}
+
+static POOL: OnceLock<std::sync::Mutex<Pool>> = OnceLock::new();
+
+fn pool() -> &'static std::sync::Mutex<Pool> {
+    POOL.get_or_init(|| std::sync::Mutex::new(Pool { workers: Vec::new() }))
+}
 
 /// The `rozum_core::embedding::EmbedFn` — register with
 /// `rozum_core::embedding::register_embedder(rozum_mlx::embedder::embed)`.
-pub fn embed(texts: &[String], is_query: bool) -> Result<Vec<Vec<f32>>, String> {
-    let tx = WORKER.get_or_init(spawn_worker);
+///
+/// `model` is the caller's request. `None` means the process default; a `Some` naming something
+/// this machine cannot serve is an `Err`, never a quiet substitution — vectors from two models
+/// do not live in the same space, so answering with the wrong one produces numbers that look
+/// fine and compare wrongly.
+pub fn embed(
+    model: Option<&str>,
+    texts: &[String],
+    is_query: bool,
+) -> Result<rozum_core::embedding::Embedded, String> {
+    let spec = resolve_spec(model)?;
+    let tx = worker_for(&spec)?;
     let (reply_tx, reply_rx) = mpsc::channel();
     tx.send(Req::Embed { texts: texts.to_vec(), is_query, reply: reply_tx })
         .map_err(|_| "embed worker gone".to_string())?;
-    reply_rx.recv().map_err(|_| "embed worker died mid-request".to_string())?
+    let vectors = reply_rx.recv().map_err(|_| "embed worker died mid-request".to_string())??;
+    Ok(rozum_core::embedding::Embedded { model: spec, vectors })
 }
 
-fn spawn_worker() -> mpsc::Sender<Req> {
+/// Resolve what the caller asked for to a spec this process can actually load, or say why not.
+///
+/// Checked BEFORE a worker is spawned so a bad request costs nothing: an unknown name never
+/// starts a thread, and an architecture with no loader is refused by name rather than failing
+/// deep inside a model load with a message about tensors.
+fn resolve_spec(requested: Option<&str>) -> Result<String, String> {
+    let want = requested.map(str::trim).filter(|s| !s.is_empty());
+    let Some(want) = want else { return Ok(model_spec()) };
+    // The configured default answers to its own name under any spelling, without a disk scan.
+    let default = model_spec();
+    if crate::model_source::same_model(&default, want) {
+        return Ok(default);
+    }
+    let installed = rozum_models::models::scan_all_installed();
+    let Some(found) = installed
+        .iter()
+        .find(|m| crate::model_source::same_model(&m.spec, want))
+    else {
+        let names: Vec<&str> = installed.iter().map(|m| m.spec.as_str()).collect();
+        return Err(format!(
+            "unknown embedding model {want:?}; this machine has: {}",
+            names.join(", ")
+        ));
+    };
+    let arch = architecture_of(&found.path).unwrap_or_default();
+    if arch != "qwen3" {
+        return Err(format!(
+            "embedding model {:?} has architecture {:?}; this build embeds with the qwen3 \
+             family only (the forward pass and its last-token pooling are that recipe's)",
+            found.spec,
+            if arch.is_empty() { "unknown" } else { arch.as_str() }
+        ));
+    }
+    Ok(found.spec.clone())
+}
+
+/// `model_type` from a model directory's `config.json`, following the HuggingFace snapshot
+/// layout when that is what is on disk.
+fn architecture_of(path: &std::path::Path) -> Option<String> {
+    let cfg_path = {
+        let refs_main = path.join("refs").join("main");
+        match std::fs::read_to_string(&refs_main) {
+            Ok(hash) => {
+                let p = path.join("snapshots").join(hash.trim()).join("config.json");
+                if p.exists() { p } else { path.join("config.json") }
+            }
+            Err(_) => path.join("config.json"),
+        }
+    };
+    let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(cfg_path).ok()?).ok()?;
+    let root = cfg.get("text_config").unwrap_or(&cfg);
+    root.get("model_type").and_then(|v| v.as_str()).map(str::to_string)
+}
+
+/// The worker for `spec`, started if needed. Marks it most-recently-used and evicts the least
+/// recently used one past the cap — dropping its `Sender` ends that worker's loop, which frees
+/// the model.
+fn worker_for(spec: &str) -> Result<mpsc::Sender<Req>, String> {
+    let mut p = pool().lock().map_err(|_| "embed pool poisoned".to_string())?;
+    if let Some(i) = p.workers.iter().position(|(m, _)| m == spec) {
+        let entry = p.workers.remove(i);
+        let tx = entry.1.clone();
+        p.workers.push(entry);
+        return Ok(tx);
+    }
+    let tx = spawn_worker(spec.to_string());
+    p.workers.push((spec.to_string(), tx.clone()));
+    while p.workers.len() > MAX_RESIDENT_EMBEDDERS {
+        let (evicted, _) = p.workers.remove(0);
+        obs_log_evicted(&evicted);
+    }
+    Ok(tx)
+}
+
+fn spawn_worker(spec: String) -> mpsc::Sender<Req> {
     let (tx, rx) = mpsc::channel::<Req>();
     std::thread::Builder::new()
         .name("rozum-embed".into())
-        .spawn(move || worker_loop(rx))
+        .spawn(move || worker_loop(rx, spec))
         .expect("spawn embed worker");
     tx
 }
@@ -79,14 +185,14 @@ struct Loaded {
     eos: i32,
 }
 
-fn worker_loop(rx: mpsc::Receiver<Req>) {
+fn worker_loop(rx: mpsc::Receiver<Req>, spec: String) {
     // Lazy: nothing is downloaded or loaded until the first request, so a machine that never
     // uses retrieval never pays for the model.
     let mut loaded: Option<Loaded> = None;
     while let Ok(Req::Embed { texts, is_query, reply }) = rx.recv() {
         if loaded.is_none() {
             let before = mlx_rs::memory::get_active_memory();
-            match load() {
+            match load(&spec) {
                 Ok(l) => {
                     // Bill the ledger (docs/specs/rag-embeddings-impl.md, the footnoted
                     // follow-up): the gateway's reservation was written at CHAT-model load and
@@ -124,9 +230,8 @@ fn worker_loop(rx: mpsc::Receiver<Req>) {
     }
 }
 
-fn load() -> Result<Loaded, String> {
-    let spec = model_spec();
-    let dir = crate::model_source::resolve_model_dir(&spec)
+fn load(spec: &str) -> Result<Loaded, String> {
+    let dir = crate::model_source::resolve_model_dir(spec)
         .ok_or_else(|| format!("embed model not downloaded: {spec} (fetch it with `rozum models`)"))?;
     let model = mlx_lm::models::qwen3::load_qwen3_model(&dir)
         .map_err(|e| format!("embed model load {spec}: {e}"))?;

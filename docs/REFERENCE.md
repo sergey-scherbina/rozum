@@ -298,6 +298,28 @@ rozum rag mcp                               # serve rag.search alone, over stdio
 
 The index is `<root>/.rozum/rag-index.json`, the vectors `<root>/.rozum/rag-vectors.bin`.
 
+### Embeddings over the API
+
+```bash
+curl -s localhost:8080/v1/embeddings -d '{"input":["text"],"model":"<spec>"}'
+curl -s localhost:8080/v1/embeddings -d '{"input":"a query","query":true}'
+```
+
+`model` is honoured: name an embedding model this machine has and it answers with that one, and
+the response's own `model` field says which model actually produced the vectors. Naming one the
+machine cannot serve is a **400 with the reason**, never a substitution — vectors from two models
+do not share a space, so answering with the wrong one returns plausible numbers and wrong
+neighbours. Up to two embedders stay resident at once; a third evicts the least recently used.
+
+Two rozum extensions to the OpenAI shape: `"query": true` applies the model's query-side
+instruction wrapper (corpus texts and queries are embedded differently by the recipe, and
+corpus-side is the safe default), and `usage` is marked `"estimated": true` because this lane
+does not tokenise before dispatch and the count is characters-based.
+
+Only the **qwen3 family** embeds here — the forward pass and its last-token pooling are that
+recipe's. A BERT-family embedder (BGE, E5) is refused by name rather than mis-embedded.
+`ROZUM_EMBED_MODEL` sets the default for a process that is never told otherwise.
+
 **Where it is served from:** four surfaces, one ranking policy
 (`rag_embed::rank_fused`). The meeting-room MCP proxy serves `rag.search` next to the room
 tools (so any agent already connected has it); `rozum rag mcp` is the retrieval-only

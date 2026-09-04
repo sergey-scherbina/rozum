@@ -13,7 +13,19 @@ use std::sync::OnceLock;
 /// human-readable reason (model failed to load, out of memory). `is_query` applies the model's
 /// query-side instruction wrapper — corpus texts and queries are embedded DIFFERENTLY by
 /// design, and the asymmetry is the recipe's, not ours.
-pub type EmbedFn = fn(&[String], bool) -> Result<Vec<Vec<f32>>, String>;
+pub type EmbedFn = fn(Option<&str>, &[String], bool) -> Result<Embedded, String>;
+
+/// What an embed call produced, and — the part that used to be missing — WHICH model produced
+/// it. The endpoint could not report the model because nothing downstream ever returned it, so
+/// a caller had no way to learn what its vectors were, and vectors from two different models
+/// are not comparable. Naming it is what makes the answer checkable.
+#[derive(Debug, Clone)]
+pub struct Embedded {
+    /// The model that actually answered, as a resolved spec — never the string the caller sent.
+    pub model: String,
+    /// One L2-normalised vector per input text, in input order.
+    pub vectors: Vec<Vec<f32>>,
+}
 
 static EMBEDDER: OnceLock<EmbedFn> = OnceLock::new();
 
@@ -23,9 +35,25 @@ pub fn register_embedder(f: EmbedFn) {
     let _ = EMBEDDER.set(f);
 }
 
-/// Embed `texts`, or `None` when no backend is registered in this build.
+/// Embed `texts` with a REQUESTED model, or `None` when no backend is registered in this build.
+///
+/// `None` for `model` means "whatever this process is configured for" — the behaviour every
+/// internal caller wants and the default when a client names nothing. A `Some` that names
+/// something this machine cannot serve comes back as `Err`, deliberately: substituting a
+/// different model silently is how a caller ends up with vectors it cannot compare to the ones
+/// it already has, which is worse than a refusal it can read.
+pub fn embed_with(
+    model: Option<&str>,
+    texts: &[String],
+    is_query: bool,
+) -> Option<Result<Embedded, String>> {
+    EMBEDDER.get().map(|f| f(model, texts, is_query))
+}
+
+/// Embed `texts` with the process's configured model — the shape every in-process caller uses,
+/// none of which chooses a model.
 pub fn embed(texts: &[String], is_query: bool) -> Option<Result<Vec<Vec<f32>>, String>> {
-    EMBEDDER.get().map(|f| f(texts, is_query))
+    embed_with(None, texts, is_query).map(|r| r.map(|e| e.vectors))
 }
 
 /// Whether an embedding backend is available at all — lets an endpoint distinguish

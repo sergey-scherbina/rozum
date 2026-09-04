@@ -510,6 +510,42 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
 /// default). Runs through the `rozum_core::embedding` register-hook: a build without the native
 /// runtime has no embedder, and answers 501 rather than 500 so the proxy's fallback logic can
 /// tell "never possible here" from "broke this time".
+/// The `/v1/embeddings` body.
+///
+/// `model` names the model that ACTUALLY answered — resolved, never the string the caller sent —
+/// which is the field this endpoint used to omit entirely. Without it a client holding vectors
+/// from two calls had no way to know whether they share a space, and vectors that do not are
+/// the kind of bug that produces plausible numbers and wrong neighbours.
+fn embeddings_payload(e: &rozum_core::embedding::Embedded, est_tokens: u64) -> serde_json::Value {
+    json!({
+        "object": "list",
+        "model": e.model,
+        "data": e
+            .vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| json!({"object": "embedding", "index": i, "embedding": v}))
+            .collect::<Vec<_>>(),
+        // Marked `estimated` because it is: this lane does not tokenize before dispatch, so the
+        // count is characters-based. A client reading `usage` should not meet a missing key, and
+        // one reading it closely should not be misled about where the number came from.
+        "usage": {"prompt_tokens": est_tokens, "total_tokens": est_tokens, "estimated": true},
+    })
+}
+
+/// Which status an embed failure deserves.
+///
+/// A model this machine cannot serve is the CALLER's mistake and answers 400 with the reason
+/// and what is available — not a 502, which reads as "the server is broken, retry", and above
+/// all not a 200 carrying a different model's vector space.
+fn embed_error_status(err: &str) -> StatusCode {
+    if err.starts_with("unknown embedding model") || err.contains("architecture") {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::BAD_GATEWAY
+    }
+}
+
 async fn embeddings_handler(
     State(state): State<GatewayState>,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -538,23 +574,30 @@ async fn embeddings_handler(
             .into_response();
     }
     let is_query = body.get("query").and_then(|v| v.as_bool()).unwrap_or(false);
+    // The `model` field is HONOURED. It used to be read by nobody: whatever the caller named,
+    // the one configured embedder answered, and the response did not say which — so a client
+    // could hold two sets of vectors from two models and have no way to tell. Vectors from
+    // different models do not share a space, which makes a silent substitution the kind of bug
+    // that produces plausible numbers and wrong neighbours.
+    let requested = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    // Rough by construction and labelled as such: OpenAI bills tokens and this lane does not
+    // tokenize before dispatch, so the count is characters-based. Present because a client that
+    // reads `usage` should not get a missing key, and honest because it is named an estimate.
+    let est_tokens: u64 = texts.iter().map(|t| (t.chars().count() as u64).div_ceil(4)).sum();
     // The embedder blocks on its own worker thread; hop off the async runtime for the wait.
     let out = tokio::task::spawn_blocking(move || {
-        rozum_core::embedding::embed(&texts, is_query)
+        rozum_core::embedding::embed_with(requested.as_deref(), &texts, is_query)
     })
     .await;
     match out {
-        Ok(Some(Ok(vecs))) => axum::Json(json!({
-            "object": "list",
-            "data": vecs
-                .iter()
-                .enumerate()
-                .map(|(i, v)| json!({"object": "embedding", "index": i, "embedding": v}))
-                .collect::<Vec<_>>(),
-        }))
-        .into_response(),
+        Ok(Some(Ok(e))) => axum::Json(embeddings_payload(&e, est_tokens)).into_response(),
         Ok(Some(Err(e))) => {
-            (StatusCode::BAD_GATEWAY, axum::Json(json!({"error": e}))).into_response()
+            (embed_error_status(&e), axum::Json(json!({"error": e}))).into_response()
         }
         Ok(None) => (
             StatusCode::NOT_IMPLEMENTED,
@@ -4226,6 +4269,50 @@ mod tests {
     /// Behavior: a request naming an installed model that CANNOT co-reside switches the primary
     /// to it. Before this, the gateway fell through and answered with whatever was loaded — the
     /// client asked for one model and got another, and nothing in the response said so.
+    /// Behavior: the embeddings body names the model that ANSWERED, not the one that was asked
+    /// for, and carries a usage block marked as the estimate it is.
+    #[test]
+    fn embeddings_payload_names_the_model_that_answered() {
+        let e = rozum_core::embedding::Embedded {
+            model: "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ".into(),
+            vectors: vec![vec![0.5, 0.5], vec![1.0, 0.0]],
+        };
+        let v = embeddings_payload(&e, 7);
+        assert_eq!(v["model"], "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ");
+        assert_eq!(v["object"], "list");
+        let data = v["data"].as_array().expect("data");
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0]["index"], serde_json::json!(0));
+        assert_eq!(data[1]["embedding"], serde_json::json!([1.0, 0.0]));
+        assert_eq!(v["usage"]["prompt_tokens"], serde_json::json!(7));
+        assert_eq!(v["usage"]["total_tokens"], serde_json::json!(7));
+        assert_eq!(
+            v["usage"]["estimated"],
+            serde_json::json!(true),
+            "the count is characters-based and must not pass for a real tokenisation"
+        );
+    }
+
+    /// Behavior: asking for a model this machine cannot serve is the CALLER's error.
+    ///
+    /// The distinction is the point of the whole change: a 502 says "retry, the server broke",
+    /// and the old behaviour — serving a different model with a 200 — said nothing at all while
+    /// handing back vectors from another space.
+    #[test]
+    fn an_unservable_embedding_model_is_a_client_error() {
+        assert_eq!(
+            embed_error_status("unknown embedding model \"text-embedding-3-large\"; this machine has: a, b"),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            embed_error_status("embedding model \"bge-m3\" has architecture \"bert\"; this build embeds with the qwen3 family only"),
+            StatusCode::BAD_REQUEST
+        );
+        // A genuine failure of a model this machine DOES have is still the server's problem.
+        assert_eq!(embed_error_status("embed forward: out of memory"), StatusCode::BAD_GATEWAY);
+        assert_eq!(embed_error_status("embed worker died mid-request"), StatusCode::BAD_GATEWAY);
+    }
+
     /// Behavior: `/v1/models` lists the CATALOGUE — every model on disk — with the resident one
     /// first under its Claude alias, and says which is loaded.
     #[test]
