@@ -1,8 +1,0 @@
-slug: embeddings-honor-model
-owner: claude (opus 5)
-started: 2026-09-04
-scope:
-  - /v1/embeddings honours the `model` field instead of silently serving one embedder
-  - the response says which model actually answered, plus usage
-  - an unknown or unsupported model is an explicit error, not a substitution
-  - several embedders can be resident, bounded, keyed by spec

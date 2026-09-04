@@ -288,6 +288,19 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   chat gateway) bounds its own embedding cache to 512 MB
   (`rozum_core::embedding::is_standalone_process`). Query expansion already measured NEGATIVE
   (22/25 & 25/25 identical to base) — do not re-propose without a new eval delta.
+- [x] **rag-bigger-embedder — MEASURED AND REJECTED 2026-09-04.** `Qwen3-Embedding-4B` against the
+  shipped 0.6B, same isolated corpus (11,069 chunks, a `git archive` into a temp dir so no daemon
+  could write the store mid-run — the first attempt inside a worktree WAS contaminated by one),
+  same 25 questions, both fused: **0.6B 22/25 & 25/25, 4B 21/25 & 25/25.** Nearly seven times the
+  parameters answers one question WORSE and none better; the 0.6B leg reproduced the recorded
+  baseline exactly, which is what makes that trustworthy rather than one run's noise. The misses
+  are DIFFERENT rather than a superset — a bigger model has its own blind spots — and at a ceiling
+  of three or four questions out of twenty-five that is phrasing noise, not capability. Cost that
+  would have been paid FOR a regression: 2.28 GB on disk, 2.5× wider vectors (12 → 28 MB per store
+  AND per live agent's copy), ~2.3 GB more resident RAM, and a full re-embed — ~53 min here,
+  ~7.5 h for scalascript's 94.9k chunks. Operator's call after the numbers: 0.6B stays the
+  default, the 4B stays on disk as a comparison target (selectable per request now that
+  `/v1/embeddings` honours `model`). Details in `docs/specs/rag-embeddings-impl.md`.
 - [x] **rag-uniml-parser-quadratic — DONE 2026-08-31.** `Markdown_parse` was O(bytes²); it is now
   linear in size for ordinary documents, and phase 2 (code) shipped on top of it. 256 KB went
   173.4 s → 0.108 s (~1600×) over four rounds, each of which killed the previous round's cause:
