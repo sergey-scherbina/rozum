@@ -1,7 +1,0 @@
-slug: mlx-hybrid-pads-desync
-owner: claude (opus 5)
-started: 2026-09-06
-scope:
-  - the panic: hybrid continuous batching never grows `pads`, so a retire after an
-    admit indexes out of bounds and kills the mlx worker thread
-  - the lie: a dead worker still reports resident=True and never self-heals
