@@ -329,6 +329,25 @@ async fn run_channel(
                     continue;
                 }
 
+                // `/watch on` — mirror an ADMITTED person's message to the owner. Placed after
+                // the authorization check so it reports what actually reached the model, and
+                // skipping the owner's own messages, which they do not need sent back to them.
+                {
+                    let (watching, owner_id) = {
+                        let a = acl.lock().await;
+                        (a.watch, a.owner)
+                    };
+                    if let Some(o) = owner_id.filter(|o| watching && *o != id && *o != chat_id) {
+                        let line = format!(
+                            "👁 {name} (id {id}) в чате {chat_id}:\n{}",
+                            truncate_for_notice(&text)
+                        );
+                        if let Err(error) = bot.send_message_to(o, &line).await {
+                            eprintln!("[telegram-bridge] sendMessage (watch) error: {error}");
+                        }
+                    }
+                }
+
                 // Dialog mode (`/nadia on`): plain text drives the coding agent instead of the
                 // chat model. Intercepted BEFORE the room, so the message is not also answered
                 // by the assistant — two replies to one message is worse than either alone.
@@ -449,6 +468,9 @@ async fn multi_poller(
     poll_error_delay_secs = MIN_POLL_ERROR_SECS;
     // Log each not-yet-served chat once — this is how the operator discovers a new group's id.
     let mut logged_unknown: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    // Last time each unknown sender was reported, so a stranger cannot flood the owner.
+    let mut stranger_seen: std::collections::HashMap<i64, std::time::Instant> =
+        std::collections::HashMap::new();
     // Routing topology can also change from OUTSIDE this process — `rozum-gateway messenger
     // groups add/remove`, the UCC console, or a hand edit. The participant pool already
     // reconciles the registry every 5s; the bridge used to read it only at startup, so such an
@@ -498,6 +520,42 @@ async fn multi_poller(
                         }
                     }
                     let Some(tx) = routes.get(&chat_id) else {
+                        // A STRANGER IN A PRIVATE CHAT. The bridge serves a fixed set of chats,
+                        // so this message would otherwise be dropped with only a stderr line —
+                        // and the person gets no reply, which means the owner never learns anyone
+                        // knocked. Tell them who it was and what they said, and offer the grant.
+                        //
+                        // Rate-limited per sender rather than sent once: the owner asked to see
+                        // what strangers write, and one notice would hide everything after it —
+                        // but an unthrottled relay hands any stranger a way to flood the owner's
+                        // chat, so it is one every `STRANGER_NOTICE_GAP`.
+                        if let Some(o) = owner.filter(|o| *o != message.sender_id) {
+                            let now = std::time::Instant::now();
+                            let due = stranger_seen
+                                .get(&message.sender_id)
+                                .is_none_or(|t: &std::time::Instant| {
+                                    now.duration_since(*t) >= STRANGER_NOTICE_GAP
+                                });
+                            if due {
+                                stranger_seen.insert(message.sender_id, now);
+                                let text = truncate_for_notice(&message.text);
+                                send_hint_and_command(
+                                    &bot,
+                                    o,
+                                    &format!(
+                                        "✉️ Незнакомый пишет боту в личку.\n\
+                                         Кто: {} (id {})\n\
+                                         Чат: {chat_id}\n\
+                                         Сообщение: {text}\n\n\
+                                         Скопируй команду ниже, чтобы дать доступ \
+                                         (можно дописать read write shell):",
+                                        message.sender_name, message.sender_id
+                                    ),
+                                    &format!("/grant {} chat", message.sender_id),
+                                )
+                                .await;
+                            }
+                        }
                         if logged_unknown.insert(chat_id) {
                             eprintln!(
                                 "[telegram-bridge] update from chat {chat_id} (not served); to route it set TELEGRAM_EXTRA_CHATS={chat_id}=<room>"
@@ -610,6 +668,22 @@ fn next_update_offset(update_id: i64) -> BridgeResult<i64> {
 
 /// The bot's Telegram command menu (name, description) — registered at startup via
 /// `setMyCommands`, so they appear behind the Menu button and the `/` list. Mirrors
+/// How rarely a single unknown sender may generate a notice. The owner asked to see what
+/// strangers write, so this is not "once ever" — but without a floor any stranger could turn the
+/// owner's chat into a firehose by sending in a loop.
+const STRANGER_NOTICE_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Message text for a notice: one line, bounded, so a long paste cannot bury the command under it.
+fn truncate_for_notice(text: &str) -> String {
+    const MAX: usize = 300;
+    let one_line = text.replace('\n', " ");
+    if one_line.chars().count() <= MAX {
+        return one_line;
+    }
+    let cut: String = one_line.chars().take(MAX).collect();
+    format!("{cut}… (обрезано)")
+}
+
 /// Send a prose line and then the command ALONE, as two messages.
 ///
 /// Telegram copies a WHOLE message at a tap, so a hint carrying its explanation and its command
@@ -628,6 +702,7 @@ const BOT_COMMANDS: &[(&str, &str)] = &[
     ("help", "Справка и список команд"),
     ("whoami", "Показать мой Telegram id"),
     ("members", "Кто имеет доступ (для владельца)"),
+    ("watch", "Копировать сообщения допущенных мне в личку (для владельца)"),
     ("grant", "Дать доступ: /grant <id> chat read write shell"),
     ("revoke", "Убрать доступ: /revoke <id>"),
     ("groups", "Список подключённых групп (владелец)"),
@@ -640,6 +715,7 @@ const HELP_TEXT: &str = "Команды бота:\n\
 /members — кто имеет доступ в этом чате (владелец)\n\
 /grant <id> [chat read write shell | all] — дать/изменить доступ (владелец)\n\
 /revoke <id> — убрать доступ (владелец)\n\
+/watch on|off — копировать сообщения допущенных мне в личку (владелец)\n\
 /groups — список подключённых групп (владелец)\n\
 /addgroup — подключить эту группу, свой ростер прав (владелец, в группе)\n\
 /removegroup <id> — отключить группу (владелец)\n\
@@ -681,6 +757,33 @@ fn handle_command(
                 return NOT_OWNER.to_string();
             }
             render_members(acl)
+        }
+        // Reading an ADMITTED person's messages is a separate decision from admitting them, so it
+        // is a separate switch rather than a capability on the grant. A stranger's first message
+        // is reported either way — that one is the owner's doorbell, not surveillance of someone
+        // they invited.
+        "/watch" => {
+            if !is_owner {
+                return NOT_OWNER.to_string();
+            }
+            match parts.next() {
+                Some("on") => {
+                    acl.watch = true;
+                    let _ = acl.save(acl_path);
+                    "👁 Отслеживание включено: сообщения допущенных участников этой комнаты \
+                     будут копироваться тебе в личку."
+                        .to_string()
+                }
+                Some("off") => {
+                    acl.watch = false;
+                    let _ = acl.save(acl_path);
+                    "👁 Отслеживание выключено.".to_string()
+                }
+                _ => format!(
+                    "Отслеживание: {}\nВключить: /watch on   Выключить: /watch off",
+                    if acl.watch { "включено" } else { "выключено" }
+                ),
+            }
         }
         "/grant" | "/add" => {
             if !is_owner {
@@ -973,5 +1076,37 @@ mod tests {
 
         // bad caps token is reported, group-suffixed command still parses
         assert!(handle_command("/grant@MyBot 7 bogus", 1, "Owner", &mut acl, &path, 42).contains("bogus"));
+    }
+
+    /// Behavior: `/watch` is owner-only, persists, and reports its state — a switch separate from
+    /// the roster, because admitting someone and reading their messages are different decisions.
+    #[test]
+    fn watch_is_owner_only_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("room.json");
+        let mut acl = Acl { owner: Some(1), ..Default::default() };
+
+        assert_eq!(handle_command("/watch on", 999, "Guest", &mut acl, &path, 42), NOT_OWNER);
+        assert!(!acl.watch, "a non-owner must not be able to turn it on");
+
+        assert!(handle_command("/watch on", 1, "Owner", &mut acl, &path, 42).contains("включено"));
+        assert!(acl.watch);
+        assert!(Acl::load(&path).watch, "and it survives a restart");
+
+        assert!(handle_command("/watch", 1, "Owner", &mut acl, &path, 42).contains("включено"));
+        assert!(handle_command("/watch off", 1, "Owner", &mut acl, &path, 42).contains("выключено"));
+        assert!(!acl.watch);
+        assert!(!Acl::load(&path).watch);
+    }
+
+    /// Behavior: a notice quotes one bounded line, so a long paste cannot bury the `/grant`
+    /// command that follows it.
+    #[test]
+    fn a_quoted_message_is_one_bounded_line() {
+        assert_eq!(truncate_for_notice("hi\nthere"), "hi there");
+        let long = "x".repeat(500);
+        let out = truncate_for_notice(&long);
+        assert!(out.ends_with("… (обрезано)"), "{out}");
+        assert!(out.chars().count() < 330, "bounded: {}", out.chars().count());
     }
 }

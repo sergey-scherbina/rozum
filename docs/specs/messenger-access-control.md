@@ -160,3 +160,22 @@ is what a bot that does not serve them should look like.
 only chats it serves; a message from any other chat is logged once to stderr and dropped, before
 command handling. So `/whoami` from someone the bot has never been introduced to is not answered
 either — forwarding one of their messages is the only way to learn their id.
+
+## Knowing who is knocking, and watching who is inside (2026-09-06)
+
+Two reports to the owner, deliberately on different terms.
+
+**A stranger in a private chat is reported with what they wrote.** The bridge serves a fixed set
+of chats, so such a message used to be dropped with only a stderr line — the person got no reply
+and the owner never learned anyone had knocked. The notice names them, quotes the message, and is
+followed by the ready `/grant` as its own message. Rate-limited to one per sender per minute: the
+owner asked to see what strangers write, so "once ever" would hide everything after the first,
+but an unthrottled relay would hand any stranger a way to flood the owner's chat.
+
+**`/watch on` mirrors ADMITTED members' messages** to the owner, per room, owner-only, persisted
+in the roster file and off by default. It is a switch rather than a capability on the grant
+because admitting someone and reading their messages are different decisions, and folding the
+second into `/grant` would make every grant quietly mean more than it says. The owner's own
+messages are not mirrored back to them.
+
+Quoted text is one bounded line (300 chars) — a long paste must not bury the command under it.

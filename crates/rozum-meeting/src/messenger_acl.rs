@@ -101,6 +101,14 @@ pub struct Acl {
     /// Members keyed by numeric user id.
     #[serde(default)]
     pub members: BTreeMap<i64, Member>,
+    /// Mirror ADMITTED members' messages to the owner (`/watch on`).
+    ///
+    /// Off by default and deliberately separate from the roster: admitting someone and reading
+    /// over their shoulder are different decisions, and conflating them would make every `/grant`
+    /// quietly mean more than it says. A stranger's first message is reported regardless — that
+    /// one is the owner's own doorbell, not surveillance of a person they invited.
+    #[serde(default)]
+    pub watch: bool,
 }
 
 impl Acl {

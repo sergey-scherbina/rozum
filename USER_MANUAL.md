@@ -529,7 +529,9 @@ rozum meetings participant \
 - `--peer <handle>` — other models in the room, so `always` never loops
   model↔model.
 **Letting someone in.** Rosters are per room and managed from inside the chat: `/members` shows
-who is admitted there, `/grant <id> chat` admits, `/revoke <id>` removes. The id is numeric
+who is admitted there, `/grant <id> chat` admits, `/revoke <id>` removes, and `/watch on` copies
+admitted members' messages to you (off by default — admitting someone and reading their messages
+are separate decisions, so it is a separate switch). The id is numeric
 because a `@username` can be changed and re-taken, which would silently detach a roster entry
 from the person it was meant for.
 
@@ -537,6 +539,9 @@ Two ways to learn that id, neither of which asks you to hunt for it:
 
 - **They write first.** The first message from someone without access prints a ready line —
   their name, their id, and the exact `/grant` to send.
+- **They knock in private.** Someone the bot does not serve writing to it in a private chat is
+  reported to you with their name, id and what they wrote, plus the ready `/grant` — at most one
+  notice per person per minute, so nobody can flood you with it.
 - **You forward.** Forward any message from them to the bot and it prints the same line for the
   ORIGINAL author. This is the one that works BEFORE they ever contact the bot, which is what
   admitting someone in advance needs. It offers the command rather than granting: forwarding is
