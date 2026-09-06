@@ -139,3 +139,24 @@ on it, and a repeat is noise.
 Both `forward_from` (pre-7.0) and `forward_origin` (Bot API 7.0) are read, since both are in the
 wild. Nothing is disclosed when the original author restricts forwarding, when the origin is a
 channel, or when the author is a bot — none of those is an error, there is simply no id to use.
+
+## Where the refusal notice goes (2026-09-06)
+
+To the OWNER, privately — not into the chat the message came from.
+
+It is addressed to the owner: it names a person and offers a `/grant` only the owner can run.
+Posting it where it arrived meant a GROUP read it — everyone learning that someone had been
+refused, and the refused person being shown a command they cannot use. Noise for the group and a
+small indignity for them.
+
+A Telegram private chat's id is the user's id, so the owner's own id is the address; the notice
+names which chat the attempt came from. It falls back to the originating chat only when no owner
+is recorded, which is the one case with nowhere better to send it.
+
+In the group itself the bot now says nothing: a non-member's message is simply not relayed, which
+is what a bot that does not serve them should look like.
+
+**Note what a stranger in their OWN private chat receives: nothing at all.** The bridge routes
+only chats it serves; a message from any other chat is logged once to stderr and dropped, before
+command handling. So `/whoami` from someone the bot has never been introduced to is not answered
+either — forwarding one of their messages is the only way to learn their id.

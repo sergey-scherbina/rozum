@@ -297,12 +297,29 @@ async fn run_channel(
                 } || policy.allows(id.to_string());
                 if !allowed {
                     if notified.insert(id) {
+                        // TO THE OWNER, PRIVATELY — not into the chat the message came from.
+                        //
+                        // The notice is addressed to the owner: it names a person and offers a
+                        // command only the owner can run. Posting it where it arrived meant a
+                        // GROUP read it — everyone learning that someone was refused, and the
+                        // refused person being shown a `/grant` they cannot use. Noise for the
+                        // group and a small indignity for them.
+                        //
+                        // A Telegram private chat's id IS the user's id, so the owner's own id is
+                        // the address. Falls back to the originating chat when there is no owner
+                        // recorded, which is the only case with nowhere better to send it.
+                        let owner_id = { acl.lock().await.owner };
+                        let (target, where_from) = match owner_id {
+                            Some(o) if o != chat_id => (o, format!(" в чате {chat_id}")),
+                            _ => (chat_id, String::new()),
+                        };
                         send_hint_and_command(
                             &bot,
-                            chat_id,
+                            target,
                             &format!(
-                                "🔒 {name} (id {id}) написал(а) боту, но доступа нет. Скопируй \
-                                 команду ниже, чтобы добавить (можно дописать read write shell):"
+                                "🔒 {name} (id {id}) написал(а) боту{where_from}, но доступа нет. \
+                                 Скопируй команду ниже, чтобы добавить (можно дописать \
+                                 read write shell):"
                             ),
                             &format!("/grant {id} chat"),
                         )
