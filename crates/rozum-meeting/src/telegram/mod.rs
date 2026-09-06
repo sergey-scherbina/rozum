@@ -264,12 +264,16 @@ async fn run_channel(
                 if let Some((fid, fname)) = incoming.message.forwarded_from.clone() {
                     let is_owner = { acl.lock().await.is_owner(id) };
                     if is_owner && fid != id && notified.insert(fid) {
-                        let hint = format!(
-                            "↪️ Переслано от {fname} (id {fid}).\n                             Дать доступ: /grant {fid} chat  (можно + read write shell)"
-                        );
-                        if let Err(error) = bot.send_message_to(chat_id, &hint).await {
-                            eprintln!("[telegram-bridge] sendMessage (forward hint) error: {error}");
-                        }
+                        send_hint_and_command(
+                            &bot,
+                            chat_id,
+                            &format!(
+                                "↪️ Переслано от {fname} (id {fid}). Скопируй команду ниже, \
+                                 чтобы дать доступ (можно дописать read write shell):"
+                            ),
+                            &format!("/grant {fid} chat"),
+                        )
+                        .await;
                     }
                 }
 
@@ -293,13 +297,16 @@ async fn run_channel(
                 } || policy.allows(id.to_string());
                 if !allowed {
                     if notified.insert(id) {
-                        let hint = format!(
-                            "🔒 {name} (id {id}) написал(а) боту, но доступа нет. Добавить: \
-                             /grant {id} chat  (можно + read write shell)."
-                        );
-                        if let Err(error) = bot.send_message_to(chat_id, &hint).await {
-                            eprintln!("[telegram-bridge] sendMessage (notify) error: {error}");
-                        }
+                        send_hint_and_command(
+                            &bot,
+                            chat_id,
+                            &format!(
+                                "🔒 {name} (id {id}) написал(а) боту, но доступа нет. Скопируй \
+                                 команду ниже, чтобы добавить (можно дописать read write shell):"
+                            ),
+                            &format!("/grant {id} chat"),
+                        )
+                        .await;
                     }
                     let _ = incoming.committed.send(Ok(()));
                     continue;
@@ -586,6 +593,19 @@ fn next_update_offset(update_id: i64) -> BridgeResult<i64> {
 
 /// The bot's Telegram command menu (name, description) — registered at startup via
 /// `setMyCommands`, so they appear behind the Menu button and the `/` list. Mirrors
+/// Send a prose line and then the command ALONE, as two messages.
+///
+/// Telegram copies a WHOLE message at a tap, so a hint carrying its explanation and its command
+/// together cannot be copied without the prose around it — which defeats the point of printing a
+/// command at all. The command gets a message of its own, ready to copy and send unedited.
+async fn send_hint_and_command(bot: &TelegramBot, chat_id: i64, prose: &str, command: &str) {
+    for part in [prose, command] {
+        if let Err(error) = bot.send_message_to(chat_id, part).await {
+            eprintln!("[telegram-bridge] sendMessage (hint) error: {error}");
+        }
+    }
+}
+
 /// the commands `handle_command` accepts.
 const BOT_COMMANDS: &[(&str, &str)] = &[
     ("help", "Справка и список команд"),

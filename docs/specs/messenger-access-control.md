@@ -118,9 +118,16 @@ learn about someone who has never contacted it. Forward any message from them to
 answers with the person, their id, and the command:
 
 ```
-↪️ Переслано от Bob (id 987654321).
-Дать доступ: /grant 987654321 chat  (можно + read write shell)
+↪️ Переслано от Bob (id 987654321). Скопируй команду ниже, чтобы дать доступ
+   (можно дописать read write shell):
+
+/grant 987654321 chat
 ```
+
+The command arrives as its OWN message. Telegram copies a whole message at a tap, so a hint that
+carries its explanation and its command together cannot be copied without the prose — which
+defeats the point of printing a command. The not-admitted notice was split the same way for the
+same reason.
 
 **It offers; it does not grant.** Forwarding is also how you hand the model something to read,
 and in a room running `--reply-policy always` that is an ordinary daily act — granting on any
