@@ -49,6 +49,10 @@ pub struct TgForwardOrigin {
     pub kind: String,
     #[serde(default)]
     pub sender_user: Option<TgFrom>,
+    /// The display name Telegram gives for a `hidden_user` — all it will say about someone who
+    /// restricts forwarding.
+    #[serde(default)]
+    pub sender_user_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,12 +133,28 @@ pub struct IncomingMessage {
     /// disclosed them. The one identity a bot can learn about someone who has never written to
     /// it — which is what makes granting access in advance possible at all.
     pub forwarded_from: Option<(i64, String)>,
+    /// Why a forward disclosed nobody, when it did not — so the bridge can say so instead of
+    /// falling silent, which reads as the feature being broken.
+    pub forward_undisclosed: Option<String>,
+}
+
+/// What a forwarded message says about its original author.
+///
+/// Three outcomes, and the middle one is why this is an enum rather than an `Option`: Telegram
+/// omits the identity when the author restricts forwarding, and answering `None` there made the
+/// bot silently do nothing — indistinguishable, to the operator, from the feature being broken.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ForwardOrigin {
+    /// A real person, with the id needed to grant them access.
+    User(i64, String),
+    /// Forwarded, but there is no id to be had: the author restricts forwarding, or the origin is
+    /// a channel or a bot. Carries whatever display name Telegram was willing to give.
+    Undisclosed(String),
+    /// Not a forward at all.
+    None,
 }
 
 /// The original author of a forwarded message, if Telegram disclosed one and it is a real person.
-///
-/// A bot is skipped (granting access to a bot is never what the operator meant) and so is a
-/// forward whose origin is a channel or a privacy-hidden user, which carries no id at all.
 fn forwarded_author(msg: &TgMessage) -> Option<(i64, String)> {
     let from = msg
         .forward_from
@@ -149,6 +169,37 @@ fn forwarded_author(msg: &TgMessage) -> Option<(i64, String)> {
         from.first_name.clone()
     };
     Some((from.id, name))
+}
+
+/// Classify a message's forward header. Used to tell the operator WHY a forward produced no id,
+/// which is the difference between "your friend has forwarding locked" and "this is broken".
+pub fn forward_origin_of(msg: &TgMessage) -> ForwardOrigin {
+    if let Some((id, name)) = forwarded_author(msg) {
+        return ForwardOrigin::User(id, name);
+    }
+    // A forward header of some shape, but nothing to grant to.
+    if let Some(o) = msg.forward_origin.as_ref() {
+        let who = o
+            .sender_user
+            .as_ref()
+            .map(|u| u.first_name.clone())
+            .or_else(|| o.sender_user_name.clone())
+            .unwrap_or_default();
+        return ForwardOrigin::Undisclosed(match o.kind.as_str() {
+            "hidden_user" => format!("скрытый пользователь{}", if who.is_empty() { String::new() } else { format!(" {who}") }),
+            "channel" => "канал".to_string(),
+            "chat" => "чат".to_string(),
+            other => format!("{other}{}", if who.is_empty() { String::new() } else { format!(" {who}") }),
+        });
+    }
+    if let Some(f) = msg.forward_from.as_ref() {
+        return ForwardOrigin::Undisclosed(if f.is_bot {
+            "бот".to_string()
+        } else {
+            f.first_name.clone()
+        });
+    }
+    ForwardOrigin::None
 }
 
 /// The bot's own public identity (`getMe`) — what the admin console shows so the operator can
@@ -525,6 +576,10 @@ impl TelegramBot {
             sender_name,
             text: text.to_owned(),
             forwarded_from: forwarded_author(msg),
+            forward_undisclosed: match forward_origin_of(msg) {
+                ForwardOrigin::Undisclosed(what) => Some(what),
+                _ => None,
+            },
         })
     }
 
@@ -554,6 +609,10 @@ impl TelegramBot {
                 sender_name,
                 text: text.to_owned(),
                 forwarded_from: forwarded_author(msg),
+                forward_undisclosed: match forward_origin_of(msg) {
+                    ForwardOrigin::Undisclosed(what) => Some(what),
+                    _ => None,
+                },
             },
         ))
     }
@@ -926,6 +985,45 @@ mod tests {
         }
     }
 
+    /// Behavior: a forward that discloses nobody says WHY, so the operator can tell "your friend
+    /// has forwarding locked" from "this is broken". Answering `None` for all three shapes made
+    /// the bot fall silent, which reads as the second.
+    #[test]
+    fn an_undisclosed_forward_reports_which_case_it_is() {
+        for (extra, expect) in [
+            (json!({"forward_origin": {"type": "hidden_user", "sender_user_name": "Bob"}}), "скрытый"),
+            (json!({"forward_origin": {"type": "channel"}}), "канал"),
+            (json!({"forward_from": {"id": 7, "first_name": "SomeBot", "is_bot": true}}), "бот"),
+        ] {
+            let mut msg = json!({
+                "chat": {"id": TEST_CHAT_ID, "type": "private"},
+                "from": {"id": 123, "first_name": "Alice", "is_bot": false},
+                "text": "look"
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                msg[k] = v.clone();
+            }
+            let u: TgUpdate = serde_json::from_value(json!({"update_id": 1, "message": msg})).unwrap();
+            let m = TelegramBot::extract_message(&u, TEST_CHAT_ID, |_| true).unwrap();
+            assert_eq!(m.forwarded_from, None, "{extra}");
+            let why = m.forward_undisclosed.expect("must say why");
+            assert!(why.contains(expect), "expected {expect:?} in {why:?}");
+        }
+
+        // An ordinary message is not a forward and says nothing about one.
+        let plain: TgUpdate = serde_json::from_value(json!({
+            "update_id": 1,
+            "message": {
+                "chat": {"id": TEST_CHAT_ID, "type": "private"},
+                "from": {"id": 123, "first_name": "Alice", "is_bot": false},
+                "text": "hi"
+            }
+        }))
+        .unwrap();
+        let m = TelegramBot::extract_message(&plain, TEST_CHAT_ID, |_| true).unwrap();
+        assert_eq!(m.forward_undisclosed, None);
+    }
+
     /// Behavior: a forward with no person behind it discloses nobody.
     ///
     /// Three ordinary shapes: the author restricts forwarding so Telegram omits the identity, the
@@ -977,6 +1075,7 @@ mod tests {
                 sender_name: "Alice".into(),
                 text: "hello".into(),
                 forwarded_from: None,
+                forward_undisclosed: None,
             }
         );
         assert!(TelegramBot::extract_message(&update, TEST_CHAT_ID + 1, |_| true).is_none());

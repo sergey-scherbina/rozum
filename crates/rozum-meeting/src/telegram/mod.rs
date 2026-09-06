@@ -261,8 +261,30 @@ async fn run_channel(
                 //
                 // Owner-only, and once per author, for the same reason the not-admitted notice
                 // is: nobody else can act on it, and a repeat is noise.
+                // A forward that disclosed NOBODY still gets an answer. Telegram omits the
+                // author when they restrict forwarding, and staying quiet there is
+                // indistinguishable — from where the operator sits — from the feature being
+                // broken. Say which case it is and what to do instead.
+                if let Some(what) = incoming.message.forward_undisclosed.clone() {
+                    let is_owner = { acl.lock().await.is_owner(id) };
+                    eprintln!("[telegram-bridge] forward with no grantable author: {what}");
+                    if is_owner {
+                        let msg = format!(
+                            "↪️ Переслано, но Telegram не назвал автора ({what}) — id взять \
+                             неоткуда.\n\
+                             Так бывает, когда человек запретил ссылку на свой аккаунт при \
+                             пересылке, или когда переслано из канала.\n\
+                             Тогда остаётся дождаться, пока он напишет боту сам — тогда я \
+                             покажу его id и команду."
+                        );
+                        if let Err(error) = bot.send_message_to(chat_id, &msg).await {
+                            eprintln!("[telegram-bridge] sendMessage (forward undisclosed): {error}");
+                        }
+                    }
+                }
                 if let Some((fid, fname)) = incoming.message.forwarded_from.clone() {
                     let is_owner = { acl.lock().await.is_owner(id) };
+                    eprintln!("[telegram-bridge] forward from {fname} (id {fid}), owner={is_owner}");
                     if is_owner && fid != id && notified.insert(fid) {
                         send_hint_and_command(
                             &bot,

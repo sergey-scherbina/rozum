@@ -137,8 +137,14 @@ Owner-only and once per author, on the same terms as the not-admitted notice: no
 on it, and a repeat is noise.
 
 Both `forward_from` (pre-7.0) and `forward_origin` (Bot API 7.0) are read, since both are in the
-wild. Nothing is disclosed when the original author restricts forwarding, when the origin is a
-channel, or when the author is a bot — none of those is an error, there is simply no id to use.
+wild.
+
+**When a forward discloses nobody, the bot SAYS SO and names the case.** Telegram omits the
+author when they restrict forwarding, and when the origin is a channel or a bot. Answering
+nothing there was indistinguishable — from where the operator sits — from the feature being
+broken, which is exactly how it was reported. The reply now names which of the three it was and
+what to do instead (wait for them to write to the bot). Both paths also leave a line in the
+bridge log, so the next report can be diagnosed from the log instead of by guessing.
 
 ## Where the refusal notice goes (2026-09-06)
 
