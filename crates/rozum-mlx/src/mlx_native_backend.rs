@@ -4744,6 +4744,14 @@ mod inner {
                 pads.push(pad_new);
                 next_toks.push(ntok);
                 note_batch_rows(1, batch_seq.len());
+                // The four arrays are ROW-PARALLEL. Stated here because the one time they drifted
+                // the symptom appeared much later and far away — an out-of-bounds inside the
+                // retire, in a different loop — and said nothing about which push was missing.
+                debug_assert_eq!(
+                    pads.len(),
+                    batch_seq.len(),
+                    "batch rows and pads must stay in step after an admit"
+                );
             }
             if batch_seq.is_empty() {
                 break;
@@ -4996,11 +5004,25 @@ mod inner {
         // Stack a new row's per-layer cache onto the batch axis of `bcache`, growing the
         // shared width (left-padding the `Full` KV of existing rows) when the new prompt is
         // longer. `Linear` layers just concat the fixed-size conv/recurrent state — no pad.
+        /// Splice one prefilled row into the batched heterogeneous cache, and RECORD ITS PAD.
+        ///
+        /// `pads` is a `Vec`, not a slice, and that is the fix rather than a detail: as a slice it
+        /// could adjust the existing pads but had no way to append the new row's own — so the
+        /// hybrid admit path grew `seqs`, `batch_seq` and `next_toks` by one and left `pads` one
+        /// short, silently, with the compiler unable to object because you cannot push to a slice.
+        /// The next retire then indexed `pads[r]` for a row that had no pad and PANICKED the
+        /// `mlx-native` worker thread — `index out of bounds: the len is 1 but the index is 1`,
+        /// observed in production after ~26 hours, which is how long it took for a second request
+        /// to be admitted into a live hybrid batch and then for a row to finish.
+        ///
+        /// The dense loop has always pushed its `pad_new` explicitly beside the other three; this
+        /// keeps the two paths saying the same thing, with the push next to the cache splice it
+        /// belongs to so the pairing cannot drift again.
         fn insert_hybrid_row(
             bcache: &mut [LayerCache],
             ncache: &[LayerCache],
             width: &mut i32,
-            pads: &mut [i32],
+            pads: &mut Vec<i32>,
             l_new: i32,
         ) {
             if l_new > *width {
@@ -5051,6 +5073,9 @@ mod inner {
                     }
                 }
             }
+            // The new row's own pad, recorded HERE beside the splice that created it — the dense
+            // loop pushes its own next to the same three arrays for the same reason.
+            pads.push(pad_new);
         }
 
         // 2. Assemble one batched heterogeneous cache. Full → left-pad+stack KV (rows
@@ -5183,6 +5208,14 @@ mod inner {
                 batch_seq.push(seqs.len() - 1);
                 next_toks.push(ntok);
                 note_batch_rows(1, batch_seq.len());
+                // The four arrays are ROW-PARALLEL. Stated here because the one time they drifted
+                // the symptom appeared much later and far away — an out-of-bounds inside the
+                // retire, in a different loop — and said nothing about which push was missing.
+                debug_assert_eq!(
+                    pads.len(),
+                    batch_seq.len(),
+                    "batch rows and pads must stay in step after an admit"
+                );
             }
             if batch_seq.is_empty() {
                 break;

@@ -1036,6 +1036,42 @@ impl Switchboard {
 
     /// Free the resident model but keep the daemon listening; the next chat
     /// lazily reloads it. Frees RAM while idle.
+    /// Retire a resident backend that has stopped being able to serve.
+    ///
+    /// A backend can die while its process lives: the MLX worker runs on its own thread, and a
+    /// panic there closes the job channel while the `Arc` in this cell stays perfectly valid. The
+    /// gateway then reported `resident` from the SPEC — what it is configured to serve — and so
+    /// kept claiming a model it could no longer run, answering every request with
+    /// `backend unavailable: mlx: worker gone: channel closed` until someone restarted it. Two
+    /// wrongs at once: it lied about its own state, and it could not recover from a fault it had
+    /// already detected.
+    ///
+    /// Dropping the backend fixes both, because `current()` is what residency reads and
+    /// `enter_primary` lazily rebuilds when it finds none: the next request reloads the model.
+    /// Deliberately NOT a drain — a drain waits for in-flight work on a worker that is gone.
+    ///
+    /// Idempotent and cheap under concurrency: N requests can all fail at once, and only the
+    /// first `take()` sees a backend to drop.
+    pub(crate) fn invalidate_backend(self: &Arc<Self>, why: &str) {
+        let old = self.backend.write().unwrap().take();
+        if old.is_none() {
+            return; // someone else already retired it
+        }
+        let model = self.model_id();
+        crate::obs::log_event(json!({
+            "event": "backend_invalidated", "model": model, "reason": why,
+        }));
+        // Freed off the runtime for the same reason `unload` does it: dropping an MLX backend
+        // joins its worker and frees ~GB of buffers. The ledger is corrected only AFTER that drop
+        // completes — telling other gateways the RAM is theirs while it is still allocated is the
+        // exact window a sibling would admit into.
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || drop(old)).await;
+            me.republish_residency().await;
+        });
+    }
+
     pub(crate) async fn unload(&self) -> Result<u64, String> {
         if self.builder.is_none() {
             return Err("this gateway cannot reload after unload (dedicated)".into());

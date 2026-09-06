@@ -634,7 +634,12 @@ async fn admit_handler(State(state): State<GatewayState>) -> impl IntoResponse {
 ///
 /// Pure so the SHAPE is testable without a gateway — the parts that break clients are ordering
 /// and ids, and both are decided here.
-fn models_payload(model_id: &str, installed: &[(String, u64)], created: u64) -> serde_json::Value {
+fn models_payload(
+    model_id: &str,
+    loaded: bool,
+    installed: &[(String, u64)],
+    created: u64,
+) -> serde_json::Value {
     // ONE ROW PER MODEL. The resident's row comes first and wears the Claude alias as its `id`,
     // which is not decoration: Claude Code's discovery only adds ids beginning with
     // `claude`/`anthropic`, and `first_model_display_name` — how a meeting participant learns
@@ -654,7 +659,7 @@ fn models_payload(model_id: &str, installed: &[(String, u64)], created: u64) -> 
         "created": created,
         "owned_by": "rozum",
         "display_name": model_id,
-        "resident": true,
+        "resident": loaded,
     });
     if let Some(size) = resident_size {
         resident_row["size_bytes"] = json!(size);
@@ -697,7 +702,15 @@ async fn models_handler(State(state): State<GatewayState>) -> impl IntoResponse 
         .into_iter()
         .map(|m| (m.spec, m.size_bytes))
         .collect();
-    axum::Json(models_payload(&state.sb.model_id(), &installed, now_secs()))
+    // `resident` asks whether a backend is actually LOADED, not what this gateway is configured
+    // to serve. Those differ exactly when it matters: an MLX worker can die on its own thread
+    // while the process lives, and reporting the spec then claims a model the gateway cannot run.
+    axum::Json(models_payload(
+        &state.sb.model_id(),
+        state.sb.current().is_some(),
+        &installed,
+        now_secs(),
+    ))
 }
 
 fn sanitize_id(s: &str) -> String {
@@ -917,6 +930,13 @@ async fn serve_wire<D: WireDialect>(
             crate::obs::log_event(json!({
                 "event": "request_error", "endpoint": D::ENDPOINT, "error": e.to_string(),
             }));
+            // A backend that reports itself UNAVAILABLE is not coming back on its own: the MLX
+            // worker thread is gone and its channel is closed, while the `Arc` here stays valid
+            // forever. Retire it, so residency stops claiming a model this gateway cannot run and
+            // the next request rebuilds it instead of meeting the same dead channel.
+            if matches!(e, rozum_core::backend::ModelError::BackendUnavailable(_)) {
+                state.sb.invalidate_backend(&e.to_string());
+            }
             chat_error_response(&e, D::ERROR_KIND)
         }
         Ok(chat_stream) => {
@@ -4321,7 +4341,7 @@ mod tests {
             ("mlx-community:Qwen3.5-4B-MLX-4bit".to_string(), 3_000_000_000u64),
             ("mlx-community:Qwen3.8-27B-4bit".to_string(), 15_000_000_000u64),
         ];
-        let v = models_payload("mlx-community:Qwen3.5-4B-MLX-4bit", &installed, 7);
+        let v = models_payload("mlx-community:Qwen3.5-4B-MLX-4bit", true, &installed, 7);
         let data = v["data"].as_array().expect("data array");
         assert_eq!(data.len(), 2, "one row per model, never the resident twice: {v}");
 
@@ -4349,13 +4369,51 @@ mod tests {
         assert_eq!(v["models"], serde_json::json!([]));
     }
 
+    /// Behavior: `resident` follows whether a backend is actually LOADED, not what the gateway is
+    /// configured to serve.
+    ///
+    /// This is the lie the incident was about: an MLX worker thread can panic while the process
+    /// lives on, and the endpoint kept answering `resident=true` for a model every chat request
+    /// then failed on with `worker gone: channel closed`.
+    #[test]
+    fn resident_is_false_when_no_backend_is_loaded() {
+        let installed = vec![("mlx-community:Qwen3.5-4B-MLX-4bit".to_string(), 3u64)];
+        let v = models_payload("mlx-community:Qwen3.5-4B-MLX-4bit", false, &installed, 0);
+        assert_eq!(
+            v["data"][0]["resident"],
+            serde_json::json!(false),
+            "a configured-but-unloaded model must not claim to be resident: {v}"
+        );
+        // Still listed — the gateway knows about it and can load it; it just is not running it.
+        assert_eq!(v["data"][0]["display_name"], "mlx-community:Qwen3.5-4B-MLX-4bit");
+    }
+
+    /// Behavior: a backend that reports itself unavailable is RETIRED, so the next request
+    /// rebuilds it instead of meeting the same dead channel — and residency stops claiming it.
+    #[tokio::test]
+    async fn an_unavailable_backend_is_retired_and_reloads_on_the_next_request() {
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(16, &[("model-old", 2)]));
+        assert!(sb.current().is_some(), "loaded to begin with");
+
+        sb.invalidate_backend("mlx: worker gone: channel closed");
+        assert!(sb.current().is_none(), "a dead backend must not stay resident");
+        // Idempotent: N concurrent requests can all fail at once and only the first retires.
+        sb.invalidate_backend("again");
+        assert!(sb.current().is_none());
+
+        // The next request rebuilds it — self-heal, which is what turns a fatal fault into a blip.
+        let lease = sb.enter(None).await.expect("served after the retire");
+        assert_eq!(lease.model_id, "model-old");
+        assert!(sb.current().is_some(), "reloaded lazily on the next request");
+    }
+
     /// Behavior: a model whose spec is spelled differently from the resident's is the SAME model
     /// — `org/repo` and `org:repo` are one — so it must not appear as a second, "not loaded" row
     /// that invites a pointless swap to what is already running.
     #[test]
     fn models_payload_does_not_duplicate_the_resident_under_another_spelling() {
         let installed = vec![("mlx-community/Qwen3.5-4B-MLX-4bit".to_string(), 1u64)];
-        let v = models_payload("mlx-community:Qwen3.5-4B-MLX-4bit", &installed, 0);
+        let v = models_payload("mlx-community:Qwen3.5-4B-MLX-4bit", true, &installed, 0);
         assert_eq!(v["data"].as_array().unwrap().len(), 1, "one model, one row: {v}");
         assert_eq!(v["data"][0]["resident"], serde_json::json!(true), "{v}");
     }

@@ -1,5 +1,51 @@
 # Bugs
 
+## BUG-066 — hybrid continuous batching never grew `pads`, panicking the mlx worker and leaving the gateway claiming a model it could no longer run
+
+FIXED 2026-09-06 (`mlx-hybrid-pads-desync`).
+
+**Reported as** `GET /v1/models` answering `resident=true` while every
+`POST /v1/chat/completions` failed with `backend unavailable: mlx: worker gone: channel closed` —
+"the gateway lies about its own state". It did, and the lie was the second of three defects; the
+first is what started it.
+
+**Root cause.** `insert_hybrid_row` took `pads: &mut [i32]` — a SLICE. It could adjust the
+existing pads but had no way to append the admitted row's own, so the hybrid continuous-batching
+admit path grew `seqs`, `batch_seq` and `next_toks` by one and left `pads` one short. The compiler
+could not object: you cannot push to a slice. The next retire then evaluated
+`pads = keep_rows.iter().map(|&r| pads[r]).collect()` for a row that had no pad and PANICKED the
+`mlx-native` thread — `index out of bounds: the len is 1 but the index is 1`
+(`mlx_native_backend.rs:5155`). The dense loop has always pushed its `pad_new` explicitly beside
+the other three arrays; only the hybrid path was missing it, which is why this needed a hybrid
+model (Qwen3.5), a second request admitted into a live batch, and then a retire — about 26 hours
+of ordinary use.
+
+**Why it looked like an FD leak.** The service log is 918 × `accept error: Too many open files`,
+starting one line after the panic. That is the CONSEQUENCE: with the worker gone no request ever
+completes, connections pile up, and launchd's soft limit for this job is 256. Chasing the
+`EMFILE` first would have been chasing the symptom — the panic is one line above the first one.
+
+**Why the gateway lied.** `resident` was read from the SPEC — what the gateway is configured to
+serve — not from whether a backend is loaded. Those differ exactly here: an MLX worker runs on its
+own thread, and a panic there closes the job channel while the `Arc` in the switchboard stays
+perfectly valid. So the gateway kept advertising a model it could not run.
+
+**Why it never recovered.** Nothing retired the dead backend, so the lazy-reload path never fired
+and every subsequent request met the same closed channel.
+
+**Fixed, all three:**
+- `insert_hybrid_row` takes `&mut Vec<i32>` and pushes `pad_new` beside the cache splice that
+  creates it, plus a `debug_assert_eq!` in both batch loops stating that the row-parallel arrays
+  stay in step — the one time they drifted, the symptom appeared in a different loop and said
+  nothing about which push was missing.
+- `Switchboard::invalidate_backend` retires a backend that reports itself `BackendUnavailable`,
+  so residency stops claiming it AND the next request rebuilds it. Idempotent under concurrency;
+  the ledger is corrected only after the drop completes, since advertising RAM that is still
+  allocated is the window a sibling gateway would admit into.
+- `/v1/models` reports `resident` from `current().is_some()`, not from the spec.
+
+170 gateway tests green, including one that retires a backend and checks the next request reloads.
+
 ## BUG-065 — the benchmark repair recipe for `debug` also fires for `multibug` and `apportion`, manufacturing FALSE PASSES in the model matrix
 
 FIXED 2026-08-31. Severity is about the NUMBERS, not the hint: this one credited models with
