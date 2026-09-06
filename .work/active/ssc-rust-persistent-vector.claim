@@ -1,7 +1,0 @@
-slug: ssc-rust-persistent-vector
-owner: claude (opus 5)
-started: 2026-09-03
-scope:
-  - term 1: the representation change, after the three move rules landed
-  - phase 2 of docs/specs/ssc-rust-persistent-vector.md, now that the candidates
-    have been re-measured on top of those rules

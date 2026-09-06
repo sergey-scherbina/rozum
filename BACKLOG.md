@@ -27,7 +27,7 @@ cargo errors) — landed in scalascript `main` 2026-08-30. Integration seam on t
 already exists: `src/rag_lite.rs` (BM25 `LexicalIndex`, `Retriever` trait, `search_documents`
 tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
 
-- [ ] **ssc-main-base-perf-parity** — the perf port to scalascript main (`ssc-perf-port-to-main`,
+- [x] **ssc-main-base-perf-parity — DONE 2026-09-06: PARITY REACHED AND EXCEEDED, merged to scalascript main.** — the perf port to scalascript main (`ssc-perf-port-to-main`,
   branch feature/perf-port-to-main @ bec2f0b12, merge requested from the owner) made their Rust
   lane BUILD (0 errors, was 86+) and stop overflowing the stack (TCO for lifted defs incl.
   match-arm tails), but markdown wall-clock there was still ~24 s @ 3,200 lines vs 0.07 s on our
@@ -244,6 +244,45 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   to `main` — round 2 went there only on the operator's explicit say-so, and this is the owner's
   repo with concurrent v3 work in it.
 
+  **ROUND 5 — DONE, and the campaign with it (2026-09-06, merged to scalascript `main` as
+  `6e8f83594`).** Phase 2 shipped as an ANNOTATION: `@growing` on a case-class field lowers it to
+  a persistent `SscVec<T>` in the emitted runtime.
+
+  | | 1600 lines | doubling |
+  |---|---|---|
+  | main as it was | 1.337 s | ×3.89 |
+  | three move rules | 0.243 s | ×3.56 |
+  | **+ `@growing`** | **0.032 s** | **×1.93** |
+
+  **42×, and LINEAR** — every earlier round moved the constant and left the slope untouched.
+  Output byte-identical across 70 real documents; ~5× faster than the vendored prestage10 lane
+  this was chasing, so rozum can stop vendoring from it whenever someone wants to move that.
+
+  Four decisions worth keeping, each forced by a measurement rather than taste:
+  - **An annotation, not an inference.** "A field that is appended to" picks out FOURTEEN fields
+    in `uniml/markdown` and exactly one grows with the input; the rest are bounded by nesting
+    depth. Unbounded growth is a property of the DATA, so nothing static separates them, and
+    giving all fourteen the representation pays its read cost thirteen times for nothing.
+  - **Own implementation, no dependency.** The emitted crate has none today and that is worth
+    keeping. `SscVec` is an append-only shared buffer (each value holds the buffer plus its OWN
+    length), not a trie: for an accumulator — each version appended to at most once, older ones
+    only read — clone is O(1) and a tip push is O(1). Emitted only for a program that uses the
+    annotation, on the same terms as the regex helper.
+  - **Read materialises, write wraps.** That boundary rule is why no other lowering needed a
+    second version. Written as a rule rather than expected-type inference because the renderer
+    does not carry the type a position wants, and a wrong guess compiles into the wrong vector
+    space rather than failing.
+  - **Classification taught deliberately.** This file infers from type STRINGS in 26 places. The
+    new type originates in exactly two (the two field lists) and propagates by exactly one path
+    (`inferCaptureType` reads field types), so 15 sites that read field types were switched and 9
+    that read param/return/effect types were left — each decision derived, not guessed.
+
+  536 backend tests + `scripts/smoke-ci` 148/148. `v1-jit-size` caught `renderTerm` 44841 → 44853
+  and the freeze was raised with attribution: **twelve bytecodes**, because every predicate and
+  collector lives outside `renderTerm`. One negative test earned its keep on the day it was
+  written — `@growing` on a `String` was being wrapped, because the wrap asked the annotation set
+  instead of the emitted type.
+
   Remaining for phase 2, and the reason it is not just "swap the type": the type must PROPAGATE.
   Only 6 sites needed a conversion by hand here because `BlockState.out` barely escapes, but in
   general a field whose representation changes flows into `Vec`-typed slots, and the backend has
@@ -316,7 +355,7 @@ tool). Spec: `docs/specs/syntactic-rag.md` (written with phase 1).
   path**: coverage went 88% → 100%. `rozum rag index` = 2648 files → 46,733 chunks.
   The durable lesson is the one this entry already recorded twice and then a third time: cap
   arithmetic must come from the corpus, never from a synthetic benchmark.
-- [ ] **ssc-rust-persistent-vector** — **the O(n²) class itself, and the successor to the two
+- [x] **ssc-rust-persistent-vector — DONE 2026-09-06 (phase 2 shipped as the `@growing` annotation, merged to scalascript main).** — **the O(n²) class itself, and the successor to the two
   items below.** Spec: `docs/specs/ssc-rust-persistent-vector.md`. Scala's `Vector` is persistent
   (append/slice/share O(1)–O(log n)); the Rust backend lowers it to `Vec<T>`, where each is an
   O(n) copy — so idiomatic Scala is silently quadratic. Six profiling rounds on `uniml/markdown`
