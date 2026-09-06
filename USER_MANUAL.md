@@ -528,6 +528,21 @@ rozum meetings participant \
   on-topic instead of generically.
 - `--peer <handle>` — other models in the room, so `always` never loops
   model↔model.
+**Letting someone in.** Rosters are per room and managed from inside the chat: `/members` shows
+who is admitted there, `/grant <id> chat` admits, `/revoke <id>` removes. The id is numeric
+because a `@username` can be changed and re-taken, which would silently detach a roster entry
+from the person it was meant for.
+
+Two ways to learn that id, neither of which asks you to hunt for it:
+
+- **They write first.** The first message from someone without access prints a ready line —
+  their name, their id, and the exact `/grant` to send.
+- **You forward.** Forward any message from them to the bot and it prints the same line for the
+  ORIGINAL author. This is the one that works BEFORE they ever contact the bot, which is what
+  admitting someone in advance needs. It offers the command rather than granting: forwarding is
+  also how you hand the model something to read, and a room on `--reply-policy always` sees that
+  daily. Nothing is disclosed if they restrict forwarding, or if the origin is a channel.
+
 - `--rag-project <dir>` — let the model SEARCH that project's code and docs
   (`rag_search`) when someone asks how something works. Off by default, and
   deliberately: it reads a tree the `--sandbox` confinement does not cover, so

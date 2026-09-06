@@ -106,3 +106,29 @@ sender's id + name so they can `/grant` it.
 (parse/grant/revoke/caps/round-trip/corrupt-file) and the command handler
 (owner-only gating, default/explicit caps, group-suffixed commands, bad tokens).
 Live Telegram E2E is operator-driven (needs a bot token + a second user).
+
+## Granting access in advance, by forward (2026-09-06)
+
+`/grant` takes a numeric id, and Telegram shows one nowhere in its UI. Until now the only way to
+learn someone's was to have them write to the bot first — which is exactly what you cannot do for
+a person you want to admit BEFORE they arrive.
+
+A forwarded message carries its original author's id, and that is the one identity a bot can
+learn about someone who has never contacted it. Forward any message from them to the bot and it
+answers with the person, their id, and the command:
+
+```
+↪️ Переслано от Bob (id 987654321).
+Дать доступ: /grant 987654321 chat  (можно + read write shell)
+```
+
+**It offers; it does not grant.** Forwarding is also how you hand the model something to read,
+and in a room running `--reply-policy always` that is an ordinary daily act — granting on any
+forward would turn sharing content into handing out access, silently. The act stays explicit.
+
+Owner-only and once per author, on the same terms as the not-admitted notice: nobody else can act
+on it, and a repeat is noise.
+
+Both `forward_from` (pre-7.0) and `forward_origin` (Bot API 7.0) are read, since both are in the
+wild. Nothing is disclosed when the original author restricts forwarding, when the origin is a
+channel, or when the author is a bot — none of those is an error, there is simply no id to use.

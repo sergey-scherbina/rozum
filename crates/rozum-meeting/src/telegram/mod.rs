@@ -246,6 +246,33 @@ async fn run_channel(
                 let name = incoming.message.sender_name.clone();
                 let text = incoming.message.text.trim().to_string();
 
+                // GRANTING ACCESS IN ADVANCE. `/grant` needs a numeric id, and Telegram shows
+                // one nowhere in the UI — so until now the only way to learn someone's id was to
+                // have them write to the bot first, which is exactly what you cannot do for a
+                // person you want to admit BEFORE they arrive. A forwarded message carries its
+                // original author's id, and that is the one identity a bot can learn about
+                // someone who has never contacted it.
+                //
+                // It only OFFERS the command; it does not grant. Forwarding is also how you hand
+                // the model something to read — an article, a screenshot's caption — and in a
+                // room with `--reply-policy always` that is an ordinary daily act. Granting on
+                // any forward would turn sharing content into handing out access, silently. So
+                // the act stays explicit: the bot prints a ready line, the operator sends it.
+                //
+                // Owner-only, and once per author, for the same reason the not-admitted notice
+                // is: nobody else can act on it, and a repeat is noise.
+                if let Some((fid, fname)) = incoming.message.forwarded_from.clone() {
+                    let is_owner = { acl.lock().await.is_owner(id) };
+                    if is_owner && fid != id && notified.insert(fid) {
+                        let hint = format!(
+                            "↪️ Переслано от {fname} (id {fid}).\n                             Дать доступ: /grant {fid} chat  (можно + read write shell)"
+                        );
+                        if let Err(error) = bot.send_message_to(chat_id, &hint).await {
+                            eprintln!("[telegram-bridge] sendMessage (forward hint) error: {error}");
+                        }
+                    }
+                }
+
                 // Management/utility commands are handled here and NEVER relayed to the room.
                 if text.starts_with('/') {
                     let reply = {

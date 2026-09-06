@@ -29,6 +29,26 @@ pub struct TgMessage {
     pub chat: TgChat,
     pub from: Option<TgFrom>,
     pub text: Option<String>,
+    /// Who originally wrote a FORWARDED message, when Telegram is willing to say.
+    ///
+    /// Both spellings are read because both are in the wild: `forward_from` is the pre-7.0 field
+    /// and `forward_origin` replaced it. Absent entirely when the original author restricts
+    /// forwarding in their privacy settings — Telegram simply omits the identity then, which is
+    /// the case the caller has to handle rather than treat as an error.
+    #[serde(default)]
+    pub forward_from: Option<TgFrom>,
+    #[serde(default)]
+    pub forward_origin: Option<TgForwardOrigin>,
+}
+
+/// The Bot API 7.0 forward origin. Only `type: "user"` carries an identity we can grant to; a
+/// forward from a channel or a hidden user has no user id to name.
+#[derive(Debug, Deserialize)]
+pub struct TgForwardOrigin {
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub sender_user: Option<TgFrom>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +125,30 @@ pub struct IncomingMessage {
     pub sender_id: i64,
     pub sender_name: String,
     pub text: String,
+    /// `(id, display name)` of the ORIGINAL author when this message was forwarded and Telegram
+    /// disclosed them. The one identity a bot can learn about someone who has never written to
+    /// it — which is what makes granting access in advance possible at all.
+    pub forwarded_from: Option<(i64, String)>,
+}
+
+/// The original author of a forwarded message, if Telegram disclosed one and it is a real person.
+///
+/// A bot is skipped (granting access to a bot is never what the operator meant) and so is a
+/// forward whose origin is a channel or a privacy-hidden user, which carries no id at all.
+fn forwarded_author(msg: &TgMessage) -> Option<(i64, String)> {
+    let from = msg
+        .forward_from
+        .as_ref()
+        .or_else(|| msg.forward_origin.as_ref().filter(|o| o.kind == "user")?.sender_user.as_ref())?;
+    if from.is_bot {
+        return None;
+    }
+    let name = if from.first_name.is_empty() {
+        from.username.clone().unwrap_or_else(|| "user".to_string())
+    } else {
+        from.first_name.clone()
+    };
+    Some((from.id, name))
 }
 
 /// The bot's own public identity (`getMe`) — what the admin console shows so the operator can
@@ -480,6 +524,7 @@ impl TelegramBot {
             sender_id: from.id,
             sender_name,
             text: text.to_owned(),
+            forwarded_from: forwarded_author(msg),
         })
     }
 
@@ -508,6 +553,7 @@ impl TelegramBot {
                 sender_id: from.id,
                 sender_name,
                 text: text.to_owned(),
+                forwarded_from: forwarded_author(msg),
             },
         ))
     }
@@ -853,6 +899,60 @@ mod tests {
         assert!(!error.contains("http://"));
     }
 
+    /// Behavior: a forwarded message discloses its ORIGINAL author — the only identity a bot can
+    /// learn about someone who has never written to it, and therefore the only way to grant
+    /// access in advance.
+    #[test]
+    fn a_forward_discloses_the_original_author() {
+        for (label, extra) in [
+            // Pre-7.0 spelling and the Bot API 7.0 one: both are in the wild, so both are read.
+            ("forward_from", json!({"forward_from": {"id": 987, "first_name": "Bob", "is_bot": false}})),
+            ("forward_origin", json!({"forward_origin": {
+                "type": "user",
+                "sender_user": {"id": 987, "first_name": "Bob", "is_bot": false}
+            }})),
+        ] {
+            let mut msg = json!({
+                "chat": {"id": TEST_CHAT_ID, "type": "private"},
+                "from": {"id": 123, "first_name": "Alice", "is_bot": false},
+                "text": "look at this"
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                msg[k] = v.clone();
+            }
+            let u: TgUpdate = serde_json::from_value(json!({"update_id": 1, "message": msg})).unwrap();
+            let m = TelegramBot::extract_message(&u, TEST_CHAT_ID, |_| true).unwrap();
+            assert_eq!(m.forwarded_from, Some((987, "Bob".to_string())), "{label}");
+        }
+    }
+
+    /// Behavior: a forward with no person behind it discloses nobody.
+    ///
+    /// Three ordinary shapes: the author restricts forwarding so Telegram omits the identity, the
+    /// origin is a channel rather than a person, and the original author is a bot. None is an
+    /// error — there is simply no id to grant to, which the caller handles rather than reports.
+    #[test]
+    fn a_forward_without_a_person_behind_it_discloses_nobody() {
+        for extra in [
+            json!({"forward_origin": {"type": "hidden_user", "sender_user_name": "Bob"}}),
+            json!({"forward_origin": {"type": "channel"}}),
+            json!({"forward_from": {"id": 7, "first_name": "SomeBot", "is_bot": true}}),
+            json!({}),
+        ] {
+            let mut msg = json!({
+                "chat": {"id": TEST_CHAT_ID, "type": "private"},
+                "from": {"id": 123, "first_name": "Alice", "is_bot": false},
+                "text": "look at this"
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                msg[k] = v.clone();
+            }
+            let u: TgUpdate = serde_json::from_value(json!({"update_id": 1, "message": msg})).unwrap();
+            let m = TelegramBot::extract_message(&u, TEST_CHAT_ID, |_| true).unwrap();
+            assert_eq!(m.forwarded_from, None, "nothing to grant to: {extra}");
+        }
+    }
+
     #[test]
     fn extraction_requires_target_chat_allowed_sender_and_nonempty_text() {
         let update: TgUpdate = serde_json::from_value(json!({
@@ -876,6 +976,7 @@ mod tests {
                 sender_id: 123,
                 sender_name: "Alice".into(),
                 text: "hello".into(),
+                forwarded_from: None,
             }
         );
         assert!(TelegramBot::extract_message(&update, TEST_CHAT_ID + 1, |_| true).is_none());
