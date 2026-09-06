@@ -335,7 +335,7 @@ async fn run_channel(
                 {
                     let (watching, owner_id) = {
                         let a = acl.lock().await;
-                        (a.watch, a.owner)
+                        (a.watch_all || a.members.get(&id).is_some_and(|m| m.watch), a.owner)
                     };
                     if let Some(o) = owner_id.filter(|o| watching && *o != id && *o != chat_id) {
                         let line = format!(
@@ -702,7 +702,7 @@ const BOT_COMMANDS: &[(&str, &str)] = &[
     ("help", "Справка и список команд"),
     ("whoami", "Показать мой Telegram id"),
     ("members", "Кто имеет доступ (для владельца)"),
-    ("watch", "Копировать сообщения допущенных мне в личку (для владельца)"),
+    ("watch", "Копировать сообщения указанного (или всех) мне в личку (владелец)"),
     ("grant", "Дать доступ: /grant <id> chat read write shell"),
     ("revoke", "Убрать доступ: /revoke <id>"),
     ("groups", "Список подключённых групп (владелец)"),
@@ -715,7 +715,8 @@ const HELP_TEXT: &str = "Команды бота:\n\
 /members — кто имеет доступ в этом чате (владелец)\n\
 /grant <id> [chat read write shell | all] — дать/изменить доступ (владелец)\n\
 /revoke <id> — убрать доступ (владелец)\n\
-/watch on|off — копировать сообщения допущенных мне в личку (владелец)\n\
+/watch <id> on|off — копировать сообщения этого человека мне в личку (владелец)\n\
+/watch on|off — то же для всех допущенных этой комнаты (владелец)\n\
 /groups — список подключённых групп (владелец)\n\
 /addgroup — подключить эту группу, свой ростер прав (владелец, в группе)\n\
 /removegroup <id> — отключить группу (владелец)\n\
@@ -766,23 +767,70 @@ fn handle_command(
             if !is_owner {
                 return NOT_OWNER.to_string();
             }
-            match parts.next() {
-                Some("on") => {
-                    acl.watch = true;
-                    let _ = acl.save(acl_path);
-                    "👁 Отслеживание включено: сообщения допущенных участников этой комнаты \
-                     будут копироваться тебе в личку."
-                        .to_string()
+            let arg = parts.next();
+            // `/watch on|off` — the whole room. `/watch <id> on|off` — one person. Bare `/watch`
+            // reports both, which is what someone typing it is actually asking.
+            match arg {
+                None => {
+                    let watched: Vec<String> = acl
+                        .members
+                        .iter()
+                        .filter(|(_, m)| m.watch)
+                        .map(|(id, m)| {
+                            let n =
+                                if m.name.trim().is_empty() { "(без имени)" } else { m.name.trim() };
+                            format!("• {n} (id {id})")
+                        })
+                        .collect();
+                    let all = if acl.watch_all {
+                        "👁 Отслеживаются ВСЕ допущенные в этой комнате."
+                    } else {
+                        "👁 Отслеживание всех: выключено."
+                    };
+                    return if watched.is_empty() {
+                        format!("{all}\nПерсонально: никто.\nВключить: /watch on  или  /watch <id> on")
+                    } else {
+                        format!("{all}\nПерсонально:\n{}", watched.join("\n"))
+                    };
                 }
-                Some("off") => {
-                    acl.watch = false;
+                Some(v @ ("on" | "off")) => {
+                    acl.watch_all = v == "on";
                     let _ = acl.save(acl_path);
-                    "👁 Отслеживание выключено.".to_string()
+                    return if acl.watch_all {
+                        "👁 Отслеживание включено для ВСЕХ допущенных этой комнаты. \
+                         Для одного человека: /watch <id> on"
+                            .to_string()
+                    } else {
+                        "👁 Отслеживание всех выключено (персональные остаются).".to_string()
+                    };
                 }
-                _ => format!(
-                    "Отслеживание: {}\nВключить: /watch on   Выключить: /watch off",
-                    if acl.watch { "включено" } else { "выключено" }
-                ),
+                Some(_) => {}
+            }
+            let id_str = arg.unwrap_or_default();
+            let Ok(id) = id_str.parse::<i64>() else {
+                return format!("Не понял '{id_str}'. Использование: /watch on|off  или  /watch <id> on|off");
+            };
+            let on = match parts.next() {
+                Some("on") | None => true,
+                Some("off") => false,
+                Some(other) => return format!("Не понял '{other}'. Использование: /watch <id> on|off"),
+            };
+            // Only someone already admitted can be watched. A stranger is reported the moment
+            // they write anyway, so pre-arming this for them would be a switch with nothing to do
+            // and a roster entry that grants nothing — confusing on both counts.
+            let Some(m) = acl.members.get_mut(&id) else {
+                return format!(
+                    "id {id} нет в списке доступа этой комнаты. Сначала /grant {id} chat \
+                     (незнакомые и так показываются, когда пишут)."
+                );
+            };
+            m.watch = on;
+            let name = if m.name.trim().is_empty() { format!("id {id}") } else { m.name.clone() };
+            let _ = acl.save(acl_path);
+            if on {
+                format!("👁 Отслеживание включено: сообщения {name} будут копироваться тебе в личку.")
+            } else {
+                format!("👁 Отслеживание выключено для {name}.")
             }
         }
         "/grant" | "/add" => {
@@ -1080,23 +1128,52 @@ mod tests {
 
     /// Behavior: `/watch` is owner-only, persists, and reports its state — a switch separate from
     /// the roster, because admitting someone and reading their messages are different decisions.
+    /// Behavior: `/watch` is owner-only, works on ONE person or on everyone, and persists.
+    ///
+    /// Both forms exist because they are different intents: "watch this person" cannot be said
+    /// with a room switch, and "watch the room" said person by person silently misses whoever is
+    /// admitted next.
     #[test]
-    fn watch_is_owner_only_and_persists() {
+    fn watch_targets_one_member_or_everyone_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("room.json");
         let mut acl = Acl { owner: Some(1), ..Default::default() };
+        acl.grant(7, "Bob", Caps { chat: true, ..Default::default() });
 
-        assert_eq!(handle_command("/watch on", 999, "Guest", &mut acl, &path, 42), NOT_OWNER);
-        assert!(!acl.watch, "a non-owner must not be able to turn it on");
+        assert_eq!(handle_command("/watch 7 on", 999, "Guest", &mut acl, &path, 42), NOT_OWNER);
+        assert!(!acl.members[&7].watch, "a non-owner must not be able to turn it on");
 
-        assert!(handle_command("/watch on", 1, "Owner", &mut acl, &path, 42).contains("включено"));
-        assert!(acl.watch);
-        assert!(Acl::load(&path).watch, "and it survives a restart");
+        // One person.
+        assert!(handle_command("/watch 7 on", 1, "Owner", &mut acl, &path, 42).contains("включено"));
+        assert!(acl.members[&7].watch);
+        assert!(Acl::load(&path).members[&7].watch, "and it survives a restart");
+        assert!(!acl.watch_all, "watching one person is not watching the room");
 
-        assert!(handle_command("/watch", 1, "Owner", &mut acl, &path, 42).contains("включено"));
+        // Everyone, which does NOT erase the personal flags.
+        assert!(handle_command("/watch on", 1, "Owner", &mut acl, &path, 42).contains("ВСЕХ"));
+        assert!(acl.watch_all && acl.members[&7].watch);
         assert!(handle_command("/watch off", 1, "Owner", &mut acl, &path, 42).contains("выключено"));
-        assert!(!acl.watch);
-        assert!(!Acl::load(&path).watch);
+        assert!(!acl.watch_all && acl.members[&7].watch, "personal watching survives");
+
+        // Status names both halves.
+        let status = handle_command("/watch", 1, "Owner", &mut acl, &path, 42);
+        assert!(status.contains("Bob") && status.contains("выключено"), "{status}");
+
+        assert!(handle_command("/watch 7 off", 1, "Owner", &mut acl, &path, 42).contains("выключено"));
+        assert!(!Acl::load(&path).members[&7].watch);
+    }
+
+    /// Behavior: watching someone who was never admitted is refused, and says what to do instead.
+    /// A stranger is reported the moment they write, so arming this for them would be a switch
+    /// with nothing to do plus a roster entry that grants nothing.
+    #[test]
+    fn watching_a_non_member_is_refused_with_the_next_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("room.json");
+        let mut acl = Acl { owner: Some(1), ..Default::default() };
+        let out = handle_command("/watch 999 on", 1, "Owner", &mut acl, &path, 42);
+        assert!(out.contains("/grant 999"), "{out}");
+        assert!(acl.members.is_empty(), "and nobody is silently added");
     }
 
     /// Behavior: a notice quotes one bounded line, so a long paste cannot bury the `/grant`

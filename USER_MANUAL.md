@@ -529,9 +529,10 @@ rozum meetings participant \
 - `--peer <handle>` — other models in the room, so `always` never loops
   model↔model.
 **Letting someone in.** Rosters are per room and managed from inside the chat: `/members` shows
-who is admitted there, `/grant <id> chat` admits, `/revoke <id>` removes, and `/watch on` copies
-admitted members' messages to you (off by default — admitting someone and reading their messages
-are separate decisions, so it is a separate switch). The id is numeric
+who is admitted there, `/grant <id> chat` admits, `/revoke <id>` removes, and `/watch <id> on` copies
+that person's messages to you — `/watch on` does it for everyone in the room, `/watch` reports
+both. Off by default: admitting someone and reading their messages are separate decisions, so it
+is a separate switch. The id is numeric
 because a `@username` can be changed and re-taken, which would silently detach a roster entry
 from the person it was meant for.
 

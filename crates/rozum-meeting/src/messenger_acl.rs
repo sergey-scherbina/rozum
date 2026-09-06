@@ -90,6 +90,15 @@ pub struct Member {
     pub name: String,
     #[serde(flatten)]
     pub caps: Caps,
+    /// Copy THIS member's messages to the owner (`/watch <id> on`).
+    ///
+    /// Per person, not per room: watching is aimed at someone in particular, and a room-wide
+    /// switch would mean deciding about everyone at once — including people admitted later, who
+    /// were never part of that decision. Separate from `caps` because admitting someone and
+    /// reading their messages are different choices; folding it into `/grant` would make every
+    /// grant quietly mean more than it says.
+    #[serde(default)]
+    pub watch: bool,
 }
 
 /// The whole access list for one platform. `owner` has every capability and is the
@@ -101,14 +110,14 @@ pub struct Acl {
     /// Members keyed by numeric user id.
     #[serde(default)]
     pub members: BTreeMap<i64, Member>,
-    /// Mirror ADMITTED members' messages to the owner (`/watch on`).
+    /// Watch EVERYONE admitted to this room (`/watch on`), on top of any per-person flags.
     ///
-    /// Off by default and deliberately separate from the roster: admitting someone and reading
-    /// over their shoulder are different decisions, and conflating them would make every `/grant`
-    /// quietly mean more than it says. A stranger's first message is reported regardless — that
-    /// one is the owner's own doorbell, not surveillance of a person they invited.
+    /// Kept beside the per-member switch rather than instead of it: "watch this person" and
+    /// "watch the room" are different intents, and a room-wide flag alone cannot express the
+    /// first while per-person flags alone make the second a chore that silently misses whoever
+    /// is admitted next. Effective watching is either one.
     #[serde(default)]
-    pub watch: bool,
+    pub watch_all: bool,
 }
 
 impl Acl {

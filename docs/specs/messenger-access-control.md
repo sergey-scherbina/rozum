@@ -172,10 +172,18 @@ followed by the ready `/grant` as its own message. Rate-limited to one per sende
 owner asked to see what strangers write, so "once ever" would hide everything after the first,
 but an unthrottled relay would hand any stranger a way to flood the owner's chat.
 
-**`/watch on` mirrors ADMITTED members' messages** to the owner, per room, owner-only, persisted
-in the roster file and off by default. It is a switch rather than a capability on the grant
-because admitting someone and reading their messages are different decisions, and folding the
-second into `/grant` would make every grant quietly mean more than it says. The owner's own
-messages are not mirrored back to them.
+**`/watch` mirrors an ADMITTED member's messages** to the owner. Owner-only, persisted in the
+roster file, off by default, and it comes in two forms because they are different intents:
+
+- `/watch <id> on|off` — that person. Refused for someone who was never admitted, with the
+  `/grant` to run first: a stranger is reported the moment they write anyway, so arming this for
+  them would be a switch with nothing to do.
+- `/watch on|off` — everyone admitted to this room, on top of any per-person flags. Turning it
+  off leaves the personal ones alone, since they were separate decisions.
+- `/watch` — reports both halves.
+
+It is a switch rather than a capability on the grant because admitting someone and reading their
+messages are different decisions, and folding the second into `/grant` would make every grant
+quietly mean more than it says. The owner's own messages are not mirrored back to them.
 
 Quoted text is one bounded line (300 chars) — a long paste must not bury the command under it.
