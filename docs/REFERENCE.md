@@ -130,6 +130,19 @@ Read-only by default; `--fix` installs and refreshes. The plugin source is found
 from the working directory to the checkout's `vendor/agent-plugins`, or named by
 `ROZUM_PLUGINS_DIR`.
 
+It checks both ways of using rozum, because they need different things:
+
+- **Without `launch`** (cloud model, rozum's tools over MCP): the skills, and that the MCP entry
+  is not merely present but ANSWERS. The entry is parsed rather than grepped — a config that names
+  rozum and points at a dead port passes a grep and fails in practice — and both transports are
+  understood: an `http` URL is probed, a `command` is checked against `PATH`. A `406` from the URL
+  counts as healthy: that is what an MCP endpoint says to a plain `GET`, and treating only 2xx as
+  alive would report a working server as broken.
+- **With `launch`** (local model): the gateway answers, and there is a chat model on disk.
+  Embedding models are excluded from that count — one cannot serve a chat request, and counting it
+  would call a machine ready that has nothing to launch with. Both are warnings, not failures: a
+  machine that only ever uses the tools with a cloud model is not broken for lacking them.
+
 ### Models on disk
 
 ```bash

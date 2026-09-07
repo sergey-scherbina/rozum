@@ -158,11 +158,18 @@ pub fn run(cwd: &Path, fix: bool) -> DoctorReport {
     checks.extend(check_mcp());
     checks.extend(check_meetings());
     checks.extend(check_rag(cwd));
+    checks.extend(check_launch_path());
     DoctorReport { checks }
 }
 
-/// Is the rozum MCP server registered for Claude Code? Read from the agent's own config rather
-/// than from ours: what matters is what the AGENT will load, not what we believe we wrote.
+/// Is the rozum MCP server registered for Claude Code — AND does the thing it names actually
+/// exist?
+///
+/// Read from the agent's own config, because what matters is what the AGENT will load, not what we
+/// believe we wrote. And checked past the registration: a first cut only looked for the name in the
+/// file, which would pass for an entry pointing at a dead port or at a binary that has since moved.
+/// "Registered" and "working" are different claims, and only the second one is what the operator
+/// asked about.
 fn check_mcp() -> Vec<Check> {
     let cfg = rozum_paths::home_dir().unwrap_or_default().join(".claude.json");
     let Ok(text) = std::fs::read_to_string(&cfg) else {
@@ -172,16 +179,128 @@ fn check_mcp() -> Vec<Check> {
             "rozum mcp install",
         )];
     };
-    if text.contains("\"rozum\"") {
-        Check::ok("rozum mcp server", "registered for claude").into_vec()
-    } else {
-        Check::fail(
+    let Some(entry) = mcp_entry(&text) else {
+        return Check::fail(
             "rozum mcp server",
             "not registered — the agent gets no meeting tools and no rag.search",
             "rozum mcp install",
         )
-        .into_vec()
+        .into_vec();
+    };
+    match entry {
+        McpEntry::Http(url) => match probe_http(&url) {
+            Some(code) => Check::ok(
+                "rozum mcp server",
+                format!("registered over http and answering ({url}, http {code})"),
+            )
+            .into_vec(),
+            None => Check::fail(
+                "rozum mcp server",
+                format!("registered at {url} but nothing answers there — the tools will be absent"),
+                "rozum service install, or check com.rozum.mcp-http",
+            )
+            .into_vec(),
+        },
+        McpEntry::Stdio(cmd) => {
+            if which_exists(&cmd) {
+                Check::ok("rozum mcp server", format!("registered over stdio ({cmd})")).into_vec()
+            } else {
+                Check::fail(
+                    "rozum mcp server",
+                    format!("registered as `{cmd}`, which is not on PATH — the tools will be absent"),
+                    "rozum mcp install",
+                )
+                .into_vec()
+            }
+        }
     }
+}
+
+/// How the agent is configured to reach rozum's MCP server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpEntry {
+    Http(String),
+    Stdio(String),
+}
+
+/// The rozum entry in an agent's MCP config, parsed rather than grepped.
+///
+/// Grepping for the name was the first cut and it answers the wrong question: it is true of a
+/// config that names rozum and points nowhere.
+pub fn mcp_entry(config_json: &str) -> Option<McpEntry> {
+    let v: serde_json::Value = serde_json::from_str(config_json).ok()?;
+    let e = v.get("mcpServers")?.get("rozum")?;
+    if let Some(url) = e.get("url").and_then(|u| u.as_str()) {
+        return Some(McpEntry::Http(url.to_string()));
+    }
+    e.get("command")
+        .and_then(|c| c.as_str())
+        .map(|c| McpEntry::Stdio(c.to_string()))
+}
+
+/// Any HTTP answer means something is listening and speaking. An MCP endpoint answers `406` to a
+/// plain GET (wrong `Accept`), which is a HEALTHY reply — treating only 2xx as alive would report
+/// a working server as broken.
+fn probe_http(url: &str) -> Option<u16> {
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-m", "3", "-o", "/dev/null", "-w", "%{http_code}", url])
+        .output()
+        .ok()?;
+    let code: u16 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    (code > 0).then_some(code)
+}
+
+fn which_exists(cmd: &str) -> bool {
+    if cmd.contains('/') {
+        return Path::new(cmd).is_file();
+    }
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {cmd}"))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The `rozum launch` path: it points the agent at the local gateway, so the gateway has to be
+/// reachable and there has to be a model to serve. Warnings, not failures — a machine that only
+/// ever uses the MCP tools with a cloud model is not broken for lacking these.
+fn check_launch_path() -> Vec<Check> {
+    let mut out = Vec::new();
+    let port = crate::share::read_active().map(|g| g.port);
+    out.push(match port.and_then(|p| probe_http(&format!("http://127.0.0.1:{p}/v1/models"))) {
+        Some(code) if (200..300).contains(&code) => {
+            Check::ok("gateway (for launch)", format!("answering on 127.0.0.1:{}", port.unwrap()))
+        }
+        Some(code) => Check::warn(
+            "gateway (for launch)",
+            format!("registered but answered http {code}"),
+            "rozum gateway status",
+        ),
+        None => Check::warn(
+            "gateway (for launch)",
+            "not running — `rozum launch` will start one on demand",
+            "rozum service install (keeps it warm)",
+        ),
+    });
+    let installed = rozum_models::models::scan_all_installed();
+    // An embedding model cannot answer a chat request; counting it would report a machine that
+    // cannot serve `launch` at all as ready.
+    let chat: Vec<&str> = installed
+        .iter()
+        .map(|m| m.spec.as_str())
+        .filter(|s| !s.to_lowercase().contains("embedding"))
+        .collect();
+    out.push(if chat.is_empty() {
+        Check::warn(
+            "local model (for launch)",
+            "no chat model on disk — `rozum launch` has nothing to serve",
+            "rozum models pull <spec>  (rozum models list --remote)",
+        )
+    } else {
+        Check::ok("local model (for launch)", format!("{} on disk", chat.len()))
+    });
+    out
 }
 
 fn check_meetings() -> Vec<Check> {
@@ -296,6 +415,27 @@ mod tests {
         let empty = tempfile::tempdir().unwrap();
         let no_skills = check_skills(Some(empty.path()), dst.path(), false);
         assert_eq!(no_skills[0].status, CheckStatus::Warn, "an empty source is not 'all current'");
+    }
+
+    /// Behavior: the rozum MCP entry is PARSED, both transports, and absence is absence.
+    ///
+    /// The first cut grepped the config for the name, which answers a different question: it is
+    /// true of a config that names rozum and points nowhere. "Registered" and "reachable" are
+    /// separate claims and the operator asked about the second.
+    #[test]
+    fn the_mcp_entry_is_parsed_not_grepped() {
+        let http = r#"{"mcpServers":{"rozum":{"type":"http","url":"http://127.0.0.1:8779/mcp"}}}"#;
+        assert_eq!(mcp_entry(http), Some(McpEntry::Http("http://127.0.0.1:8779/mcp".into())));
+
+        let stdio = r#"{"mcpServers":{"rozum":{"command":"rozum","args":["mcp-proxy"]}}}"#;
+        assert_eq!(mcp_entry(stdio), Some(McpEntry::Stdio("rozum".into())));
+
+        // Named elsewhere in the file, but not registered: a grep would have said yes.
+        let decoy = r#"{"projects":{"/x":{"note":"rozum lives here"}},"mcpServers":{"other":{}}}"#;
+        assert_eq!(mcp_entry(decoy), None);
+
+        assert_eq!(mcp_entry("not json"), None);
+        assert_eq!(mcp_entry("{}"), None);
     }
 
     /// Behavior: the plugin source is found by walking UP from the working directory, so the
