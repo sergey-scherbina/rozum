@@ -1652,7 +1652,13 @@ async fn main() {
             tuning.apply_to_env();
             apply_cascade_strategy(strategy.as_deref());
             apply_offline(offline);
-            apply_lean_flags(&mut program, lean, !no_channel_wakeup);
+            // NOT `!no_channel_wakeup` any more. That argument decides whether ambient MCP
+            // servers survive `--lean`, and it was tied to channels only because channels needed
+            // the rozum server present. Leaving it tied would mean turning channels off ALSO
+            // dropped every MCP server — meetings and rag.search with them — which is not what
+            // turning off a wakeup flag should do. `true` preserves exactly today's behaviour,
+            // since channels were on by default until now.
+            apply_lean_flags(&mut program, lean, /*keep_ambient_mcp=*/ true);
             // `--no-sandbox` is sugar for `ROZUM_SANDBOX=0` — keep a single source of
             // truth so `sandbox_workspace()` (which reads the env) stays the only
             // place the jail decision lives. The flag wins; `=0` it explicitly.
@@ -3387,6 +3393,23 @@ mod wakeup_tests {
     }
 }
 
+/// Whether to inject the Tier-1 channels flag at all. OFF unless asked for.
+///
+/// It was on by default while it was the only wakeup that reached an idle agent. It is not any
+/// more — `scripts/meeting-watch.sh` (tier 4) covers the same case for any harness that can
+/// stream a command, and covers it without a research-preview flag. What the flag still does
+/// reliably is surface an error later in the session on builds where the preview has moved on,
+/// which is a bad trade for a wakeup we no longer depend on.
+///
+/// Kept rather than deleted: the tier is real and documented, and a preview that comes back
+/// should not need this code written again. `ROZUM_CHANNEL_WAKEUP=1` turns it on.
+fn channel_wakeup_requested() -> bool {
+    matches!(
+        std::env::var("ROZUM_CHANNEL_WAKEUP").ok().as_deref().map(str::trim),
+        Some("1" | "on" | "true" | "yes")
+    )
+}
+
 impl ChannelWakeup {
     /// The flags to append for `program_name`, or `None` to inject nothing.
     /// Only Claude Code understands the flag, and only builds ≥ 2.1.80 expose it
@@ -3394,7 +3417,7 @@ impl ChannelWakeup {
     /// gate on `claude --version` and degrade silently. The flag is hidden from
     /// `--help`, so version is the reliable probe.
     fn flags_for(&self, program_name: &str) -> Option<Vec<String>> {
-        if self.suppressed {
+        if self.suppressed || !channel_wakeup_requested() {
             return None;
         }
         let base = std::path::Path::new(program_name).file_name()?.to_str()?;
@@ -8016,7 +8039,7 @@ const LEAN_DISALLOW: &[&str] = &[
 ///   3. `--disallowedTools <LEAN_DISALLOW>` — drop the non-coding tool schemas (33 tools /
 ///      ~4.9K tokens → 4 / ~0.8K). Variadic flag, so it goes LAST. Skipped if the operator
 ///      manages the tool set (`--allowedTools`/`--disallowedTools`).
-fn apply_lean_flags(program: &mut Vec<String>, lean: bool, channel_wakeup: bool) {
+fn apply_lean_flags(program: &mut Vec<String>, lean: bool, keep_ambient_mcp: bool) {
     if !lean {
         return;
     }
@@ -8036,12 +8059,12 @@ fn apply_lean_flags(program: &mut Vec<String>, lean: bool, channel_wakeup: bool)
         program.push("--exclude-dynamic-system-prompt-sections".into());
     }
 
-    // (2) Drop ALL ambient MCP servers in the headless case (channel-wakeup off). Must precede
-    // the variadic --disallowedTools below (which would otherwise swallow this flag as a value).
+    // (2) Drop ALL ambient MCP servers in the headless case. Must precede the variadic
+    // --disallowedTools below (which would otherwise swallow this flag as a value).
     let user_manages_mcp = program
         .iter()
         .any(|a| a.starts_with("--mcp-config") || a == "--strict-mcp-config");
-    if !channel_wakeup && !user_manages_mcp {
+    if !keep_ambient_mcp && !user_manages_mcp {
         program.push("--strict-mcp-config".into());
     }
 
@@ -8258,15 +8281,40 @@ mod lean_tests {
     // the `server:rozum` channel, so --strict-mcp-config is NOT added.
     fn lean(args: &[&str], on: bool) -> Vec<String> {
         let mut p: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        apply_lean_flags(&mut p, on, /*channel_wakeup=*/ true);
+        apply_lean_flags(&mut p, on, /*keep_ambient_mcp=*/ true);
         p
     }
-    // channel-wakeup OFF (the headless / bench path): nothing needs an ambient MCP server.
+    // The headless / bench path: nothing there needs an ambient MCP server.
     fn lean_headless(args: &[&str], on: bool) -> Vec<String> {
         let mut p: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        apply_lean_flags(&mut p, on, /*channel_wakeup=*/ false);
+        apply_lean_flags(&mut p, on, /*keep_ambient_mcp=*/ false);
         p
     }
+    /// Behavior: the Tier-1 channels flag is NOT injected unless explicitly asked for.
+    ///
+    /// It was on by default while it was the only wakeup reaching an idle agent. It is not any
+    /// more, and what it still does reliably is surface an error later in the session on builds
+    /// where the research preview has moved on. Kept behind `ROZUM_CHANNEL_WAKEUP=1` rather than
+    /// deleted: the tier is real, and a preview that returns should not need rewriting.
+    #[test]
+    fn channels_are_opt_in_now() {
+        // The env var is process-global; this test only asserts the DEFAULT, which is what
+        // regressed the operator's sessions.
+        let saved = std::env::var("ROZUM_CHANNEL_WAKEUP").ok();
+        unsafe { std::env::remove_var("ROZUM_CHANNEL_WAKEUP") };
+        assert!(!super::channel_wakeup_requested(), "off unless asked for");
+        for on in ["1", "on", "true", "yes"] {
+            unsafe { std::env::set_var("ROZUM_CHANNEL_WAKEUP", on) };
+            assert!(super::channel_wakeup_requested(), "{on} must enable it");
+        }
+        unsafe { std::env::set_var("ROZUM_CHANNEL_WAKEUP", "0") };
+        assert!(!super::channel_wakeup_requested(), "an explicit 0 stays off");
+        match saved {
+            Some(v) => unsafe { std::env::set_var("ROZUM_CHANNEL_WAKEUP", v) },
+            None => unsafe { std::env::remove_var("ROZUM_CHANNEL_WAKEUP") },
+        }
+    }
+
     fn has(v: &[String], s: &str) -> bool {
         v.iter().any(|a| a == s)
     }

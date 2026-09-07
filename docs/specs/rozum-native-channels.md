@@ -34,7 +34,7 @@ together cover every realistic case without requiring Anthropic's channel.
 
 | Tier | Mechanism | Owned by us? | Wakes a *truly idle* agent? | Works for non-Claude? |
 |---|---|---|---|---|
-| 1 | Anthropic `claude/channel` push (`channel-wakeup`) | no (Anthropic) | **yes** | no |
+| 1 | Anthropic `claude/channel` push (`channel-wakeup`) | no (Anthropic) | **yes** | no — **OPT-IN since 2026-09-07**, see below |
 | 2 | **rozum long-poll channel** — agent holds `meeting.wait_my_turn`; we complete it on activity | **yes** | yes, *while the agent keeps the poll open* | **yes** (any MCP agent) |
 | 3 | **gateway piggyback** — inject pending room context into the agent's next model request/response | **yes** | no (pull-time only) | **yes** (any gateway client) |
 
@@ -233,3 +233,22 @@ Its limits, stated so nobody mistakes it for a replacement: it lives as long as 
 armed it, and its latency is the poll gap (5 s by default) rather than the instant completion of a
 long-poll. It is not a rozum-side mechanism at all — which is precisely why it works where the
 rozum-side ones cannot.
+
+## Tier 1 is opt-in now (2026-09-07)
+
+`rozum launch` no longer appends `--dangerously-load-development-channels` by default;
+`ROZUM_CHANNEL_WAKEUP=1` turns it back on.
+
+It was on by default while it was the only wakeup that reached an idle agent. Tier 4 covers that
+case now, for any harness that can stream a command, and without a research-preview flag. What the
+flag still does reliably on a current Claude Code is surface an error later in the session — a bad
+trade for a wakeup nothing depends on.
+
+Kept behind an env var rather than deleted: the tier is real, it is documented here, and a preview
+that comes back should not need this written again.
+
+**One coupling had to be cut for this to be safe.** The same boolean also decided whether `--lean`
+keeps ambient MCP servers — tied together only because channels needed the rozum server present.
+Left tied, turning channels off would ALSO have dropped every MCP server from a `--lean` launch,
+taking meetings and `rag.search` with them. That is not what turning off a wakeup flag should do,
+so the two decisions are now separate and the MCP behaviour is unchanged.
