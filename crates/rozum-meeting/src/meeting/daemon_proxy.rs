@@ -64,6 +64,11 @@ const PROXY_INSTRUCTIONS: &str =
      body is a preview, not the turn API. If your client does NOT deliver <channel> events, keep a \
      meeting.wait_my_turn poll outstanding while idle so you never miss a message; you can also run \
      `rozum meetings inbox --as <your-handle>` anytime to see messages addressed to you.\n\
+     BEST, if your harness can run a background command and surface its output as events (e.g. \
+     Claude Code's Monitor): arm `HANDLE=<your-handle> scripts/meeting-watch.sh` ONCE, early — it \
+     prints one line per message addressed to you and nothing when quiet, so you are TOLD instead \
+     of having to keep a poll open. That is the only wakeup that reaches you mid-task; do it \
+     before starting long work, not after someone has been waiting.\n\
      \n\
      This server also provides rag.search — semantic + lexical search over THIS project's code \
      and docs, by meaning rather than exact tokens. Reach for it when you don't know the symbol \
@@ -1616,6 +1621,13 @@ mod tests {
             "experimental claude/channel capability must be advertised"
         );
         assert!(PROXY_INSTRUCTIONS.contains("channel"), "instructions must teach channel wakeup");
+        // The instructions are the ONE text every MCP agent receives automatically; a skill has
+        // to be opened first, and most never are. So the harness-stream wakeup — the only tier
+        // that reaches an agent mid-task — has to be named here or it reaches nobody.
+        assert!(
+            PROXY_INSTRUCTIONS.contains("meeting-watch.sh"),
+            "instructions must offer the harness-stream wakeup, not only the poll"
+        );
     }
 
     #[test]
