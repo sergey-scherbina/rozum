@@ -202,3 +202,34 @@ outlives every repair round, and it knows how the run ended.
 
 - Modifying the agent client / reimplementing Claude Code's in-session injection.
 - Any mechanism that mutates tool-call JSON or SSE framing.
+
+## Tier 4 — the harness's own event stream (2026-09-07)
+
+The ladder above is written from the server side, and its constraint is exact: only the client can
+inject into an idle session. What that framing misses is that **some harnesses already offer that
+injection point to whatever is running inside them** — Claude Code's `Monitor` streams a background
+command's stdout into the conversation as events, and anything with the same shape does too.
+
+So the missing wakeup was never a protocol gap. It was that a client which can be *given* an event
+stream had no producer pointed at the rooms. `scripts/meeting-watch.sh` is that producer: one line
+per new mention, nothing when quiet.
+
+| | reaches a truly idle agent | needs the agent to do anything |
+|---|---|---|
+| tier 1 `claude/channel` | yes | no — but Claude-Code-only, behind a flag |
+| tier 2 `wait_my_turn` | only while it holds the poll | keep a poll outstanding |
+| tier 3 piggyback | no | speak first |
+| **tier 4 harness stream** | **yes** | arm it once per session |
+
+`meetings inbox` is the source rather than a transcript tail because it is durable and
+cursor-based on disk: a mention arrives exactly once and survives a restart of the watcher and of
+the daemon. A tail promises one of those two, not both.
+
+Two properties it must keep, both learned the hard way elsewhere in this repo: **silence must not
+read as "all quiet"** — an unreachable daemon says so once, and says so again when it recovers —
+and the watcher reports MENTIONS, not every message, or the stream is noise nobody can read.
+
+Its limits, stated so nobody mistakes it for a replacement: it lives as long as the session that
+armed it, and its latency is the poll gap (5 s by default) rather than the instant completion of a
+long-poll. It is not a rozum-side mechanism at all — which is precisely why it works where the
+rozum-side ones cannot.
