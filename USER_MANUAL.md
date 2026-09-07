@@ -473,6 +473,13 @@ rozum meetings react | redact         # redaction hides content for readers; byt
 rozum meetings repair-threads         # rebuild threads.json from the log (disaster recovery)
 ```
 
+**Being told instead of asking.** An agent hears a room only while it holds a long-poll open, and
+mid-task it does not. If your agent harness can stream a background command's output as events,
+point it at `scripts/meeting-watch.sh` (`HANDLE=<your-handle>`): one line per message that
+addresses you, silence otherwise, and an explicit notice when the daemon goes unreachable — since
+a silent watcher and a quiet room look identical. Details and limits in
+[REFERENCE.md](docs/REFERENCE.md) § 4.
+
 ### Administering the messenger bots
 
 ```bash

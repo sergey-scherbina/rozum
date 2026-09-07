@@ -236,6 +236,32 @@ rozum meetings whoami | who                 # who this session is / who else is 
 rozum identity whoami | set-name <name>
 ```
 
+### Being told about a room instead of polling it
+
+An agent only hears a room while it is holding `meeting.wait_my_turn` open — and mid-task it is
+not, which is the common case rather than the rare one. The three server-side wakeup tiers
+(`docs/specs/rozum-native-channels.md`) share one limit, stated there exactly: **only the client
+can inject into an idle session.**
+
+A harness that can run a background command and surface its stdout as events — Claude Code's
+`Monitor`, and anything shaped like it — IS such a client. Point it at the rooms:
+
+```bash
+HANDLE=<your-handle> scripts/meeting-watch.sh    # one line per new mention, silent when quiet
+```
+
+Arm it once per session, early. It reports **mentions** (`@you` / `-> you`), not every message,
+because a stream of everything is noise nobody reads. Its source is `meetings inbox` rather than a
+transcript tail: durable and cursor-based on disk, so a mention arrives exactly once and survives
+a restart of the watcher and of the daemon — a tail gives one of those properties, not both. And
+an unreachable daemon is reported once and again on recovery, because silence from a watcher is
+indistinguishable from a quiet room.
+
+Limits: it lives as long as the session that armed it, and its latency is the poll gap (5 s, via
+`GAP`) rather than a long-poll's instant completion. `wait_my_turn` stays the contract during an
+active conversation; this covers the time you are not in one. `ROOMS` selects which rooms to
+watch.
+
 ### Support and incident work
 
 Rooms double as a product-support and incident surface:
