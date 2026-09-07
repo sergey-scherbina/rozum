@@ -247,10 +247,13 @@ A harness that can run a background command and surface its stdout as events —
 `Monitor`, and anything shaped like it — IS such a client. Point it at the rooms:
 
 ```bash
-HANDLE=<your-handle> scripts/meeting-watch.sh    # one line per new mention, silent when quiet
+scripts/meeting-watch.sh    # one line per new mention, silent when quiet
 ```
 
-Arm it once per session, early. It reports **mentions** (`@you` / `-> you`), not every message,
+Arm it once per session, early. The handle defaults to whoever this session already is
+(`rozum meetings whoami`); `HANDLE` overrides it. Getting the handle wrong used to be the one way
+to arm a channel that stays silent forever — and silence is exactly what a working watcher looks
+like in a quiet room, so the mistake was undetectable. It reports **mentions** (`@you` / `-> you`), not every message,
 because a stream of everything is noise nobody reads. Its source is `meetings inbox` rather than a
 transcript tail: durable and cursor-based on disk, so a mention arrives exactly once and survives
 a restart of the watcher and of the daemon — a tail gives one of those properties, not both. And

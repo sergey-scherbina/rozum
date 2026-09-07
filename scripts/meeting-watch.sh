@@ -25,7 +25,14 @@
 # Environment: HANDLE (required in practice), ROOMS, GAP, ROZUM.
 set -u
 ROZUM="${ROZUM:-$HOME/.cargo/bin/rozum}"
-HANDLE="${HANDLE:?set HANDLE to your meeting handle (see: rozum meetings whoami)}"
+# Default the handle to whoever THIS session already is. Requiring it was a real failure mode:
+# an agent that armed the watcher with the wrong handle got a channel that is silent forever, and
+# silence is exactly what a working watcher looks like when the room is quiet.
+HANDLE="${HANDLE:-$("$ROZUM" meetings whoami 2>/dev/null | awk '{print $1}')}"
+if [ -z "${HANDLE:-}" ]; then
+  echo "WATCH-ERROR: no handle — pass HANDLE=<your-handle> (see: rozum meetings whoami)" >&2
+  exit 2
+fi
 ROOMS="${ROOMS:-rozum commons scalascript busi}"
 GAP="${GAP:-5}"
 down=0

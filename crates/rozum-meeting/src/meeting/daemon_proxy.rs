@@ -65,7 +65,7 @@ const PROXY_INSTRUCTIONS: &str =
      meeting.wait_my_turn poll outstanding while idle so you never miss a message; you can also run \
      `rozum meetings inbox --as <your-handle>` anytime to see messages addressed to you.\n\
      BEST, if your harness can run a background command and surface its output as events (e.g. \
-     Claude Code's Monitor): arm `HANDLE=<your-handle> scripts/meeting-watch.sh` ONCE, early — it \
+     Claude Code's Monitor): arm `scripts/meeting-watch.sh` (no arguments) ONCE, early — it \
      prints one line per message addressed to you and nothing when quiet, so you are TOLD instead \
      of having to keep a poll open. That is the only wakeup that reaches you mid-task; do it \
      before starting long work, not after someone has been waiting.\n\
