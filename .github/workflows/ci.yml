@@ -14,6 +14,7 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  workflow_dispatch:
 
 # Cancel an in-flight run when a newer commit lands on the same ref.
 concurrency:
@@ -23,6 +24,11 @@ concurrency:
 jobs:
   macos:
     name: macos — default build + lib tests
+    # ON DEMAND ONLY. A macOS minute costs ten Linux minutes and a Windows
+    # minute two, and this workspace is portable: `linux-core` covers every
+    # change, and the platform jobs run when someone asks for them —
+    # "Run workflow" in the Actions tab, or before a release.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,6 +101,7 @@ jobs:
         run: cargo test --workspace --no-default-features --lib --no-fail-fast
 
   windows-core:
+    if: github.event_name == 'workflow_dispatch'
     name: windows — portable core (no native backends)
     runs-on: windows-latest
     steps:
