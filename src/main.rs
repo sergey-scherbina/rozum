@@ -437,6 +437,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Check — and with `--fix`, repair — what a plain `claude` on this machine gets from rozum.
+    ///
+    /// Distinct from `doctor`, which asks whether the DEMO path is ready. This asks whether an
+    /// agent started from a console sees the meeting rooms, the retrieval, and the skills that
+    /// describe them. Read-only by default; `--fix` applies the one correct repair per gap.
+    Setup {
+        /// Apply the fixes instead of only reporting them.
+        #[arg(long)]
+        fix: bool,
+    },
     /// Read-only readiness report for the local demo path.
     Doctor {
         /// Probe an already-running meeting web/PWA endpoint.
@@ -1883,6 +1893,14 @@ async fn main() {
                 for s in rozum::services::ALL {
                     println!("{:<26} {:<22} {}", s.label, s.program, s.what);
                 }
+            }
+        }
+        Some(Command::Setup { fix }) => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let report = rozum::setup::run(&cwd, fix);
+            print!("{}", report.render_titled(if fix { "rozum setup --fix" } else { "rozum setup" }));
+            if report.has_failures() {
+                std::process::exit(1);
             }
         }
         Some(Command::Doctor { web_url, strict, services, services_only, post_room }) => {

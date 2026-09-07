@@ -535,6 +535,12 @@ rozum meetings participant \
   on-topic instead of generically.
 - `--peer <handle>` — other models in the room, so `always` never loops
   model↔model.
+**Is your console `claude` getting all of this?** `rozum setup` reports whether the agent skills
+are installed and current, the rozum MCP server is registered, the meeting daemon is up and the
+project has a RAG index; `rozum setup --fix` repairs what it finds. Worth running after a pull: a
+skill that was never installed produces no error, just an agent that never learns the feature
+exists, and a stale one is worse — it acts on instructions that have since changed.
+
 **Letting someone in.** Rosters are per room and managed from inside the chat: `/members` shows
 who is admitted there, `/grant <id> chat` admits, `/revoke <id>` removes, and `/watch <id> on` copies
 that person's messages to you — `/watch on` does it for everyone in the room, `/watch` reports

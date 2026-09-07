@@ -57,16 +57,26 @@ impl Check {
         }
     }
 
-    fn ok(name: &'static str, detail: impl Into<String>) -> Self {
+    pub fn ok(name: &'static str, detail: impl Into<String>) -> Self {
         Self::new(name, CheckStatus::Ok, detail, None::<String>)
     }
 
-    fn warn(name: &'static str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
+    pub fn warn(name: &'static str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
         Self::new(name, CheckStatus::Warn, detail, Some(hint))
     }
 
-    fn fail(name: &'static str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
+    pub fn fail(name: &'static str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
         Self::new(name, CheckStatus::Fail, detail, Some(hint))
+    }
+
+    /// A warning with nothing actionable to suggest. Kept distinct from `warn` so a missing hint
+    /// is a deliberate statement rather than an empty string nobody noticed.
+    pub fn warn_bare(name: &'static str, detail: impl Into<String>) -> Self {
+        Self::new(name, CheckStatus::Warn, detail, None::<String>)
+    }
+
+    pub fn fail_bare(name: &'static str, detail: impl Into<String>) -> Self {
+        Self::new(name, CheckStatus::Fail, detail, None::<String>)
     }
 
     fn skip(name: &'static str, detail: impl Into<String>) -> Self {
@@ -128,7 +138,13 @@ impl DoctorReport {
     }
 
     pub fn render(&self) -> String {
-        let mut out = String::from("rozum doctor\n");
+        self.render_titled("rozum doctor")
+    }
+
+    /// The same report under its own name. `rozum setup` prints one too, and a command that
+    /// announces itself as a different command is a small lie the reader has to decode.
+    pub fn render_titled(&self, title: &str) -> String {
+        let mut out = format!("{title}\n");
         for check in &self.checks {
             out.push_str(&format!(
                 "  [{:<4}] {:<20} {}\n",

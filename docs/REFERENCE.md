@@ -109,6 +109,27 @@ rozum gateway record stop
 `ROZUM_GATEWAY_RECORD=<auto|path>` does the same at startup, for a gateway spawned for one
 session. Journals land in `.rozum/runs/` — the same shelf `nadia runs list` reads.
 
+### Is a console `claude` actually getting all of this?
+
+```bash
+rozum setup          # report: skills, MCP registration, meeting daemon, rag index
+rozum setup --fix    # apply the one correct repair for each gap
+```
+
+Distinct from `rozum doctor`, which asks whether the DEMO path is ready. This asks whether an
+agent you started from a console sees the meeting rooms, the retrieval, and the skills that
+describe them.
+
+The gap it exists for is the quiet kind: a skill that was never copied into `~/.claude/commands`
+produces no error at all — the agent simply never learns the feature exists — and a STALE copy is
+worse, because the agent reads it and acts on instructions that have since changed. When this
+command was first run on the machine it was written on, three skills had never been installed and
+a fourth predated a section added the same week. Nothing had reported any of it.
+
+Read-only by default; `--fix` installs and refreshes. The plugin source is found by walking up
+from the working directory to the checkout's `vendor/agent-plugins`, or named by
+`ROZUM_PLUGINS_DIR`.
+
 ### Models on disk
 
 ```bash

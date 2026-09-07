@@ -3,6 +3,7 @@ pub mod doctor;
 pub mod proxy;
 pub mod sandbox;
 pub mod service;
+pub mod setup;
 pub mod services;
 
 // The durable SPI core (backend/concurrency/obs/engine/serving/sampler/constrain/
