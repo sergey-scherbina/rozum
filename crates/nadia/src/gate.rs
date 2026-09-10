@@ -115,13 +115,43 @@ pub async fn derive(backend: &dyn ChatBackend, task: &str, workspace: &Path) -> 
     if !enabled() {
         return None;
     }
-    if let Some(check) = verify::derive_check(backend, task).await {
+    let check = if let Some(check) = verify::derive_check(backend, task).await {
         if verify::is_hallucinated_cargo_check(&check, workspace, task) {
-            return None;
+            None
+        } else {
+            Some(check)
         }
-        return Some(check);
+    } else {
+        verify::cargo_floor(workspace)
+    };
+    with_commit_check(check, task)
+}
+
+/// If the task asks for a commit, that becomes part of the checkable criterion too — otherwise
+/// the repair loop never learns a "done" was missing one, because nothing ever asked. Measured
+/// live 2026-09-10 (Telegram): two small, CORRECT fixes landed with no commit at all, and both
+/// were reported "не проверено" — no check had been derived for either, so there was nothing to
+/// fail and nothing to trigger a repair round.
+///
+/// Deliberately keyword-triggered rather than another model call: this only needs a yes/no read
+/// of the task text the operator already wrote, and a wrong guess costs nothing — the check
+/// below is cheap and, if the task never intended a commit, simply requires the tree already be
+/// clean, which an agent that only READ files (no edit/write) already leaves it.
+fn with_commit_check(check: Option<String>, task: &str) -> Option<String> {
+    let t = task.to_ascii_lowercase();
+    if !(t.contains("закомми") || t.contains("commit")) {
+        return check;
     }
-    verify::cargo_floor(workspace)
+    // A clean working tree is the deterministic proxy for "everything got committed": true
+    // whether zero or many files changed, false the moment an edit was made but never `git
+    // add`ed — exactly the failure mode this exists to catch. Not "a NEW commit exists": that
+    // would need the pre-task HEAD captured and threaded through, for a case (commit skipped
+    // entirely) this already catches without it.
+    const CLEAN_TREE: &str = "test -z \"$(git status --porcelain)\"";
+    Some(match check {
+        Some(c) => format!("{c} && {CLEAN_TREE}"),
+        None => CLEAN_TREE.to_string(),
+    })
 }
 
 /// What the gate loop does after a check. The policy in one place, so it can be read and tested
@@ -368,5 +398,59 @@ mod tests {
         unsafe { std::env::set_var("NADIA_VERIFY_ROUNDS", "5") };
         assert_eq!(rounds(), 5);
         unsafe { std::env::remove_var("NADIA_VERIFY_ROUNDS") };
+    }
+
+    #[test]
+    fn commit_check_only_appears_when_the_task_asked_for_one() {
+        assert_eq!(with_commit_check(Some("cargo build -q".into()), "fix the flaky test"), Some("cargo build -q".into()));
+        assert_eq!(with_commit_check(None, "какие у тебя тулы?"), None);
+    }
+
+    #[test]
+    fn commit_check_combines_with_an_existing_check_or_stands_alone() {
+        let with_cargo = with_commit_check(
+            Some("cargo build -q".into()),
+            "убери unused variable, закоммить (без push)",
+        );
+        assert_eq!(with_cargo.as_deref(), Some("cargo build -q && test -z \"$(git status --porcelain)\""));
+
+        // English spelling, and no prior check at all (the "не было машинно-проверяемого
+        // критерия" case this exists to close).
+        let bare = with_commit_check(None, "fix the warning and commit it");
+        assert_eq!(bare.as_deref(), Some("test -z \"$(git status --porcelain)\""));
+    }
+
+    /// The check is a real shell command, not just a string — prove it actually distinguishes a
+    /// dirty tree from a clean one, the way `run_check` will execute it for real.
+    #[tokio::test]
+    async fn the_commit_check_fails_dirty_and_passes_once_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t.local"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("a.txt"), "one").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "first"]);
+
+        let check = with_commit_check(None, "закоммить").unwrap();
+        let (passed, _) = verify::run_check(&check, dir.path()).await;
+        assert!(passed, "a clean tree right after a commit must pass");
+
+        std::fs::write(dir.path().join("a.txt"), "two — edited, not staged").unwrap();
+        let (passed, output) = verify::run_check(&check, dir.path()).await;
+        assert!(!passed, "an uncommitted edit must fail the check: {output}");
+
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "second"]);
+        let (passed, _) = verify::run_check(&check, dir.path()).await;
+        assert!(passed, "committing the edit must make it pass again");
     }
 }
