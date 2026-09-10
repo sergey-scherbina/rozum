@@ -2916,11 +2916,11 @@ mod tests {
             pm
         };
         w.append_with_meta("p", "A", "opened incident: API outage",
-            1_718_000_001, opmsg(ThreadOp { opened: Some(true), title: Some("API outage".into()), kind: Some(ThreadKind::Incident), severity: Some(Severity::High), ..Default::default() }, 0)).unwrap();
+            1_718_000_001, opmsg(ThreadOp { opened: Some(true), title: Some("API outage".into()), kind: Some(ThreadKind::Incident), severity: Some(Severity::High), ..Default::default() })).unwrap();
         w.append_with_meta("p", "A", "assigned to alice",
-            1_718_000_100, opmsg(ThreadOp { owner: Some("alice".into()), ..Default::default() }, 0)).unwrap();
+            1_718_000_100, opmsg(ThreadOp { owner: Some("alice".into()), ..Default::default() })).unwrap();
         w.append_with_meta("p", "A", "escalated to oncall",
-            1_718_000_200, opmsg(ThreadOp { state: Some(ThreadState::Escalated), owner: Some("oncall".into()), ..Default::default() }, 0)).unwrap();
+            1_718_000_200, opmsg(ThreadOp { state: Some(ThreadState::Escalated), owner: Some("oncall".into()), ..Default::default() })).unwrap();
 
         // Wipe state, rebuild from the structured log — exact, not best-effort.
         let rebuilt = rebuild_threads(&root);
