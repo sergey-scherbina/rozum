@@ -53,6 +53,7 @@ pub fn save(s: &Status) {
         "phase": s.phase.label(),
         "tool_calls": s.tool_calls,
         "last_tool": s.last_tool,
+        "last_tool_detail": s.last_tool_detail,
         "elapsed_secs": s.elapsed.as_secs(),
         "result": s.result,
         "touched": s.touched,
@@ -112,6 +113,7 @@ fn from_json(v: &Value) -> Option<Status> {
         phase: if phase.is_terminal() { phase } else { Phase::Interrupted },
         tool_calls: v.get("tool_calls").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
         last_tool: text("last_tool"),
+        last_tool_detail: text("last_tool_detail"),
         elapsed: std::time::Duration::from_secs(
             v.get("elapsed_secs").and_then(|x| x.as_u64()).unwrap_or(0),
         ),
@@ -145,6 +147,7 @@ mod tests {
             phase: Phase::Done,
             tool_calls: 4,
             last_tool: Some("bash".into()),
+            last_tool_detail: Some("cargo build -q".into()),
             elapsed: std::time::Duration::from_secs(27),
             result: Some("готово".into()),
             touched: vec!["src/main.rs".into()],

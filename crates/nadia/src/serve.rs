@@ -126,6 +126,7 @@ fn as_json(s: &Status) -> Value {
         "phase": s.phase.label(),
         "tool_calls": s.tool_calls,
         "last_tool": s.last_tool,
+        "last_tool_detail": s.last_tool_detail,
         "elapsed_secs": s.elapsed.as_secs(),
         "result": s.result,
         // Which files it actually wrote — the question every front-end asks next, and the

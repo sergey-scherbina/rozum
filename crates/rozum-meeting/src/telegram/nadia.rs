@@ -1107,18 +1107,47 @@ fn verdict_line(a: &serde_json::Value) -> String {
 
 /// One line for a step the agent just took, posted as its own message (not edited in place) so
 /// the chat keeps a full history of what it did, not just the last thing.
-fn render_progress(id: u64, w: &Watch, calls: u64, a: &serde_json::Value) -> String {
+/// One progress line. Was `clip(&w.task, 100)` — for a memory-augmented `/spawn` that clips
+/// the "Контекст — прошлые задачи…" preamble `task` now starts with, not the task itself, so
+/// every step read as the same wall of text with no sign of what was actually happening. Shows
+/// what the tool was pointed at instead (a path, a command, a pattern) — the answer to "what is
+/// it doing RIGHT NOW", which the task text never was even before that bug.
+fn render_progress(id: u64, _w: &Watch, calls: u64, a: &serde_json::Value) -> String {
     let elapsed = a.get("elapsed_secs").and_then(|v| v.as_u64()).unwrap_or(0);
     let tool = a.get("last_tool").and_then(|v| v.as_str()).unwrap_or("?");
-    format!("⚙️ #{id} шаг {calls} [{tool}] · {elapsed}с\n{}", clip(&w.task, 100))
+    match a.get("last_tool_detail").and_then(|v| v.as_str()) {
+        Some(detail) if !detail.is_empty() => {
+            format!("⚙️ #{id} шаг {calls} [{tool}] {} · {elapsed}с", clip(detail, 200))
+        }
+        _ => format!("⚙️ #{id} шаг {calls} [{tool}] · {elapsed}с"),
+    }
+}
+
+/// The human-readable task for `/agents` and `/status`: this id's `Watch.display_task` if it
+/// is still being watched (the same fix as `render_progress` — the agent's own `task` field is
+/// the memory-augmented text once `/spawn` prepended anything), else the raw field as a
+/// fallback for an id nobody here is watching (delivered already, or started elsewhere).
+fn task_for_display(a: &serde_json::Value) -> String {
+    let watched = a
+        .get("id")
+        .and_then(|v| v.as_u64())
+        .and_then(|id| load_state().watch.get(&id.to_string()).cloned());
+    match watched {
+        Some(w) => w.display_task.unwrap_or(w.task),
+        None => a.get("task").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    }
 }
 
 fn one_line(a: &serde_json::Value) -> String {
     let get = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("");
     let num = |k: &str| a.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-    let tool = match a.get("last_tool").and_then(|v| v.as_str()) {
-        Some(t) => format!(" [{t}]"),
-        None => String::new(),
+    let tool = match (
+        a.get("last_tool").and_then(|v| v.as_str()),
+        a.get("last_tool_detail").and_then(|v| v.as_str()),
+    ) {
+        (Some(t), Some(d)) if !d.is_empty() => format!(" [{t}] {}", clip(d, 80)),
+        (Some(t), _) => format!(" [{t}]"),
+        (None, _) => String::new(),
     };
     format!(
         "#{} {} · {} вызовов · {}с{}\n{}",
@@ -1127,7 +1156,7 @@ fn one_line(a: &serde_json::Value) -> String {
         num("tool_calls"),
         num("elapsed_secs"),
         tool,
-        clip(get("task"), 120)
+        clip(&task_for_display(a), 120)
     )
 }
 

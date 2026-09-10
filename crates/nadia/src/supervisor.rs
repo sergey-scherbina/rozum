@@ -91,6 +91,9 @@ pub struct Status {
     pub phase: Phase,
     pub tool_calls: usize,
     pub last_tool: Option<String>,
+    /// What that tool was pointed at — the path, command, or pattern — so a phone watching
+    /// progress sees `[bash] cargo check -p rozum-meeting`, not just `[bash]`.
+    pub last_tool_detail: Option<String>,
     pub elapsed: Duration,
     /// The final answer, once there is one.
     pub result: Option<String>,
@@ -107,6 +110,7 @@ struct Meta {
     phase: Phase,
     tool_calls: usize,
     last_tool: Option<String>,
+    last_tool_detail: Option<String>,
     started: Instant,
     /// When it reached a terminal phase. `elapsed` is measured to here once set, so a run's
     /// duration stops being "how long ago did it start" the moment it is over.
@@ -134,6 +138,25 @@ impl Control {
             stopping: AtomicBool::new(false),
             resume: tokio::sync::Notify::new(),
         }
+    }
+}
+
+/// What a tool call is actually pointed at, for `Status::last_tool_detail`. Each of the six
+/// tools takes exactly one argument worth showing (`tools.rs`): a path, a shell command, or a
+/// grep pattern. `None` for a tool this does not recognize, rather than guessing at its shape.
+fn tool_detail(name: &str, args: &Value) -> Option<String> {
+    let str_arg = |key: &str| args.get(key).and_then(Value::as_str);
+    match name {
+        "read_file" | "write_file" | "edit_file" | "list_dir" => str_arg("path").map(str::to_string),
+        "bash" => str_arg("command").map(str::to_string),
+        "grep" => {
+            let pattern = str_arg("pattern")?;
+            Some(match str_arg("path") {
+                Some(p) => format!("{pattern} in {p}"),
+                None => pattern.to_string(),
+            })
+        }
+        _ => None,
     }
 }
 
@@ -172,6 +195,7 @@ impl<T: ToolSource> ToolSource for ControlGate<T> {
             let mut m = self.meta.lock().unwrap();
             m.tool_calls += 1;
             m.last_tool = Some(name.to_string());
+            m.last_tool_detail = tool_detail(name, &args);
         }
         // Which files a run actually touched is the question every operator asks next, and
         // the answer is here rather than in the model's summary on purpose: a model that
@@ -262,6 +286,7 @@ impl Supervisor {
             phase: Phase::Running,
             tool_calls: 0,
             last_tool: None,
+            last_tool_detail: None,
             started: Instant::now(),
             finished: None,
             result: None,
@@ -495,6 +520,7 @@ fn snapshot(id: AgentId, meta: &Arc<Mutex<Meta>>) -> Status {
         phase: m.phase,
         tool_calls: m.tool_calls,
         last_tool: m.last_tool.clone(),
+        last_tool_detail: m.last_tool_detail.clone(),
         elapsed: m.finished.map_or_else(|| m.started.elapsed(), |f| f - m.started),
         result: m.result.clone(),
         touched: m.touched.iter().cloned().collect(),
@@ -525,6 +551,7 @@ mod tests {
             phase: Phase::Running,
             tool_calls: 0,
             last_tool: None,
+            last_tool_detail: None,
             started: Instant::now(),
             finished: None,
             result: None,
