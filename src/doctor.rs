@@ -210,8 +210,6 @@ pub fn transitions(report: &DoctorReport) -> Vec<String> {
         let streak = it.next().and_then(|n| n.parse().ok()).unwrap_or(0);
         (posted, pending, streak)
     };
-    let previous: std::collections::HashMap<String, String> =
-        raw.iter().map(|(k, v)| (k.clone(), parse(v).0)).collect();
     let now: std::collections::HashMap<String, String> = report
         .checks
         .iter()
