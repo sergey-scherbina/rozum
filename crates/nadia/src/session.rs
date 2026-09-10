@@ -22,6 +22,9 @@ pub fn system_prompt(root: &Path) -> String {
     format!(
         "You are nadia, a coding agent working in {root}.\n\
          \n\
+         If {root}/AGENTS.md exists, read it FIRST and follow its rules — including any rule \
+         about not editing files directly in a shared checkout.\n\
+         \n\
          Work by calling tools, not by describing what should be done. When the task \
          needs a file changed, change it; do not print the file and stop.\n\
          \n\
@@ -43,6 +46,10 @@ pub fn system_prompt(root: &Path) -> String {
          workspace path builds a copy of it INSIDE itself and the file lands where nobody \
          is looking — the run then reports success for work the person who asked cannot \
          find.\n\
+         \n\
+         Each `bash` call starts fresh in {root} — a `cd` does NOT carry over to the next \
+         call. To work in a subdirectory (e.g. one you just made with `git worktree add`), \
+         either `cd it && ...` inside ONE call, or give every later tool a path under it.\n\
          \n\
          When the task is genuinely done, reply with a short plain-text summary of what \
          you changed and what you ran to check it. That final message ends the task, so \

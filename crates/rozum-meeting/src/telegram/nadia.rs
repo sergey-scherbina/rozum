@@ -79,6 +79,10 @@ pub enum Cmd {
     Dialog(Option<bool>),
     /// How often a running agent's steps are posted. `None` reports the setting.
     Progress(Option<String>),
+    /// Forget this chat's remembered past tasks.
+    ClearMemory,
+    /// Replace this chat's remembered past tasks with one summary an agent writes.
+    Compact,
 }
 
 impl Cmd {
@@ -131,6 +135,8 @@ pub fn parse(text: &str) -> Option<Result<Cmd, String>> {
             other => Err(format!("Не понял `{other}`. Использование: /nadia on | off")),
         },
         "/progress" => Ok(Cmd::Progress((!rest.is_empty()).then_some(rest))),
+        "/clear" => Ok(Cmd::ClearMemory),
+        "/compact" => Ok(Cmd::Compact),
         "/status" => id(&rest).map(Cmd::Status),
         "/pause" => id(&rest).map(Cmd::Pause),
         "/resume" => id(&rest).map(Cmd::Resume),
@@ -173,16 +179,84 @@ struct ChatState {
     /// step (the default — real-time was the point of the feature), N>1 = every Nth step.
     #[serde(default = "default_progress_every")]
     progress_every: u32,
+    /// Past tasks in this chat, oldest first — prepended to the next fresh `/spawn` so a new
+    /// agent (which starts with NO memory of its own) has some idea what came before, the way
+    /// this chat's own history carries forward. Grows until `MEMORY_CHAR_BUDGET`, then drops
+    /// the oldest entries rather than the newest — recent context matters more than old.
+    /// `/clear` empties it, `/compact` replaces it with one summary.
+    #[serde(default)]
+    recent: Vec<Recent>,
 }
 
 impl Default for ChatState {
     fn default() -> Self {
-        ChatState { project: None, dialog: None, progress_every: default_progress_every() }
+        ChatState {
+            project: None,
+            dialog: None,
+            progress_every: default_progress_every(),
+            recent: Vec::new(),
+        }
     }
 }
 
 fn default_progress_every() -> u32 {
     1
+}
+
+/// One remembered past task: what was asked, and what the agent reported back.
+#[derive(Clone, Serialize, Deserialize)]
+struct Recent {
+    task: String,
+    result: String,
+}
+
+/// Total chars of task+result text kept per chat. A fresh agent's own budget is tiny
+/// (`default_budget` caps `max_tokens` at 4096) and this text is PREPENDED to every new task,
+/// competing with the task itself for that budget — so memory is bounded generously, not
+/// unboundedly, the way this chat's own history is bounded by compaction rather than by a
+/// fixed message count.
+const MEMORY_CHAR_BUDGET: usize = 3000;
+
+/// Drop the OLDEST entries first once the total exceeds budget — symmetric with how this
+/// chat's own history favors recent turns over old ones.
+fn trim_recent(recent: &mut Vec<Recent>) {
+    let total = |r: &[Recent]| -> usize {
+        r.iter().map(|e| e.task.chars().count() + e.result.chars().count()).sum()
+    };
+    while total(recent) > MEMORY_CHAR_BUDGET && recent.len() > 1 {
+        recent.remove(0);
+    }
+}
+
+/// The text actually sent to nadia for a fresh `/spawn`: this chat's remembered past tasks,
+/// then the new one. Unchanged when there is nothing to remember, so a chat that never
+/// accumulated memory pays nothing for this.
+fn with_recent_memory(chat_id: i64, task: &str) -> String {
+    let recent = chat_state(chat_id).recent;
+    if recent.is_empty() {
+        return task.to_string();
+    }
+    let mut s = String::from(
+        "Контекст — прошлые задачи в этом чате и их результаты (для справки, не переделывай их):\n",
+    );
+    for (i, r) in recent.iter().enumerate() {
+        s.push_str(&format!("{}. {} → {}\n", i + 1, r.task, r.result));
+    }
+    s.push_str("\nНовая задача: ");
+    s.push_str(task);
+    s
+}
+
+/// The text of the agent's own result, for memory — its final message if it left one,
+/// otherwise a phase note so a failed/killed run still leaves a trace of what was tried.
+fn memory_result(a: &serde_json::Value) -> String {
+    match a.get("result").and_then(|v| v.as_str()) {
+        Some(r) if !r.is_empty() => r.to_string(),
+        _ => {
+            let phase = a.get("phase").and_then(|v| v.as_str()).unwrap_or("done");
+            format!("({phase}, без итогового сообщения)")
+        }
+    }
 }
 
 /// One agent someone is waiting on. `task` is kept to detect an id reused by a restarted
@@ -191,7 +265,21 @@ fn default_progress_every() -> u32 {
 #[derive(Clone, Serialize, Deserialize)]
 struct Watch {
     chat: i64,
+    /// Exactly what was POSTed as this agent's task — for a memory-augmented `/spawn` that is
+    /// the augmented text, because THAT is what nadia serve echoes back in `/agents/{id}`, and
+    /// this field exists to detect an id a restarted `nadia serve` reused (`task` mismatch).
     task: String,
+    /// The short text the human actually typed, for the memory this task becomes once it
+    /// finishes — distinct from `task` so remembering it does not compound the "Контекст —
+    /// прошлые задачи…" preamble into the next preamble. `None` when `/spawn` sent `task`
+    /// verbatim (nothing to strip).
+    #[serde(default)]
+    display_task: Option<String>,
+    /// A `/compact` run: its result REPLACES this chat's memory instead of appending to it,
+    /// and it is announced differently — the operator asked to shrink memory, not to run a
+    /// task, so "агент #N done" would read as a task that never happened.
+    #[serde(default)]
+    compacting: bool,
     /// WHICH BOT started it. Two bridges share this file, and in a private chat the chat id is
     /// the operator's user id — which both bots can post to. Without this the delivery is a race
     /// between two pollers, and the operator is answered by the bot they did not write to
@@ -385,7 +473,12 @@ pub fn handle(cmd: Cmd, caps: Caps, chat_id: i64) -> String {
         Cmd::Dialog(v) => return set_dialog(chat_id, *v),
         Cmd::Progress(None) => return render_progress_setting(chat_id),
         Cmd::Progress(Some(arg)) => return set_progress(chat_id, arg),
+        Cmd::ClearMemory => return clear_memory(chat_id),
+        Cmd::Compact => {}
         _ => {}
+    }
+    if matches!(cmd, Cmd::Compact) && chat_state(chat_id).recent.is_empty() {
+        return "Нечего сжимать — память этого чата пуста.".to_string();
     }
     if let Err(e) = ensure_running() {
         return format!("Не смог поднять nadia: {e}");
@@ -399,19 +492,35 @@ pub fn handle(cmd: Cmd, caps: Caps, chat_id: i64) -> String {
         Ok(w) => w,
         Err(e) => return e,
     };
-    match request(&cmd, workspace.as_deref()) {
+    // What is actually POSTed differs from what the operator typed for two cases: `/spawn`
+    // gets this chat's remembered past tasks prepended (a fresh agent otherwise starts with
+    // no memory of its own), and `/compact` becomes a spawn of its own — a summarization task
+    // built from that same memory, since nadia's own model is the one already paying for
+    // every other read of this chat's context.
+    let sent: Cmd = match &cmd {
+        Cmd::Spawn(task) => Cmd::Spawn(with_recent_memory(chat_id, task)),
+        Cmd::Compact => Cmd::Spawn(compact_task(chat_id)),
+        other => other.clone(),
+    };
+    match request(&sent, workspace.as_deref()) {
         Ok(body) => {
             // Remember who is waiting for this one, so its result can be delivered instead of
             // polled for. Recorded here — where the id and the chat are both known — rather
             // than in the watcher, which only ever sees ids.
-            if let Cmd::Spawn(task) = &cmd {
+            if let Cmd::Spawn(sent_task) = &sent {
                 if let Some(id) = body.get("id").and_then(|v| v.as_u64()) {
+                    let display_task = match &cmd {
+                        Cmd::Spawn(original) if original != sent_task => Some(original.clone()),
+                        _ => None,
+                    };
                     with_state(|s| {
                         s.watch.insert(
                             id.to_string(),
                             Watch {
                                 chat: chat_id,
-                                task: task.clone(),
+                                task: sent_task.clone(),
+                                display_task,
+                                compacting: matches!(cmd, Cmd::Compact),
                                 bot: super::registry_name(),
                                 reported_calls: 0,
                             },
@@ -533,6 +642,34 @@ fn set_progress(chat_id: i64, arg: &str) -> String {
         1 => "Теперь каждый шаг агента приходит сразу.".to_string(),
         n => format!("Теперь шаг приходит раз в {n}."),
     }
+}
+
+fn clear_memory(chat_id: i64) -> String {
+    let had = !chat_state(chat_id).recent.is_empty();
+    with_state(|s| {
+        s.chats.entry(chat_key(chat_id)).or_default().recent.clear();
+    });
+    if had {
+        "🧹 память очищена — следующая задача начнётся с чистого листа.".to_string()
+    } else {
+        "Память этого чата и так пуста.".to_string()
+    }
+}
+
+/// The summarization task `/compact` sends nadia's own model — reusing it rather than
+/// summarizing in Rust because it is already the one thing here that reads this chat's whole
+/// history for every other purpose.
+fn compact_task(chat_id: i64) -> String {
+    let recent = chat_state(chat_id).recent;
+    let mut s = String::from(
+        "Ниже — записи о прошлых задачах в этом чате и их результатах. Сожми это в ОДНО \
+         связное резюме не длиннее 500 символов — оно станет памятью для будущих задач в этом \
+         чате. Верни только текст резюме, без вступления и без кавычек.\n\n",
+    );
+    for (i, r) in recent.iter().enumerate() {
+        s.push_str(&format!("{}. {} → {}\n", i + 1, r.task, r.result));
+    }
+    s
 }
 
 /// Plain text in dialog mode: steer the agent that is already working, or start one.
@@ -845,10 +982,10 @@ fn request(
             }
             curl_json("POST", &format!("{b}/agents"), Some(body))
         }
-        // Handled before any request is made.
-        Cmd::Projects | Cmd::Project(_) | Cmd::Dialog(_) | Cmd::Progress(_) => {
-            Ok(serde_json::json!({}))
-        }
+        // Handled before any request is made (ClearMemory), or never reaches this function as
+        // itself — `handle` turns a `Compact` into a `Spawn` before calling `request`.
+        Cmd::Projects | Cmd::Project(_) | Cmd::Dialog(_) | Cmd::Progress(_) | Cmd::ClearMemory
+        | Cmd::Compact => Ok(serde_json::json!({})),
         Cmd::List => curl_json("GET", &format!("{b}/agents"), None),
         Cmd::Status(i) => curl_json("GET", &format!("{b}/agents/{i}"), None),
         Cmd::Tell(i, m) => curl_json(
@@ -932,6 +1069,11 @@ fn render(
             s
         }
         Cmd::Projects | Cmd::Project(_) | Cmd::Dialog(_) | Cmd::Progress(_) => String::new(), // answered earlier
+        Cmd::ClearMemory => String::new(), // answered earlier, never reaches here
+        Cmd::Compact => {
+            let id = body.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            format!("🗜 сжимаю память этого чата (агент #{id})…")
+        }
         Cmd::Tell(i, _) => format!("сказал агенту #{i} — возьмёт следующим ходом"),
         Cmd::Pause(i) => format!("агент #{i} на паузе"),
         Cmd::Resume(i) => format!("агент #{i} продолжает"),
@@ -1010,7 +1152,9 @@ pub const HELP: &str = "\n\
 /stop <id> — доделать текущий вызов и подвести итог\n\
 /kill <id> — убить сейчас и освободить ресурсы\n\
 /progress all | off | <N> — как часто слать шаги (по умолчанию — каждый)\n\
-Пока агент работает, шаги приходят сами (по одному сообщению); итог — тоже сам, как только он закончит — /status спрашивать не нужно.";
+/clear — забыть прошлые задачи этого чата\n\
+/compact — сжать их в одну сводку\n\
+Пока агент работает, шаги приходят сами (по одному сообщению); итог — тоже сам, как только он закончит — /status спрашивать не нужно. Новый агент помнит прошлые задачи этого чата — не нужно пересказывать заново.";
 
 /// The nadia entries for the bot's command menu (`setMyCommands`), so they are offered when
 /// you type `/` instead of living only in `/help` — which is the difference between a
@@ -1025,6 +1169,8 @@ pub const MENU: &[(&str, &str)] = &[
     ("projects", "Проекты, где могут работать агенты"),
     ("project", "Выбрать проект: /project <имя>"),
     ("progress", "Как часто слать шаги: /progress all | off | <N>"),
+    ("clear", "Забыть прошлые задачи этого чата"),
+    ("compact", "Сжать прошлые задачи в одну сводку"),
 ];
 
 // ── Delivering results ──────────────────────────────────────────────────────────────────
@@ -1122,7 +1268,33 @@ fn collect_finished(me: &str) -> Vec<(i64, String)> {
                 }
                 Report::Ready(text) => {
                     s.watch.remove(&key);
-                    out.push((w.chat, text));
+                    if w.compacting {
+                        // Replace, not append: that is the whole point of asking for it.
+                        let phase = a.get("phase").and_then(|v| v.as_str()).unwrap_or("done");
+                        if phase == "done" {
+                            let summary = memory_result(a);
+                            s.chats.entry(chat_key(w.chat)).or_default().recent = vec![Recent {
+                                task: "сводка предыдущих задач".to_string(),
+                                result: summary.clone(),
+                            }];
+                            out.push((w.chat, format!("🗜 память сжата:\n{}", clip(&summary, 800))));
+                        } else {
+                            out.push((
+                                w.chat,
+                                format!(
+                                    "🗜 не получилось сжать память ({phase}) — память осталась прежней."
+                                ),
+                            ));
+                        }
+                    } else {
+                        // The task this becomes for the NEXT fresh agent's memory: the human's
+                        // own short text, not the (possibly already memory-prefixed) one sent.
+                        let display = w.display_task.clone().unwrap_or_else(|| w.task.clone());
+                        let cs = s.chats.entry(chat_key(w.chat)).or_default();
+                        cs.recent.push(Recent { task: display, result: memory_result(a) });
+                        trim_recent(&mut cs.recent);
+                        out.push((w.chat, text));
+                    }
                 }
             }
         }
@@ -1248,14 +1420,14 @@ mod tests {
         with_state(|s| {
             s.watch.insert(
                 "1".into(),
-                Watch { chat: 1711036782, task: "t1".into(), bot: super::super::registry_name(), reported_calls: 0 },
+                Watch { chat: 1711036782, task: "t1".into(), display_task: None, compacting: false, bot: super::super::registry_name(), reported_calls: 0 },
             );
         });
         unsafe { std::env::set_var("TELEGRAM_REGISTRY", "telegram-groups") };
         with_state(|s| {
             s.watch.insert(
                 "2".into(),
-                Watch { chat: 1711036782, task: "t2".into(), bot: super::super::registry_name(), reported_calls: 0 },
+                Watch { chat: 1711036782, task: "t2".into(), display_task: None, compacting: false, bot: super::super::registry_name(), reported_calls: 0 },
             );
         });
 
@@ -1448,7 +1620,7 @@ mod tests {
 
     #[test]
     fn a_finished_agent_is_reported_once_and_never_the_wrong_one() {
-        let w = Watch { chat: 7, task: "fix the test".into(), bot: legacy_owner(), reported_calls: 0 };
+        let w = Watch { chat: 7, task: "fix the test".into(), display_task: None, compacting: false, bot: legacy_owner(), reported_calls: 0 };
         let agent = |phase: &str, task: &str| {
             serde_json::json!({
                 "id": 3, "phase": phase, "task": task,
@@ -1627,5 +1799,54 @@ mod tests {
         assert_eq!(parse("/progress off"), Some(Ok(Cmd::Progress(Some("off".into())))));
         assert_eq!(Cmd::Progress(None).need(), Need::Look);
         assert_eq!(Cmd::Progress(Some("off".into())).need(), Need::Drive);
+    }
+
+    #[test]
+    fn clear_and_compact_parse_and_need_drive() {
+        assert_eq!(parse("/clear"), Some(Ok(Cmd::ClearMemory)));
+        assert_eq!(parse("/compact"), Some(Ok(Cmd::Compact)));
+        assert_eq!(Cmd::ClearMemory.need(), Need::Drive);
+        assert_eq!(Cmd::Compact.need(), Need::Drive);
+    }
+
+    /// A fresh `/spawn`'s task gets this chat's memory prepended once there is any; `/clear`
+    /// empties it back to "send verbatim". Doesn't touch nadia serve — just the text-building
+    /// and state-clearing halves, which is what a small model's actual prompt depends on.
+    #[test]
+    fn recent_memory_is_prepended_to_a_fresh_spawn_and_clear_empties_it() {
+        let _g = env_guard();
+        let d = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_STATE_HOME", d.path()) };
+        unsafe { std::env::set_var("TELEGRAM_REGISTRY", "telegram") };
+
+        assert_eq!(with_recent_memory(11, "почини тест"), "почини тест", "nothing to remember yet");
+
+        with_state(|s| {
+            s.chats.entry(chat_key(11)).or_default().recent.push(Recent {
+                task: "добавил флаг --json".into(),
+                result: "готово, cargo test проходит".into(),
+            });
+        });
+        let augmented = with_recent_memory(11, "почини тест");
+        assert!(augmented.contains("добавил флаг --json"), "{augmented}");
+        assert!(augmented.contains("cargo test проходит"), "{augmented}");
+        assert!(augmented.ends_with("Новая задача: почини тест"), "{augmented}");
+
+        assert!(clear_memory(11).contains("очищена"));
+        assert_eq!(with_recent_memory(11, "почини тест"), "почини тест", "cleared, so verbatim again");
+        assert!(clear_memory(11).contains("и так пуста"), "clearing twice must not error");
+    }
+
+    /// The character budget drops the OLDEST entry first, never the newest — symmetric with
+    /// how a long-running chat here favors recent turns.
+    #[test]
+    fn memory_trims_oldest_first_once_over_budget() {
+        let mut recent = vec![
+            Recent { task: "a".repeat(MEMORY_CHAR_BUDGET), result: "old".into() },
+            Recent { task: "b".repeat(10), result: "new".into() },
+        ];
+        trim_recent(&mut recent);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].result, "new", "the newest entry must survive the trim");
     }
 }
