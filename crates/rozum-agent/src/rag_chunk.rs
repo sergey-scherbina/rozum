@@ -372,7 +372,7 @@ fn slugify(title: &str) -> Option<String> {
 pub fn chunk_text(path: &str, text: &str) -> Vec<Chunk> {
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut para: Vec<&str> = Vec::new();
-    let mut flush = |para: &mut Vec<&str>, chunks: &mut Vec<Chunk>| {
+    let flush = |para: &mut Vec<&str>, chunks: &mut Vec<Chunk>| {
         if !para.is_empty() {
             let body = para.join("\n");
             let n = chunks.len() + 1;
