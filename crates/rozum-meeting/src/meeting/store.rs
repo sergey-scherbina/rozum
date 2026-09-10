@@ -2908,7 +2908,7 @@ mod tests {
         let anchor = w.append("p", "A", "API erroring", 1_718_000_000).unwrap();
         let id = anchor.id();
         // The structured transition messages the daemon now posts (open → assign → escalate → resolve).
-        let opmsg = |op: ThreadOp, ts: u64| {
+        let opmsg = |op: ThreadOp| {
             let mut pm = PostMeta::default();
             pm.kind = MsgKind::Event;
             pm.thread_id = Some(id.clone());
