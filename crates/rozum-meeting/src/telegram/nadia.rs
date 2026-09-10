@@ -1364,10 +1364,11 @@ fn report_for(w: &Watch, a: &serde_json::Value) -> Report {
         return Report::Reused;
     }
     let id = a.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-    Report::Ready(render_finished(id, phase, a))
+    let display_task = w.display_task.as_deref().unwrap_or(&w.task);
+    Report::Ready(render_finished(id, phase, display_task, a))
 }
 
-fn render_finished(id: u64, phase: &str, a: &serde_json::Value) -> String {
+fn render_finished(id: u64, phase: &str, display_task: &str, a: &serde_json::Value) -> String {
     let mark = match phase {
         "done" => "✅",
         "failed" => "❌",
@@ -1379,7 +1380,7 @@ fn render_finished(id: u64, phase: &str, a: &serde_json::Value) -> String {
         "{mark} агент #{id} {phase} · {} вызовов · {}с\n{}",
         num("tool_calls"),
         num("elapsed_secs"),
-        clip(get("task"), 200)
+        clip(display_task, 200)
     );
     // Where it worked and what it wrote. Both come from the dispatch path, not from the
     // model's summary: a model that has lost the thread reports files it never touched, and
@@ -1700,7 +1701,7 @@ mod tests {
             "workspace": "/Users/x/.nadia",
             "touched": ["Cargo.toml", "src/main.rs"]
         });
-        let text = render_finished(3, "done", &a);
+        let text = render_finished(3, "done", "напиши калькулятор RPN", &a);
         // The two facts an operator needs before they can go and look at the work.
         assert!(text.contains("/Users/x/.nadia"), "must say WHERE: {text}");
         assert!(text.contains("Cargo.toml") && text.contains("src/main.rs"), "must list what: {text}");
@@ -1712,7 +1713,7 @@ mod tests {
             "tool_calls": 0, "elapsed_secs": 3, "result": "вот список",
             "workspace": "/Users/x/.nadia", "touched": []
         });
-        let text = render_finished(4, "done", &b);
+        let text = render_finished(4, "done", "какие у тебя тулы?", &b);
         assert!(text.contains("файлы не менялись"), "{text}");
     }
 
@@ -1726,24 +1727,24 @@ mod tests {
             })
         };
         // Passed: the command itself is the evidence, and repairs are named when there were any.
-        let t = render_finished(1, "done", &with(true.into(), "cargo test -q", "", 0));
+        let t = render_finished(1, "done", "t", &with(true.into(), "cargo test -q", "", 0));
         assert!(t.contains("✔ проверка прошла: cargo test -q"), "{t}");
         assert!(!t.contains("раунд"), "{t}");
-        let t = render_finished(1, "done", &with(true.into(), "cargo test -q", "", 2));
+        let t = render_finished(1, "done", "t", &with(true.into(), "cargo test -q", "", 2));
         assert!(t.contains("2 раунд"), "{t}");
 
         // Failed: what failed AND what it printed, because that is what a person acts on.
-        let t = render_finished(1, "done", &with(false.into(), "cargo test -q", "4 + 4 = 7", 2));
+        let t = render_finished(1, "done", "t", &with(false.into(), "cargo test -q", "4 + 4 = 7", 2));
         assert!(t.contains("✘ проверка НЕ прошла") && t.contains("4 + 4 = 7"), "{t}");
 
         // Nothing checkable must never read as a pass — the whole point of the line.
-        let t = render_finished(1, "done", &with(serde_json::Value::Null, "", "", 0));
+        let t = render_finished(1, "done", "t", &with(serde_json::Value::Null, "", "", 0));
         assert!(t.contains("не проверено"), "{t}");
 
         // The judge's verdicts are distinguishable from a deterministic check.
-        let t = render_finished(1, "done", &with(true.into(), "", "", 0));
+        let t = render_finished(1, "done", "t", &with(true.into(), "", "", 0));
         assert!(t.contains("судья-модель подтвердила"), "{t}");
-        let t = render_finished(1, "done", &with(false.into(), "", "не реализовано", 0));
+        let t = render_finished(1, "done", "t", &with(false.into(), "", "не реализовано", 0));
         assert!(t.contains("судья-модель отклонила") && t.contains("не реализовано"), "{t}");
     }
 
@@ -1753,14 +1754,14 @@ mod tests {
             "id": 2, "phase": "failed", "task": "привет", "tool_calls": 0, "elapsed_secs": 1,
             "result": ""
         });
-        let text = render_finished(2, "failed", &a);
+        let text = render_finished(2, "failed", "привет", &a);
         assert!(text.contains("причина не записана"), "{text}");
         // With a reason, the reason is what is shown — no boilerplate on top of it.
         let b = serde_json::json!({
             "id": 2, "phase": "failed", "task": "привет", "tool_calls": 0, "elapsed_secs": 1,
             "result": "gateway transport failed: Connection refused"
         });
-        let text = render_finished(2, "failed", &b);
+        let text = render_finished(2, "failed", "привет", &b);
         assert!(text.contains("Connection refused"), "{text}");
         assert!(!text.contains("причина не записана"), "{text}");
     }

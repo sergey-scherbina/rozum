@@ -8870,7 +8870,6 @@ async fn run_info(spec: &str) {
 /// no engine, no daemon, no tokio needed for either path.
 async fn run_rag(action: RagAction) {
     use rozum::rag_chunk;
-    use rozum::rag_lite::Retriever;
     // No `rag` subcommand ever loads a resident CHAT model in this process — tell the embedder
     // it may bound its own MLX cache instead of leaving that to a gateway that isn't here
     // (`rozum_core::embedding::mark_standalone_process`'s own doc comment has the incident).

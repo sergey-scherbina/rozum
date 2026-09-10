@@ -99,22 +99,32 @@ fn authorized(cfg: &Config, headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-/// Identity of the running binary: its path and when it was built, as the filesystem sees it.
-/// Enough for a caller to notice "this is not the binary I have installed", which is the only
-/// question being asked.
+/// Identity of the running binary: its path and when it was built, as the filesystem saw it
+/// WHEN THIS PROCESS STARTED. Enough for a caller to notice "this is not the binary I have
+/// installed" — which only holds if `mtime` is frozen at startup: re-reading it live (the
+/// first version did) means a deploy that replaces the file on disk changes what an old,
+/// already-running process reports too, so `installed <= mtime` never sees a difference and
+/// staleness is never detected (found live: a `nadia serve` from 15:20 was still answering
+/// requests through three rebuilds afterward, `refresh_if_stale` silently doing nothing each
+/// time because both sides of its comparison read the SAME live file).
 fn build_id() -> Value {
-    let exe = std::env::current_exe().ok();
-    let mtime = exe
-        .as_ref()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs());
-    json!({
-        "exe": exe.map(|p| p.to_string_lossy().into_owned()),
-        "mtime": mtime,
-        "pid": std::process::id(),
-    })
+    static AT_START: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    AT_START
+        .get_or_init(|| {
+            let exe = std::env::current_exe().ok();
+            let mtime = exe
+                .as_ref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            json!({
+                "exe": exe.map(|p| p.to_string_lossy().into_owned()),
+                "mtime": mtime,
+                "pid": std::process::id(),
+            })
+        })
+        .clone()
 }
 
 fn as_json(s: &Status) -> Value {
