@@ -1,54 +1,45 @@
 # rozum
 
-Local meeting rooms for live CLI agents and a human operator.
+A local-first AI development platform: a fully local LLM gateway with a frugal
+model cascade, syntactic project-wide RAG, a sandboxed coding agent, and
+multi-agent meeting rooms that let humans, CLI agents, and local models
+collaborate in one place — all running on your own machine, with cloud models
+as an option rather than a requirement.
 
-A `rozum` process owns one named meeting room. Humans join through the TUI; AI
-agents (Claude Code, Codex, anything that speaks MCP) join through the bundled
-stdio MCP proxy; web browsers, Telegram chats, and Discord channels join
-through dedicated bridges. Everyone sees the same transcript and can submit at
-any time — there are no fixed turns.
+`rozum` runs entirely offline if you want it to: `rozum launch` serves a local
+model (MLX-native on Apple Silicon, GGUF elsewhere) behind an OpenAI/Anthropic
+API and drops a coding agent — Claude Code, Codex, opencode, or rozum's own
+`nadia` — into a sandbox pointed at it, with retrieval, durable task state, and
+run journaling wired in from the start. Add a meeting room and the same agent
+is one participant among several — human, cloud, or local — all watching the
+same transcript, plus Telegram/Discord/web bridges if you want to reach it
+from a phone.
 
 ## What it is
 
-- **A meeting room runtime.** One Unix process = one room with a Unix-domain
-  socket on `$XDG_RUNTIME_DIR/rozum/<room>.sock`.
-- **An MCP proxy for agents.** Drop `rozum mcp-proxy` into any agent's MCP
-  config; the agent gets `rooms.list`, `rooms.join`, `meeting.wait_my_turn`,
-  `meeting.submit`, `meeting.mark_responding`, `meeting.leave`, and
-  `meeting.status`. The proxy auto-reconnects if you restart the room.
-- **A built-in TUI** for the human operator: live transcript with scrollback,
-  per-participant typing/waiting/idle presence, autosizing soft-wrap input,
-  slash commands (`/name`, `/kick`, `/pause`, `/resume`, `/stop`).
-- **A web bridge** that exposes the room over HTTP+WebSocket with a
-  zero-dependency vanilla-JS client (presence row, sticky-bottom scrollback,
-  collapsing long messages, lazy history paging, optional on-disk transcript).
-- **Daemon-backed Telegram and Discord bridges** with deny-by-default sender
-  allowlists, startup target validation, no history replay, and safe outbound
-  chunking/rate-limit handling.
-- **On-disk transcript persistence** so a room survives `rozum` restarts and
-  late joiners can replay history.
-- **A local LLM gateway.** `rozum gateway` / `rozum launch` serve an
-  OpenAI- and Anthropic-compatible API on `127.0.0.1`, backed by an in-process
-  MLX / GGUF engine on Apple Silicon — a drop-in local provider for Claude Code,
-  Codex, opencode, and anything that speaks those dialects, with a **frugal model
-  cascade** (cheapest model first, escalate only when needed). See below.
+- **A local LLM gateway with a frugal model cascade.** `rozum gateway` /
+  `rozum launch` serve an OpenAI- and Anthropic-compatible API on
+  `127.0.0.1`, backed by an in-process MLX (Apple Silicon) or GGUF engine — a
+  drop-in local provider for Claude Code, Codex, opencode, and anything that
+  speaks those dialects. Name several models and rozum routes cheapest-first,
+  escalating only when the answer isn't good enough; the resident model can be
+  swapped, unloaded, or reloaded without dropping attached clients, and a
+  RAM-aware admission queue refuses (or adaptively downsizes) a load that
+  would overcommit the machine instead of risking an OOM panic or reboot. See
+  below.
+- **Project retrieval (RAG), not grep.** `rozum rag index` chunks a project
+  *syntactically* — markdown along its parse tree, code by item, not by fixed
+  byte windows — and serves it to every connected agent over MCP
+  (`rag.search`), ranking BM25 fused with embeddings. Built for the questions
+  `grep` loses: a concept, a symptom, an unfamiliar area of a large codebase.
 - **A structural sandbox.** Every `rozum launch <agent>` runs the agent in a
   Seatbelt jail (macOS) — writes confined to its workspace, secrets denied, only
   the local gateway reachable off-box. On by default; `--no-sandbox` opts out.
 - **A coding agent of its own.** `nadia` (`crates/nadia`) reads and edits files,
   runs commands and verifies its own work on a local model — headless
   (`nadia run <task>`), interactive (`nadia`), or as supervised subagents over
-  HTTP (`nadia serve`) drivable from the Telegram bot. See
+  HTTP (`nadia serve`) drivable from a chat bot. See
   [docs/nadia.md](docs/nadia.md).
-- **A local-model conference.** Local models can join a meeting room as **live
-  participants** alongside humans: `rozum meetings participant --model <spec>
-  --room <name>` joins a model that reads the room and replies like anyone else,
-  and `scripts/demo-conference.sh` brings up a whole sandboxed conference
-  (several models + humans) in one command. See the user manual.
-- **Project retrieval (RAG).** `rozum rag index` chunks a project *syntactically*
-  — markdown along its parse tree, code by item — and `rag.search` serves it to
-  every connected agent, ranking BM25 fused with embeddings. For the questions
-  `grep` loses: a concept, a symptom, an unfamiliar area.
 - **Durable task state.** `state.get` / `state.update` / `state.reset` over MCP:
   one small JSON object per project at `.rozum/state.json`, changed by RFC 7396
   merge patch. A task's facts survive a `/clear`, a compaction, a fresh session.
@@ -58,13 +49,40 @@ any time — there are no fixed turns.
   (`nadia run --record auto`, `--replay <id>`), or against today's tree with the
   tools live, or forked onto it. The gateway can journal what it serves too, so a
   client that owns its own loop is recordable as well.
+- **A meeting room runtime for multi-agent collaboration.** One `rozum`
+  process owns one named room; humans join through a built-in TUI (live
+  transcript, per-participant typing/waiting/idle presence, slash commands),
+  AI agents join through the bundled stdio MCP proxy (`rooms.list`,
+  `rooms.join`, `meeting.wait_my_turn`, `meeting.submit`, `meeting.status`, …),
+  and everyone sees the same on-disk, restart-durable transcript with no fixed
+  turns.
+- **A local-model conference.** Local models can join a room as **live
+  participants** alongside humans: `rozum meetings participant --model <spec>
+  --room <name>` joins a model that reads the room and replies like anyone
+  else — optionally with sandboxed file tools of its own — and
+  `scripts/demo-conference.sh` brings up a whole sandboxed conference (several
+  models + humans) in one command. See the user manual.
+- **A web bridge** that exposes a room over HTTP+WebSocket with a
+  zero-dependency vanilla-JS client (presence row, sticky-bottom scrollback,
+  collapsing long messages, lazy history paging, optional on-disk transcript).
+- **Daemon-backed Telegram and Discord bridges** with deny-by-default sender
+  allowlists, startup target validation, no history replay, and safe outbound
+  chunking/rate-limit handling — enough to run a room, or a sandboxed local
+  model, as a chat bot.
 - **A support and incident surface.** Rooms carry threads with severity, roles
   (`reporter`/`assignee`/`on_call`/`observer`/`admin`), a worst-first queue,
   redaction, and a full-history search — driven from the shell
   (`rozum meetings incident …`) or agent-natively over MCP.
+- **A unified control center.** `clients/control` is a one-source `.ssc`
+  UI compiled to both a React/PWA web app and a native TUI, aimed at covering
+  everything that matters in rozum — models, gateway/residency, and meetings —
+  from one codebase, one phone, or one terminal.
 - **Health that actually probes.** `rozum doctor --services` checks every
-  `com.rozum.*` job *and* whether the endpoint it exists to serve answers — a job
-  that cannot exec looks identical to a healthy one until something asks.
+  `com.rozum.*` job *and* whether the endpoint it exists to serve answers — a
+  job that cannot exec looks identical to a healthy one until something asks;
+  `rozum setup [--fix]` checks (and repairs) whether a console agent actually
+  sees the skills, MCP registration, meeting daemon, and RAG index it depends
+  on.
 
 ## Quick start
 
