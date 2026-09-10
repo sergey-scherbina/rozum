@@ -77,14 +77,19 @@ pub enum Cmd {
     Project(Option<String>),
     /// Plain text goes to nadia instead of to the chat model. `None` reports the setting.
     Dialog(Option<bool>),
+    /// How often a running agent's steps are posted. `None` reports the setting.
+    Progress(Option<String>),
 }
 
 impl Cmd {
     pub fn need(&self) -> Need {
         match self {
-            Cmd::List | Cmd::Status(_) | Cmd::Projects | Cmd::Project(None) | Cmd::Dialog(None) => {
-                Need::Look
-            }
+            Cmd::List
+            | Cmd::Status(_)
+            | Cmd::Projects
+            | Cmd::Project(None)
+            | Cmd::Dialog(None)
+            | Cmd::Progress(None) => Need::Look,
             // Choosing the workspace and routing your typing into an agent both decide where
             // writes land, so they need the same grant as starting one.
             _ => Need::Drive,
@@ -125,6 +130,7 @@ pub fn parse(text: &str) -> Option<Result<Cmd, String>> {
             "off" | "выкл" | "0" => Ok(Cmd::Dialog(Some(false))),
             other => Err(format!("Не понял `{other}`. Использование: /nadia on | off")),
         },
+        "/progress" => Ok(Cmd::Progress((!rest.is_empty()).then_some(rest))),
         "/status" => id(&rest).map(Cmd::Status),
         "/pause" => id(&rest).map(Cmd::Pause),
         "/resume" => id(&rest).map(Cmd::Resume),
@@ -152,14 +158,31 @@ pub fn parse(text: &str) -> Option<Result<Cmd, String>> {
 // a phone workflow useless.
 
 /// What one chat has chosen.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ChatState {
     /// Absolute path the agents of this chat work in. Unset → nadia's own scratch workspace.
     #[serde(default)]
     project: Option<String>,
-    /// Plain text goes to nadia rather than to the chat model.
+    /// Plain text goes to nadia rather than to the chat model. `None` = never explicitly
+    /// chosen — distinct from `Some(false)`, so that setting the PROJECT (which also creates
+    /// this chat's entry, via `or_default`) does not silently lock in "off" and pre-empt the
+    /// owner default in `dialog_routes` below.
     #[serde(default)]
-    dialog: bool,
+    dialog: Option<bool>,
+    /// How often a running agent's steps are posted: 0 = never (final result only), 1 = every
+    /// step (the default — real-time was the point of the feature), N>1 = every Nth step.
+    #[serde(default = "default_progress_every")]
+    progress_every: u32,
+}
+
+impl Default for ChatState {
+    fn default() -> Self {
+        ChatState { project: None, dialog: None, progress_every: default_progress_every() }
+    }
+}
+
+fn default_progress_every() -> u32 {
+    1
 }
 
 /// One agent someone is waiting on. `task` is kept to detect an id reused by a restarted
@@ -176,6 +199,10 @@ struct Watch {
     /// `telegram`: that is the only bridge that could have written them.
     #[serde(default = "legacy_owner")]
     bot: String,
+    /// `tool_calls` as of the last progress line posted for this agent, so a step already
+    /// reported is never reported again and a poll that finds nothing new stays silent.
+    #[serde(default)]
+    reported_calls: u64,
 }
 
 fn legacy_owner() -> String {
@@ -258,7 +285,23 @@ fn chat_state(chat_id: i64) -> ChatState {
 /// Is this chat routing plain text to nadia? Read by the bridge before it hands a message to
 /// the room, so the check has to be cheap and to fail closed (a missing file = off).
 pub fn dialog_on(chat_id: i64) -> bool {
-    chat_state(chat_id).dialog
+    chat_state(chat_id).dialog.unwrap_or(false)
+}
+
+/// The routing decision the bridge actually acts on: the persisted choice if this chat ever
+/// made one, otherwise ON for the owner and OFF for anyone else.
+///
+/// The point of the feature is to let the owner skip `/nadia on` entirely — but defaulting it
+/// on for EVERY chat would intercept a `chat`-only guest's or a group member's plain messages
+/// too, and `handle_text` refuses them for lacking write+shell instead of the message ever
+/// reaching the ordinary assistant. So the default only fires for the sender the ACL already
+/// calls owner; anyone else keeps today's fail-closed default until the owner turns it on for
+/// that chat explicitly.
+pub fn dialog_routes(chat_id: i64, is_owner: bool) -> bool {
+    match load_state().chats.get(&chat_key(chat_id)).and_then(|cs| cs.dialog) {
+        Some(v) => v,
+        None => is_owner,
+    }
 }
 
 // ── Projects ────────────────────────────────────────────────────────────────────────────
@@ -340,6 +383,8 @@ pub fn handle(cmd: Cmd, caps: Caps, chat_id: i64) -> String {
         Cmd::Project(None) => return render_project(chat_id),
         Cmd::Project(Some(arg)) => return set_project(chat_id, arg),
         Cmd::Dialog(v) => return set_dialog(chat_id, *v),
+        Cmd::Progress(None) => return render_progress_setting(chat_id),
+        Cmd::Progress(Some(arg)) => return set_progress(chat_id, arg),
         _ => {}
     }
     if let Err(e) = ensure_running() {
@@ -368,6 +413,7 @@ pub fn handle(cmd: Cmd, caps: Caps, chat_id: i64) -> String {
                                 chat: chat_id,
                                 task: task.clone(),
                                 bot: super::registry_name(),
+                                reported_calls: 0,
                             },
                         );
                     });
@@ -434,7 +480,7 @@ fn set_dialog(chat_id: i64, v: Option<bool>) -> String {
                 .to_string()
         };
     };
-    with_state(|s| s.chats.entry(chat_key(chat_id)).or_default().dialog = on);
+    with_state(|s| s.chats.entry(chat_key(chat_id)).or_default().dialog = Some(on));
     if on {
         let where_ = chat_state(chat_id)
             .project
@@ -447,6 +493,45 @@ fn set_dialog(chat_id: i64, v: Option<bool>) -> String {
         )
     } else {
         "Режим nadia выключен — обычный текст снова идёт ассистенту.".to_string()
+    }
+}
+
+fn progress_every(chat_id: i64) -> u32 {
+    chat_state(chat_id).progress_every
+}
+
+fn render_progress_setting(chat_id: i64) -> String {
+    match progress_every(chat_id) {
+        0 => "Шаги не присылаются — только итог. /progress all — вернуть.".to_string(),
+        1 => "Каждый шаг агента приходит сразу (по умолчанию). \
+              /progress off — только итог, /progress <N> — раз в N шагов."
+            .to_string(),
+        n => format!(
+            "Шаг приходит раз в {n}. /progress all — каждый, /progress off — только итог."
+        ),
+    }
+}
+
+fn set_progress(chat_id: i64, arg: &str) -> String {
+    let arg = arg.trim().to_ascii_lowercase();
+    let n = match arg.as_str() {
+        "all" | "вкл" | "1" => 1,
+        "off" | "выкл" | "0" => 0,
+        other => match other.parse::<u32>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                return format!(
+                    "Не понял `{other}`. Использование: /progress all | off | <N> \
+                     (раз в N шагов)."
+                )
+            }
+        },
+    };
+    with_state(|s| s.chats.entry(chat_key(chat_id)).or_default().progress_every = n);
+    match n {
+        0 => "Шаги отключены — итог придёт как обычно.".to_string(),
+        1 => "Теперь каждый шаг агента приходит сразу.".to_string(),
+        n => format!("Теперь шаг приходит раз в {n}."),
     }
 }
 
@@ -761,7 +846,9 @@ fn request(
             curl_json("POST", &format!("{b}/agents"), Some(body))
         }
         // Handled before any request is made.
-        Cmd::Projects | Cmd::Project(_) | Cmd::Dialog(_) => Ok(serde_json::json!({})),
+        Cmd::Projects | Cmd::Project(_) | Cmd::Dialog(_) | Cmd::Progress(_) => {
+            Ok(serde_json::json!({}))
+        }
         Cmd::List => curl_json("GET", &format!("{b}/agents"), None),
         Cmd::Status(i) => curl_json("GET", &format!("{b}/agents/{i}"), None),
         Cmd::Tell(i, m) => curl_json(
@@ -844,7 +931,7 @@ fn render(
             }
             s
         }
-        Cmd::Projects | Cmd::Project(_) | Cmd::Dialog(_) => String::new(), // answered earlier
+        Cmd::Projects | Cmd::Project(_) | Cmd::Dialog(_) | Cmd::Progress(_) => String::new(), // answered earlier
         Cmd::Tell(i, _) => format!("сказал агенту #{i} — возьмёт следующим ходом"),
         Cmd::Pause(i) => format!("агент #{i} на паузе"),
         Cmd::Resume(i) => format!("агент #{i} продолжает"),
@@ -874,6 +961,14 @@ fn verdict_line(a: &serde_json::Value) -> String {
         }
         None => "⚠ не проверено — у задачи не было машинно-проверяемого критерия".to_string(),
     }
+}
+
+/// One line for a step the agent just took, posted as its own message (not edited in place) so
+/// the chat keeps a full history of what it did, not just the last thing.
+fn render_progress(id: u64, w: &Watch, calls: u64, a: &serde_json::Value) -> String {
+    let elapsed = a.get("elapsed_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+    let tool = a.get("last_tool").and_then(|v| v.as_str()).unwrap_or("?");
+    format!("⚙️ #{id} шаг {calls} [{tool}] · {elapsed}с\n{}", clip(&w.task, 100))
 }
 
 fn one_line(a: &serde_json::Value) -> String {
@@ -914,7 +1009,8 @@ pub const HELP: &str = "\n\
 /pause <id> · /resume <id>\n\
 /stop <id> — доделать текущий вызов и подвести итог\n\
 /kill <id> — убить сейчас и освободить ресурсы\n\
-Итог агента приходит сам, как только он закончит — /status спрашивать не нужно.";
+/progress all | off | <N> — как часто слать шаги (по умолчанию — каждый)\n\
+Пока агент работает, шаги приходят сами (по одному сообщению); итог — тоже сам, как только он закончит — /status спрашивать не нужно.";
 
 /// The nadia entries for the bot's command menu (`setMyCommands`), so they are offered when
 /// you type `/` instead of living only in `/help` — which is the difference between a
@@ -928,16 +1024,17 @@ pub const MENU: &[(&str, &str)] = &[
     ("stop", "Доделать и подвести итог: /stop <id>"),
     ("projects", "Проекты, где могут работать агенты"),
     ("project", "Выбрать проект: /project <имя>"),
+    ("progress", "Как часто слать шаги: /progress all | off | <N>"),
 ];
 
 // ── Delivering results ──────────────────────────────────────────────────────────────────
 
-/// Watch the agents this bot started and post each one's result into the chat that started
-/// it, once, when it reaches a terminal phase.
+/// Watch the agents this bot started and post into the chat that started each one: a line per
+/// new step while it runs, and its result once when it reaches a terminal phase.
 ///
 /// This is what makes the bot usable from a phone. Without it the protocol is complete but
-/// the workflow is not: you would start an agent and then poll `/status 3` until it changed,
-/// which is a job for a machine and is exactly the machine you are talking to.
+/// the workflow is not: you would start an agent and then poll `/status 3` to see whether it
+/// was still there, which is a job for a machine and is exactly the machine you are talking to.
 ///
 /// Runs while the bridge runs. Everything about it is best-effort: a poll that fails is
 /// retried on the next tick, and a chat that cannot be posted to is logged, not retried
@@ -969,8 +1066,9 @@ pub async fn watch_results(bot: std::sync::Arc<super::bot::TelegramBot>) {
     }
 }
 
-/// One poll: everything watched that has finished, rendered, and dropped from the watch list
-/// so it is reported exactly once. Blocking (curl); called from `spawn_blocking`.
+/// One poll: a progress line for anything watched that took a new step since the last tick,
+/// plus everything that has finished — rendered and dropped from the watch list so a result is
+/// reported exactly once. Blocking (curl); called from `spawn_blocking`.
 fn collect_finished(me: &str) -> Vec<(i64, String)> {
     let Ok(body) = curl_json("GET", &format!("{}/agents", base()), None) else {
         return Vec::new();
@@ -989,7 +1087,36 @@ fn collect_finished(me: &str) -> Vec<(i64, String)> {
                 continue;
             }
             match report_for(&w, a) {
-                Report::NotYet => {}
+                Report::NotYet => {
+                    // A step since the last tick: post it once and remember how far we got, so
+                    // the next tick — whether it finds one more step or the terminal phase —
+                    // never repeats it. `tool_calls` can jump by more than one between two 5s
+                    // polls; that shows as one line spanning the gap rather than one per call,
+                    // because `last_tool` only ever holds the most recent of them.
+                    let calls = a.get("tool_calls").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if calls > w.reported_calls {
+                        if let Some(entry) = s.watch.get_mut(&key) {
+                            entry.reported_calls = calls;
+                        }
+                        // /progress: 0 = silent until the result, 1 (default) = every step,
+                        // N>1 = every Nth. Throttled here rather than at the caller so a
+                        // throttled-away step still advances `reported_calls` — otherwise the
+                        // NEXT step would render as a jump from the last one actually sent.
+                        let every = s
+                            .chats
+                            .get(&chat_key(w.chat))
+                            .map(|c| c.progress_every)
+                            .unwrap_or_else(default_progress_every);
+                        let due = match every {
+                            0 => false,
+                            1 => true,
+                            n => calls % n as u64 == 0,
+                        };
+                        if due {
+                            out.push((w.chat, render_progress(id, &w, calls, a)));
+                        }
+                    }
+                }
                 Report::Reused => {
                     s.watch.remove(&key);
                 }
@@ -1121,14 +1248,14 @@ mod tests {
         with_state(|s| {
             s.watch.insert(
                 "1".into(),
-                Watch { chat: 1711036782, task: "t1".into(), bot: super::super::registry_name() },
+                Watch { chat: 1711036782, task: "t1".into(), bot: super::super::registry_name(), reported_calls: 0 },
             );
         });
         unsafe { std::env::set_var("TELEGRAM_REGISTRY", "telegram-groups") };
         with_state(|s| {
             s.watch.insert(
                 "2".into(),
-                Watch { chat: 1711036782, task: "t2".into(), bot: super::super::registry_name() },
+                Watch { chat: 1711036782, task: "t2".into(), bot: super::super::registry_name(), reported_calls: 0 },
             );
         });
 
@@ -1321,7 +1448,7 @@ mod tests {
 
     #[test]
     fn a_finished_agent_is_reported_once_and_never_the_wrong_one() {
-        let w = Watch { chat: 7, task: "fix the test".into(), bot: legacy_owner() };
+        let w = Watch { chat: 7, task: "fix the test".into(), bot: legacy_owner(), reported_calls: 0 };
         let agent = |phase: &str, task: &str| {
             serde_json::json!({
                 "id": 3, "phase": phase, "task": task,
@@ -1453,5 +1580,52 @@ mod tests {
         assert!(s.contains("#1 running"), "{s}");
         assert!(s.contains("[bash]"), "{s}");
         assert!(s.contains("fix the flaky test"), "{s}");
+    }
+
+    /// Plain text defaults to nadia ONLY for the owner, and only until the chat makes its own
+    /// choice — a guest granted `chat` (no write/shell) must keep reaching the ordinary
+    /// assistant, not the `Need::Drive` refusal `handle_text` gives a stranger to `/spawn`.
+    #[test]
+    fn dialog_defaults_on_for_the_owner_and_off_for_anyone_else() {
+        let _g = env_guard();
+        let d = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_STATE_HOME", d.path()) };
+        unsafe { std::env::set_var("TELEGRAM_REGISTRY", "telegram") };
+
+        // Nobody has said anything about either chat yet.
+        assert!(dialog_routes(1, true), "the owner's own chat should default on");
+        assert!(!dialog_routes(2, false), "a guest's chat must not default on");
+
+        // The owner turns it off for their chat: that choice, not the default, now governs.
+        set_dialog(1, Some(false));
+        assert!(!dialog_routes(1, true));
+
+        // A guest's chat the owner explicitly turns on stays on regardless of who is typing —
+        // the setting is per chat, and a shared group chat is exactly the case for this.
+        set_dialog(2, Some(true));
+        assert!(dialog_routes(2, false));
+    }
+
+    #[test]
+    fn progress_all_off_and_every_n_parse_and_report_back() {
+        let _g = env_guard();
+        let d = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_STATE_HOME", d.path()) };
+        unsafe { std::env::set_var("TELEGRAM_REGISTRY", "telegram") };
+
+        assert_eq!(progress_every(9), 1, "real-time by default, unset");
+        assert!(set_progress(9, "off").contains("отключены"));
+        assert_eq!(progress_every(9), 0);
+        assert!(set_progress(9, "3").contains("раз в 3"));
+        assert_eq!(progress_every(9), 3);
+        assert!(set_progress(9, "all").contains("каждый шаг"));
+        assert_eq!(progress_every(9), 1);
+        assert!(set_progress(9, "не число").starts_with("Не понял"));
+        assert_eq!(progress_every(9), 1, "a bad value must not clobber the last good one");
+
+        assert_eq!(parse("/progress"), Some(Ok(Cmd::Progress(None))));
+        assert_eq!(parse("/progress off"), Some(Ok(Cmd::Progress(Some("off".into())))));
+        assert_eq!(Cmd::Progress(None).need(), Need::Look);
+        assert_eq!(Cmd::Progress(Some("off".into())).need(), Need::Drive);
     }
 }

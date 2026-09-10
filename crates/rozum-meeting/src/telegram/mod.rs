@@ -375,8 +375,8 @@ async fn run_channel(
                 // by the assistant — two replies to one message is worse than either alone.
                 // The grant is re-checked inside (`handle_text`): `chat` gets you the assistant,
                 // and driving an agent needs write+shell.
-                if nadia::dialog_on(chat_id) {
-                    let caps = { acl.lock().await.caps_for(id) };
+                let caps = { acl.lock().await.caps_for(id) };
+                if nadia::dialog_routes(chat_id, acl.lock().await.is_owner(id)) {
                     let text_c = text.clone();
                     let reply = tokio::task::spawn_blocking(move || {
                         nadia::handle_text(chat_id, &text_c, caps)
