@@ -1,0 +1,6 @@
+feature/meetings-tail 2026-09-23T14:28:41Z
+agent: claude-code
+heartbeat: 2026-09-23T14:28:41Z
+status: in-progress
+done-so-far: -
+next: store::read_after(cursor) + tests; `rozum meetings tail` (follow a room, print new messages); cargo test; land
