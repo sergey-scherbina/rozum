@@ -1594,6 +1594,18 @@ pub fn read_since(root: &Path, since_date: Option<&str>, since_n: u64) -> Vec<St
     out
 }
 
+/// Every turn strictly AFTER `cursor` (a `(date, n)` already shown), oldest-first; `None` = the
+/// whole room. What a follower (`rozum meetings tail`) polls: `read_day` keeps `n >= from`, so
+/// "after" is `n + 1` on the cursor's own day and everything on the days that follow it.
+/// Strict, like [`read_since_checked`]: an I/O error surfaces, so a follower never advances its
+/// cursor past a batch it could not read.
+pub fn read_after(root: &Path, cursor: Option<(&str, u64)>) -> std::io::Result<Vec<StoredTurn>> {
+    match cursor {
+        None => read_since_checked(root, None, 0),
+        Some((date, n)) => read_since_checked(root, Some(date), n + 1),
+    }
+}
+
 /// Strict direct-read variant for live clients. Unlike [`read_since`], an I/O
 /// failure is surfaced so a bridge cannot advance its cursor past an unread
 /// batch. Best-effort analytical/recovery callers keep using `read_since`.
@@ -2702,6 +2714,27 @@ mod tests {
         assert_eq!(meta.name, "rozum");
         assert_eq!(meta.budget_chars, 512243);
         assert_eq!(meta.phase, "Active");
+    }
+
+    #[test]
+    fn read_after_returns_only_turns_past_the_cursor_across_days() {
+        let dir = tempdir().unwrap();
+        let mut w = writer_in(dir.path());
+        let a = w.append("p", "P", "a", ts_for(0)).unwrap();
+        let b = w.append("p", "P", "b", ts_for(0)).unwrap();
+        let c = w.append("p", "P", "c", ts_for(1)).unwrap(); // the next day, n restarts at 0
+        let root = w.paths().root.clone();
+        let contents = |v: Vec<StoredTurn>| v.into_iter().map(|t| t.content).collect::<Vec<_>>();
+
+        assert_eq!(contents(read_after(&root, None).unwrap()), ["a", "b", "c"]);
+        assert_eq!(contents(read_after(&root, Some((&a.date, a.n))).unwrap()), ["b", "c"]);
+        // the last of a day: the next day's first, though its n (0) is below the cursor's (1)
+        assert_eq!(contents(read_after(&root, Some((&b.date, b.n))).unwrap()), ["c"]);
+        assert!(read_after(&root, Some((&c.date, c.n))).unwrap().is_empty());
+        // a turn appended after the follower's last read is the only one it sees next
+        let d = w.append("p", "P", "d", ts_for(1)).unwrap();
+        assert_eq!(contents(read_after(&root, Some((&c.date, c.n))).unwrap()), ["d"]);
+        assert_eq!(d.n, c.n + 1);
     }
 
     #[test]

@@ -815,6 +815,32 @@ enum MeetingsAction {
         count: usize,
     },
 
+    /// Follow a room: print its last few messages, then every new one as it arrives, until
+    /// interrupted (the cwd project's room by default).
+    ///
+    /// `read` in a loop — for a human in a terminal, or for an agent harness that streams a
+    /// command's stdout as events (Claude Code's `Monitor`): one message, one event, no daemon
+    /// or MCP call needed. Resumes from `--since <date>/<n>` (a message id) when given, so a
+    /// restarted follower loses nothing. Unlike `inbox`, it shows EVERY message, not only the
+    /// ones addressing you.
+    Tail {
+        /// Room name (from `rozum meetings status`); default = the cwd project's room.
+        #[arg(long)]
+        room: Option<String>,
+        /// How many most-recent messages to show before following (0 = only new ones).
+        #[arg(long, short = 'n', default_value_t = 10)]
+        count: usize,
+        /// Start after this message id (`<date>/<n>`) instead of the last `--count`.
+        #[arg(long)]
+        since: Option<String>,
+        /// Poll interval in milliseconds.
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+        /// Stop after this many seconds (0 = follow until interrupted).
+        #[arg(long, default_value_t = 0)]
+        for_secs: u64,
+    },
+
     /// Manage support-console access tokens (per-operator identity + RBAC role).
     Token {
         #[command(subcommand)]
@@ -1745,6 +1771,9 @@ async fn main() {
                 run_meetings_post(text, room, as_display, kind, severity, thread, reply_to, tags).await
             }
             MeetingsAction::Read { room, count } => run_meetings_read(room, count).await,
+            MeetingsAction::Tail { room, count, since, interval_ms, for_secs } => {
+                run_meetings_tail(room, count, since, interval_ms, for_secs).await
+            }
             MeetingsAction::RepairThreads { room } => run_meetings_repair_threads(room).await,
             MeetingsAction::Queue { room } => run_meetings_queue(room).await,
             MeetingsAction::Phase { phase, room } => run_meetings_phase(phase, room).await,
@@ -4785,9 +4814,78 @@ async fn run_meetings_read(room: Option<String>, count: usize) {
         return;
     }
     for t in &turns {
-        match t.badge() {
-            Some(b) => println!("[{}] {} {}: {}", hhmm_of(t.ts), b, t.display_name, t.content),
-            None => println!("[{}] {}: {}", hhmm_of(t.ts), t.display_name, t.content),
+        print_turn(t);
+    }
+}
+
+/// One message as `read` and `tail` print it.
+fn print_turn(t: &rozum::meeting::store::StoredTurn) {
+    match t.badge() {
+        Some(b) => println!("[{}] {} {}: {}", hhmm_of(t.ts), b, t.display_name, t.content),
+        None => println!("[{}] {}: {}", hhmm_of(t.ts), t.display_name, t.content),
+    }
+}
+
+/// Parse a message id `<date>/<n>` (as `post --reply-to` and the MCP tools print them).
+fn parse_msg_id(id: &str) -> Option<(String, u64)> {
+    let (date, n) = id.rsplit_once('/')?;
+    Some((date.to_string(), n.parse().ok()?))
+}
+
+/// `rozum meetings tail` — `read`, then follow. The cursor is the `(date, n)` of the last
+/// message printed; each poll prints what `store::read_after` finds past it. A room that does
+/// not exist yet is waited for rather than refused: a follower is often started before the
+/// first message. stdout is flushed per message, so a harness sees each one as it lands.
+async fn run_meetings_tail(
+    room: Option<String>,
+    count: usize,
+    since: Option<String>,
+    interval_ms: u64,
+    for_secs: u64,
+) {
+    use rozum::meeting::{client, store};
+    use std::io::Write;
+    let root = resolve_room_or_exit(room, "tail").await;
+    let mut cursor: Option<(String, u64)> = match since.as_deref() {
+        Some(id) => match parse_msg_id(id) {
+            Some(c) => Some(c),
+            None => {
+                eprintln!("meetings tail: --since wants a message id `<date>/<n>`, got '{id}'");
+                std::process::exit(2);
+            }
+        },
+        None => {
+            let shown = if root.exists() { client::read(&root, count) } else { vec![] };
+            for t in &shown {
+                print_turn(t);
+            }
+            // with --count 0 the cursor still starts at the END, not at the room's first message
+            let last = if shown.is_empty() && root.exists() { client::read(&root, 1) } else { shown };
+            last.last().map(|t| (t.date.clone(), t.n))
+        }
+    };
+    let _ = std::io::stdout().flush();
+    let deadline = (for_secs > 0).then(|| std::time::Instant::now() + std::time::Duration::from_secs(for_secs));
+    loop {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(interval_ms.max(50))).await;
+        if !root.exists() {
+            continue;
+        }
+        match store::read_after(&root, cursor.as_ref().map(|(d, n)| (d.as_str(), *n))) {
+            Ok(turns) => {
+                for t in &turns {
+                    print_turn(t);
+                    cursor = Some((t.date.clone(), t.n));
+                }
+                if !turns.is_empty() {
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            // keep the cursor where it is and try again next tick: never skip a batch
+            Err(e) => eprintln!("meetings tail: read failed ({e}); retrying"),
         }
     }
 }

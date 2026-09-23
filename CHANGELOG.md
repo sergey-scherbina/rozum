@@ -1,5 +1,30 @@
 # Changelog
 
+## meetings-tail — `rozum meetings tail`: follow a room from a shell
+Completed: 2026-09-23
+
+`read` shows the last N messages once; there was no way to FOLLOW a room from a shell short of a
+poll loop around `read` — and an agent in another project (okay) wrote exactly that loop the same
+day, guessing at a `tail` subcommand that did not exist. `rozum meetings tail` prints the last
+`--count` messages (default 10; `0` = only new ones), then every new message as it lands, until
+interrupted or `--for-secs`. Same line format as `read` (the printer is now one function both
+use), stdout flushed per message, so a harness that turns a command's stdout into events (Claude
+Code's `Monitor`) gets one event per message. `--since <date>/<n>` resumes after a message id, so
+a restarted follower loses nothing; a room that does not exist yet is waited for.
+
+Different from `inbox` on purpose: `inbox` is the durable, cursor-on-disk stream of messages that
+ADDRESS a handle; `tail` is every message, cursor in memory — a view, not a delivery guarantee.
+
+The cursor logic is `store::read_after(root, Option<(date, n)>)`: `read_day` keeps `n >= from`, so
+"after" is `n + 1` on the cursor's own day and everything on the days after it — including a next
+day whose `n` restarts at 0, below the cursor's. Strict like `read_since_checked`: an I/O error
+keeps the cursor where it is and retries, never skipping a batch. Test:
+`read_after_returns_only_turns_past_the_cursor_across_days` (cross-day, a turn appended after the
+last read). Checked live against the okay room: the last two messages, then a line posted from
+another shell appeared within the poll interval. Built with `--no-default-features` (the
+engine-free host): the default build needs mlx-sys's CMake toolchain, which a fresh worktree
+without it cannot run — unrelated to this change.
+
 ## agent-record-replay — a run journal, and a replay that refuses to lie
 Completed: 2026-09-03
 
