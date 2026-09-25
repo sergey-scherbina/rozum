@@ -1,6 +1,0 @@
-feature/rag-vectors-follow-index 2026-09-25T10:41:14Z
-agent: claude-code (okay session 013hkJA4B7z8s2CRHjfv668p, operator ask)
-heartbeat: 2026-09-25T10:41:14Z
-status: in-progress
-done-so-far: cause found: a hook-driven `rozum rag index` refreshes the lexical index, so rag.search sees rechunked=0 and never kicks the embed pass; mcp-http has no warmup. okay vectors are from 2026-09-03 and return deleted files as empty hits
-next: kick embed when the index changed since the last pass; test; land; deploy
