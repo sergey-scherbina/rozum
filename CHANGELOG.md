@@ -1,5 +1,39 @@
 # Changelog
 
+## rag-split-oversized — long chunks are embedded whole; sessions share one RAG cache
+Completed: 2026-09-25
+
+Asked from okay: "can rag be faster and better?" Measured on a 10-question okay eval (questions
+phrased without the answer's token, answer located by a marker in the chunk text) and this repo's
+`rag-eval.json` floor, on a side proxy over a copy of okay's index so the live one was untouched.
+
+**Better.** The embedder reads 255 tokens (~1 KB) of a text. okay has 3,994 chunks over 1.2 KB
+and its densest docs are single chunks of 13-18 KB (AGENTS.md "Build facts that bite"), so their
+vectors saw ~5% of the text. Now a chunk past `MAX_CHUNK_BYTES` (1200) is EMBEDDED as pieces cut
+at blank lines (`<id>`, `<id>~2`, ...; `embedding_units`), and a piece's vector hit counts for
+its chunk once, at its best rank (`collapse_pieces`). The LEXICAL chunks are NOT split — measured:
+splitting them took the rag-eval floor from 8/26 to 5/26 top-1 (md+text only as well), because
+short pieces win BM25's length normalisation and crowd the code answers out. With the vector-side
+split the floor stays 8/26 and the okay eval went from 7/10 top-1 (1 at rank 2, 2 misses) to 8/10
+(1 at rank 2, 1 miss): the memory-pressure question, a miss before, is now rank 1. ~11.7k piece
+vectors for okay, embedded once by the tick.
+
+**Faster.** Per-stage times now in the `rag.search` log line (`ms: refresh= load= embed= rank=`).
+Two findings: (1) the HTTP proxy built a RAG cache PER SESSION, so every new session re-parsed
+the 27 MB index and loaded the vectors (1.3-1.8 s) before its first answer, and held its own
+~31 MB copy; now one cache per project per process (`shared_rag`). (2) Every search ran the
+incremental refresh, ~150 ms of which is parsing the manifest to learn nothing changed; now a
+`tree_signature` (git ls-files + stat, ~30-80 ms) equal to the last refresh's, with the index
+file unchanged, skips it. On a box at load ~60: refresh 120-800 ms -> 57-81 ms, load 1.3-1.8 s ->
+0 after the first search, a search ~1.5-3 s -> ~0.2-0.5 s. The query embedding (130-500 ms under
+load, 26-60 ms idle) is the gateway's own time and was left alone.
+
+Tests: `an_oversized_chunk_splits_at_paragraphs_and_keeps_its_first_id`,
+`a_long_paragraph_splits_at_lines_and_a_long_line_stays_whole`,
+`piece_hits_collapse_onto_their_chunk_at_the_best_rank`,
+`the_tree_signature_moves_with_the_tree_and_only_then`,
+`sessions_of_one_project_share_one_rag_cache`.
+
 ## rag-embed-on-tick — the vectors follow the index without anyone searching
 Completed: 2026-09-25
 

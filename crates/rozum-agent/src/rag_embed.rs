@@ -274,6 +274,45 @@ impl VectorIndex for VecStore {
     }
 }
 
+/// What gets a vector: every saved chunk, with a chunk past [`crate::rag_chunk::MAX_CHUNK_BYTES`]
+/// cut into pieces (`<id>`, `<id>~2`, ...) so the embedder, which reads ~1 KB of a text, sees
+/// all of it (rag-split-oversized). The lexical index keeps the whole chunk; [`parent_id`] maps
+/// a piece's vector hit back to it.
+pub fn embedding_units(root: &Path) -> Vec<(String, String)> {
+    let chunks = crate::rag_chunk::saved_chunk_texts(root)
+        .into_iter()
+        .map(|(id, text)| crate::rag_chunk::Chunk { id, text })
+        .collect();
+    crate::rag_chunk::split_oversized(chunks).into_iter().map(|c| (c.id, c.text)).collect()
+}
+
+/// The chunk a vector id belongs to: `<id>~N` (N a number) is piece N of `<id>`, anything else is
+/// itself. No chunk id of its own ends that way — markdown slugs are alphanumerics and `-`,
+/// paragraphs `#pN`, code items `fn name` — so the suffix is unambiguous.
+pub fn parent_id(id: &str) -> &str {
+    match id.rsplit_once('~') {
+        Some((p, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => p,
+        _ => id,
+    }
+}
+
+/// Collapse a vector ranking over pieces into one over chunks: each chunk takes its BEST piece's
+/// place and score, later pieces of it are dropped, and at most `k` chunks are kept.
+pub fn collapse_pieces(ranked: Vec<(String, f32)>, k: usize) -> Vec<(String, f32)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(k);
+    for (id, score) in ranked {
+        let p = parent_id(&id).to_string();
+        if seen.insert(p.clone()) {
+            out.push((p, score));
+            if out.len() == k {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Reconcile the vector store with the CURRENT chunk set: drop vectors whose chunks are gone,
 /// name the chunks that still need embedding. Pure, so the proxy's HTTP loop stays a dumb
 /// executor of this plan and the plan itself is testable without a server.
@@ -322,7 +361,7 @@ pub fn gateway_less_warmup(root: &Path) -> std::io::Result<usize> {
     let Some(_lock) = try_embed_lock(root)? else {
         return Ok(0); // a sibling is embedding this project right now
     };
-    let chunks = crate::rag_chunk::saved_chunk_texts(root);
+    let chunks = embedding_units(root);
     if chunks.is_empty() {
         return Ok(0);
     }
@@ -480,7 +519,7 @@ pub async fn embed_missing_with(
     backoff: &[std::time::Duration],
 ) -> usize {
     let Ok(Some(_lock)) = try_embed_lock(root) else { return 0 };
-    let chunks = crate::rag_chunk::saved_chunk_texts(root);
+    let chunks = embedding_units(root);
     if chunks.is_empty() {
         return 0;
     }
@@ -595,7 +634,9 @@ pub fn rank_fused(
     if qv.len() != vs.dim() {
         return (crate::rag_lite::rebalance(&bm25, k), false);
     }
-    let ranked = vs.search(qv, pool);
+    // Over-fetch: several pieces of one long chunk may sit near the top, and each chunk counts
+    // once (rag-split-oversized).
+    let ranked = collapse_pieces(vs.search(qv, pool * 3), pool);
     let mut hits = fuse(&bm25, &ranked, pool);
     // Texts first, THEN rebalance: the test detector reads the chunk text, and an
     // embedding-only hit arrives from `fuse` with an empty one.
@@ -886,6 +927,25 @@ mod tests {
         let mut back = VecStore::load(&path, None).unwrap();
         assert!(plan_embedding(&old, &mut back).1.is_empty(), "hash reloaded");
         assert_eq!(plan_embedding(&edited, &mut back).1.len(), 1);
+    }
+
+    /// rag-split-oversized: a piece's vector hit counts for its chunk, once, at its best place.
+    #[test]
+    fn piece_hits_collapse_onto_their_chunk_at_the_best_rank() {
+        assert_eq!(parent_id("AGENTS.md#build-facts~3"), "AGENTS.md#build-facts");
+        assert_eq!(parent_id("AGENTS.md#build-facts"), "AGENTS.md#build-facts");
+        assert_eq!(parent_id("a.md#x~"), "a.md#x~", "no number, not a piece");
+        let ranked = vec![
+            ("AGENTS.md#build~4".to_string(), 0.9),
+            ("b.rs#fn f".to_string(), 0.8),
+            ("AGENTS.md#build".to_string(), 0.7),
+            ("c.md#p2~2".to_string(), 0.6),
+        ];
+        let out = collapse_pieces(ranked, 5);
+        let ids: Vec<&str> = out.iter().map(|(i, _)| i.as_str()).collect();
+        assert_eq!(ids, ["AGENTS.md#build", "b.rs#fn f", "c.md#p2"]);
+        assert_eq!(out[0].1, 0.9, "the chunk takes its best piece's score");
+        assert_eq!(collapse_pieces(out.clone(), 2).len(), 2, "k bounds the result");
     }
 
     #[test]

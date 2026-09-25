@@ -391,6 +391,78 @@ pub fn chunk_text(path: &str, text: &str) -> Vec<Chunk> {
     chunks
 }
 
+/// The size past which a chunk is EMBEDDED as several pieces (rag-split-oversized). The embedder
+/// reads 255 tokens of a text (`MAX_TOKENS_PER_TEXT` in rozum-mlx), about 1 KB of prose, so an
+/// 18 KB markdown section — okay's AGENTS.md "Build facts that bite" — was one vector for its
+/// first ~5%, and its answers were unreachable by meaning.
+///
+/// The LEXICAL chunks are not split, and that was measured, not assumed: splitting them took the
+/// rag-eval floor from 8/26 to 5/26 top-1 — with md and text only as with everything — because
+/// short pieces win BM25's length normalisation and push the code answers out of the slots.
+pub const MAX_CHUNK_BYTES: usize = 1200;
+
+/// Split every chunk longer than [`MAX_CHUNK_BYTES`] into consecutive pieces — the embedding
+/// units of `rag_embed::embedding_units`, cut at blank lines
+/// when the text has them and at line ends otherwise; a single line is never cut, so a piece
+/// exceeds the cap only when one line does. The first piece KEEPS the chunk's id, so every link
+/// and eval answer naming it still resolves; the rest are `<id>~2`, `<id>~3`, ... . The pieces
+/// concatenate back to the chunk's text byte for byte.
+pub fn split_oversized(chunks: Vec<Chunk>) -> Vec<Chunk> {
+    let mut out = Vec::with_capacity(chunks.len());
+    for c in chunks {
+        if c.text.len() <= MAX_CHUNK_BYTES {
+            out.push(c);
+            continue;
+        }
+        // Units: paragraphs (a run of lines ending with a blank line), each kept whole when it
+        // fits; a paragraph over the cap is offered line by line instead.
+        let mut units: Vec<&str> = Vec::new();
+        let mut start = 0usize;
+        let bytes = c.text.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'\n' {
+                let blank_next = bytes.get(i + 1) == Some(&b'\n');
+                if blank_next {
+                    let end = i + 2;
+                    units.push(&c.text[start..end]);
+                    start = end;
+                    i = end;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        if start < c.text.len() {
+            units.push(&c.text[start..]);
+        }
+        let mut lines_or_paras: Vec<&str> = Vec::new();
+        for u in units {
+            if u.len() <= MAX_CHUNK_BYTES {
+                lines_or_paras.push(u);
+            } else {
+                lines_or_paras.extend(u.split_inclusive('\n'));
+            }
+        }
+        let mut pieces: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        for u in lines_or_paras {
+            if !cur.is_empty() && cur.len() + u.len() > MAX_CHUNK_BYTES {
+                pieces.push(std::mem::take(&mut cur));
+            }
+            cur.push_str(u);
+        }
+        if !cur.is_empty() {
+            pieces.push(cur);
+        }
+        for (n, text) in pieces.into_iter().enumerate() {
+            let id = if n == 0 { c.id.clone() } else { format!("{}~{}", c.id, n + 1) };
+            out.push(Chunk { id, text });
+        }
+    }
+    out
+}
+
 /// Extensions that are never text — cheaper than sniffing their bytes.
 const BINARY_EXT: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip", "gz", "tgz", "tar", "xz", "zst",
@@ -531,6 +603,34 @@ fn project_files_with_progress(
     (files, stats)
 }
 
+
+/// A cheap fingerprint of the tree an incremental pass would look at: the same file list
+/// (`git ls-files`, or the fenced walk), each file's `(path, mtime, len)` — the stat the reuse
+/// rule itself compares — folded into one number. Equal signatures mean a pass would reuse every
+/// file and remove none, so a caller that remembers the last one can skip the pass
+/// (rag-search-skip-refresh): on okay the pass is ~33 ms of listing and stat plus ~150 ms of
+/// parsing a 27 MB manifest, on EVERY search, to learn that nothing changed. `None` when the
+/// root cannot be listed.
+pub fn tree_signature(root: &Path) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut paths = git_project_files(root)?;
+    paths.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for rel in &paths {
+        let Ok(meta) = root.join(rel).symlink_metadata() else { continue };
+        if meta.file_type().is_symlink() || meta.is_dir() {
+            continue;
+        }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        (rel, mtime, meta.len()).hash(&mut h);
+    }
+    Some(h.finish())
+}
 
 /// The files git considers part of this project: tracked, plus untracked ones that are NOT
 /// ignored. `None` when `root` is not a git repository (or git is unavailable), in which case
@@ -1494,6 +1594,62 @@ unrelated prose about walking dogs
         assert_eq!((stats.rechunked, stats.removed), (0, 0), "nothing changed: {stats:?}");
         let after = fs::metadata(&file).unwrap().modified().unwrap();
         assert_eq!(before, after, "a no-op pass must not touch the file");
+    }
+
+    /// rag-split-oversized: a section past the cap becomes pieces under it, cut at blank lines,
+    /// the first keeping the id, all of them concatenating back to the original.
+    #[test]
+    fn an_oversized_chunk_splits_at_paragraphs_and_keeps_its_first_id() {
+        let para = |n: usize| format!("- bullet {n} {}\n", "word ".repeat(40));
+        let text: String = (0..30).map(|n| para(n) + "\n").collect();
+        assert!(text.len() > 3 * MAX_CHUNK_BYTES);
+        let small = Chunk { id: "a.md#small".into(), text: "short".into() };
+        let big = Chunk { id: "AGENTS.md#build-facts".into(), text: text.clone() };
+        let out = split_oversized(vec![small, big]);
+        assert_eq!(out[0].id, "a.md#small", "a chunk under the cap is untouched");
+        assert_eq!(out[1].id, "AGENTS.md#build-facts", "the first piece keeps the id");
+        assert_eq!(out[2].id, "AGENTS.md#build-facts~2");
+        assert!(out.len() > 4);
+        assert!(out[1..].iter().all(|c| c.text.len() <= MAX_CHUNK_BYTES), "every piece fits");
+        assert!(out[1..].iter().all(|c| c.text.ends_with("\n\n") || c.id.ends_with(&format!("~{}", out.len() - 1))),
+            "cut at blank lines");
+        let back: String = out[1..].iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(back, text, "the pieces concatenate back byte for byte");
+    }
+
+    /// A long paragraph without blank lines is cut at line ends; one line longer than the cap
+    /// stays whole rather than being cut mid-line.
+    #[test]
+    fn a_long_paragraph_splits_at_lines_and_a_long_line_stays_whole() {
+        let line = format!("{}\n", "x".repeat(300));
+        let text = line.repeat(10) + &"y".repeat(3000);
+        let out = split_oversized(vec![Chunk { id: "f.txt#p1".into(), text: text.clone() }]);
+        assert!(out.len() >= 3);
+        assert!(out.iter().all(|c| c.text.len() <= MAX_CHUNK_BYTES || !c.text.trim_end().contains('\n')));
+        assert_eq!(out.iter().map(|c| c.text.as_str()).collect::<String>(), text);
+    }
+
+    /// rag-search-skip-refresh: the signature moves when a file is edited, added or removed, and
+    /// holds still otherwise.
+    #[test]
+    fn the_tree_signature_moves_with_the_tree_and_only_then() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(root).args(args).output().unwrap()
+        };
+        git(&["init", "-q"]);
+        fs::write(root.join("a.md"), "# A\nalpha\n").unwrap();
+        let s0 = tree_signature(root).expect("a git root lists");
+        assert_eq!(tree_signature(root), Some(s0), "nothing changed");
+        fs::write(root.join("a.md"), "# A\nalpha, longer now\n").unwrap();
+        let s1 = tree_signature(root).unwrap();
+        assert_ne!(s1, s0, "an edit moves it");
+        fs::write(root.join("b.md"), "# B\n").unwrap();
+        let s2 = tree_signature(root).unwrap();
+        assert_ne!(s2, s1, "a new file moves it");
+        fs::remove_file(root.join("b.md")).unwrap();
+        assert_eq!(tree_signature(root), Some(s1), "a removal moves it back");
     }
 
     /// A v1 index (flat chunk list, no per-file stat) must still SERVE searches, and must fall

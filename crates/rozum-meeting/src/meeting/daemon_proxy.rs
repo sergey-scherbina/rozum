@@ -160,6 +160,38 @@ struct RagCache {
     /// pass that found nothing to embed — which saves nothing, leaving the vectors file older
     /// than the index — does not kick the same pass again on every call.
     embed_pass_for: Option<SystemTime>,
+    /// The tree signature and index mtime right after this proxy's last refresh. When both are
+    /// unchanged at the next search, the refresh would reuse everything, so it is skipped
+    /// (rag-search-skip-refresh).
+    refreshed_at: Option<(u64, Option<SystemTime>)>,
+}
+
+/// A project's RAG cache and embed-in-flight flag, ONE per project per process
+/// (rag-search-skip-refresh). The HTTP transport builds a `DaemonProxy` per session, and each
+/// used to get its own: every new session re-read and re-parsed the 27 MB index and loaded the
+/// vectors (1.3-1.8 s on okay, measured) before its first answer, could not skip a refresh it had
+/// not seen, and held its own ~31 MB copy — per agent, per project, for the life of the session.
+/// Held for the life of the process: a handful of projects is the realistic set. `None` (no
+/// project resolved) gets a private cache, as before.
+fn shared_rag(
+    project: Option<&str>,
+) -> (Arc<Mutex<RagCache>>, Arc<std::sync::atomic::AtomicBool>) {
+    type Entry = (Arc<Mutex<RagCache>>, Arc<std::sync::atomic::AtomicBool>);
+    static CACHES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Entry>>> =
+        std::sync::OnceLock::new();
+    let fresh = || -> Entry {
+        (
+            Arc::new(Mutex::new(RagCache::default())),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+    };
+    let Some(p) = project else { return fresh() };
+    let mut map = CACHES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let e = map.entry(p.to_string()).or_insert_with(fresh);
+    (Arc::clone(&e.0), Arc::clone(&e.1))
 }
 
 /// Whether to kick a background embed pass: this call re-chunked something; or this proxy has
@@ -331,6 +363,7 @@ impl DaemonProxy {
     }
 
     fn build(sock: PathBuf, project: Option<String>, client: String, auto_spawn: bool) -> Self {
+        let rag = shared_rag(project.as_deref());
         let session_token = uuid::Uuid::new_v4().simple().to_string();
         let shared_room = std::env::var("ROZUM_MEETING_ROOM")
             .ok()
@@ -356,8 +389,8 @@ impl DaemonProxy {
                 wakeup_task: None,
                 presence_announced: false,
             })),
-            rag: Arc::new(Mutex::new(RagCache::default())),
-            rag_embedding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rag: rag.0,
+            rag_embedding: rag.1,
             tool_router: Self::tool_router(),
             last_active: Arc::new(AtomicU64::new(now_epoch())),
             task_state,
@@ -766,7 +799,22 @@ impl DaemonProxy {
         // not perform the FIRST build, which is the full 23.5 s and would land inside a tool call
         // in every fresh checkout. Building the index stays an explicit `rozum rag index`, and
         // the no-index answer below says so.
-        if rozum_agent::rag_chunk::index_path(&root).exists() {
+        // Per-stage times for the log line: a search reads 0.2 s one call and 2 s the next, and
+        // without these nobody can say which stage the difference lives in.
+        let t0 = std::time::Instant::now();
+        let ipath = rozum_agent::rag_chunk::index_path(&root);
+        let sig = {
+            let r = root.clone();
+            tokio::task::spawn_blocking(move || rozum_agent::rag_chunk::tree_signature(&r))
+                .await
+                .ok()
+                .flatten()
+        };
+        let unchanged = match (sig, self.rag.lock().await.refreshed_at) {
+            (Some(s), Some((last, at))) => s == last && file_mtime(&ipath) == at,
+            _ => false,
+        };
+        if ipath.exists() && !unchanged {
             let root_for_refresh = root.clone();
             let refreshed = tokio::task::spawn_blocking(move || {
                 rozum_agent::rag_chunk::reindex_incremental(&root_for_refresh, &mut |_, _, _| {})
@@ -791,8 +839,12 @@ impl DaemonProxy {
             // not wait ~seconds of embedding), one in flight at a time, at most once per index
             // version; the store's per-batch saves make it interruptible.
             kick_embed_if_due(&self.rag, &self.rag_embedding, &root, rechunked).await;
+            if let Some(s) = sig {
+                self.rag.lock().await.refreshed_at = Some((s, file_mtime(&ipath)));
+            }
         }
 
+        let t_refresh = t0.elapsed();
         let (index, vecs, chunks, age) = {
             let mut cache = self.rag.lock().await;
             let path = rozum_agent::rag_chunk::index_path(&root);
@@ -861,10 +913,12 @@ impl DaemonProxy {
         // be a copy of it. The query embed stays gateway-only and behind `rag_embed_enabled()`:
         // in this process the in-process embedder aborts the server at Metal init under the
         // agent jail, which is exactly why the vector is a parameter and not fetched in there.
+        let t_load = t0.elapsed();
         let qv = match rag_embed_enabled() {
             true => embed_query_via_gateway(&query).await,
             false => None,
         };
+        let t_embed = t0.elapsed();
         let (picked, fused) = rozum_agent::rag_embed::rank_fused(
             index.as_ref(),
             vecs.as_ref().map(|v| v.as_ref() as &dyn rozum_agent::rag_embed::VectorIndex),
@@ -872,6 +926,7 @@ impl DaemonProxy {
             &query,
             k,
         );
+        let t_rank = t0.elapsed();
         let results: Vec<Value> = picked
             .into_iter()
             .map(|h| json!({ "id": h.id, "score": h.score, "text": h.text }))
@@ -884,8 +939,13 @@ impl DaemonProxy {
         // file instead of trusting that the call compiled. `proxy_log` is what every other
         // line in this file already reaches an operator through (see `initialize` above).
         proxy_log(&format!(
-            "rag.search query={query:?} top_k={k} fused={fused} hits={} chunks={chunks} stale={stale}",
-            results.len()
+            "rag.search query={query:?} top_k={k} fused={fused} hits={} chunks={chunks} stale={stale} \
+             ms: refresh={} load={} embed={} rank={} skipped_refresh={unchanged}",
+            results.len(),
+            t_refresh.as_millis(),
+            (t_load - t_refresh).as_millis(),
+            (t_embed - t_load).as_millis(),
+            (t_rank - t_embed).as_millis()
         ));
         tool_text(&json!({
             "results": results,
@@ -1420,7 +1480,7 @@ async fn embed_missing_vectors(root: &std::path::Path) {
     // double GPU work on the machine's busiest resource. Skip, not wait: the holder's results
     // land on disk for everyone.
     let Ok(Some(_lock)) = rozum_agent::rag_embed::try_embed_lock(root) else { return };
-    let chunks = rozum_agent::rag_chunk::saved_chunk_texts(root);
+    let chunks = rozum_agent::rag_embed::embedding_units(root);
     if chunks.is_empty() {
         return;
     }
@@ -1638,6 +1698,21 @@ mod tests {
     /// rag-vectors-follow-index (2026-09-25): the git hooks refresh the LEXICAL index with
     /// `rozum rag index`, so the search's own incremental pass finds nothing to re-chunk. The
     /// embed pass was keyed on that alone and never ran — okay's vectors stayed three weeks old.
+    /// rag-search-skip-refresh: sessions of one project share one RAG cache; another project,
+    /// or none, gets its own.
+    #[test]
+    fn sessions_of_one_project_share_one_rag_cache() {
+        let a = DaemonProxy::build("/nonexistent.sock".into(), Some("/p/one".into()), "x".into(), false);
+        let b = DaemonProxy::build("/nonexistent.sock".into(), Some("/p/one".into()), "y".into(), false);
+        let c = DaemonProxy::build("/nonexistent.sock".into(), Some("/p/two".into()), "x".into(), false);
+        let d = DaemonProxy::build("/nonexistent.sock".into(), None, "x".into(), false);
+        let e = DaemonProxy::build("/nonexistent.sock".into(), None, "x".into(), false);
+        assert!(Arc::ptr_eq(&a.rag, &b.rag), "same project, same cache");
+        assert!(Arc::ptr_eq(&a.rag_embedding, &b.rag_embedding), "and one embed flag");
+        assert!(!Arc::ptr_eq(&a.rag, &c.rag), "another project, another cache");
+        assert!(!Arc::ptr_eq(&d.rag, &e.rag), "no project: private caches");
+    }
+
     #[test]
     fn an_index_newer_than_its_vectors_is_due_an_embed_pass_once() {
         let t = |s: u64| Some(UNIX_EPOCH + Duration::from_secs(s));
