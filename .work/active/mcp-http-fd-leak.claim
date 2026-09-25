@@ -1,0 +1,6 @@
+feature/mcp-http-fd-leak 2026-09-25T10:21:42Z
+agent: claude-code (okay session 013hkJA4B7z8s2CRHjfv668p, operator ask)
+heartbeat: 2026-09-25T10:21:42Z
+status: in-progress
+done-so-far: cause found — wakeup_task holds Arc<State> forever, so a closed HTTP session keeps its daemon socket
+next: failing test; Weak<State> + transport-closed exit; cargo test; land
