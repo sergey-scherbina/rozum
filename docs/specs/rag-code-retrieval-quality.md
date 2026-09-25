@@ -221,6 +221,30 @@ story behind it, and it will be proposed again.
 
 Current honest standing over 26 questions: **top-1 9/26, top-5 15/26**, 80% implementation in the
 slots, remaining gap owned by ranking, not vocabulary.
+### okay: three ranking levers measured (2026-09-25, rag-ranking-levers)
+
+On `scripts/rag-eval/okay-code.json` (20 Scala-code questions) and `okay-docs.json` (10 prose
+questions), fused search on okay after rag-scala-items: code top-1 4/20, top-5 10/20, MRR 0.36
+(right FILE first 6/20, in top 5 14/20); docs 9/10, MRR 0.90. What was left weak was ranking of
+code. Three levers, each simulated on the served top-20 before any code was written:
+
+- **File-level aggregation** — a chunk's score plus a bonus for other chunks of its file in the
+  same list (alpha 0.25 / 0.5 / 1.0): MRR 0.353 / 0.336 / 0.356 against 0.362. REFUTED — noise.
+- **A larger embedder as a reranker** — `Qwen3-Embedding-4B-4bit-DWQ` (on disk, served by the
+  gateway through `model`) re-embedding the query and the 20 candidates:
+  4B alone: code 5/20, MRR 0.396; docs 6/10, MRR 0.700.
+  RRF of the served rank and the 4B rank: code **8/20, MRR 0.483**; docs 7/10, MRR 0.758.
+  NOT TAKEN: code doubles its top-1 but prose loses two, and it costs 4.6-5.7 s per query
+  against ~0.1 s — a search that slow stops being the cheap first step it exists to be. A full
+  switch of the corpus embedder to 4B was not measured: hours of re-embedding per project,
+  vectors 2.5x larger, and the reranker's prose regression gives no reason to expect a net win.
+  Worth revisiting as an OPT-IN deep mode (a `rerank` argument) if code questions dominate.
+- **Preferring the session's own tree** (okay's `okay2/` and `scala2/` copies of the core win
+  5/20 code questions outright; excluding them would lift top-1 4 -> 5): NOT feasible as asked —
+  the proxy knows only `?project=`, the repo root, and agents work from worktrees
+  (`../okay-wt-<slug>`), so nothing in a session says which tree it works on. A global demotion
+  would be a regression for okay2's own agents.
+
 ## Out of scope
 
 - **Embeddings** (`rag-embeddings-backend`) — the justified next step, and it lands behind the
