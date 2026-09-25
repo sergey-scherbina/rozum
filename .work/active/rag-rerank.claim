@@ -1,6 +1,0 @@
-feature/rag-rerank 2026-09-25T16:24:17Z
-agent: claude-code (okay session 013hkJA4B7z8s2CRHjfv668p, operator ask: fast first, precise on rerank)
-heartbeat: 2026-09-25T16:24:17Z
-status: in-progress
-done-so-far: 4B RRF rerank measured: code MRR 0.36 -> 0.48, prose 0.90 -> 0.76, +5 s cold
-next: rag.search rerank arg; background prefetch of the 4B vectors after every fast search; cache in the shared RagCache; eval both modes, time the warm rerank
