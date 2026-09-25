@@ -274,6 +274,135 @@ impl VectorIndex for VecStore {
     }
 }
 
+/// The vectors laid out for SEARCHING (rag-compact-sweep): one contiguous `i8` matrix plus a
+/// scale per row — the `RZV2` bytes as they are on disk, never widened — and the sweep split
+/// across up to [`SWEEP_THREADS`] scoped threads.
+///
+/// [`VecStore`] keeps `HashMap<String, Vec<f32>>` because the EMBED passes insert, prune and
+/// save; searching it walked a hash map of 50k separate heap vectors in one thread (50-100 ms on
+/// okay's 50k x 1024, most of a search) and held ~205 MB of f32 per project resident in every
+/// proxy. This holds ~51 MB and ranks the same: `dot(q, b) * scale / 127` is the dequantised
+/// dot product with the scale factored out, so orders differ only where two scores tie to the
+/// last float bit.
+pub struct SearchVecs {
+    pub dim: usize,
+    ids: Vec<String>,
+    data: Vec<i8>,
+    scales: Vec<f32>,
+}
+
+/// At most this many threads per sweep: the box is shared with builds and models, and past a
+/// few threads a 51 MB scan is memory-bound anyway.
+pub const SWEEP_THREADS: usize = 4;
+
+impl SearchVecs {
+    /// Read a vector file straight into the search layout; `None` like [`VecStore::load`] for a
+    /// missing, corrupt or wrong-dimension file. `RZV1` (f32) rows are quantised the way
+    /// [`VecStore::save`] would write them.
+    pub fn load(path: &Path, expect_dim: Option<usize>) -> Option<Self> {
+        let bytes = fs::read(path).ok()?;
+        let mut at = 0usize;
+        let take = |at: &mut usize, n: usize| -> Option<&[u8]> {
+            let s = bytes.get(*at..*at + n)?;
+            *at += n;
+            Some(s)
+        };
+        let magic: [u8; 4] = take(&mut at, 4)?.try_into().ok()?;
+        let v2 = &magic == MAGIC_V2;
+        if !v2 && &magic != MAGIC_V1 {
+            return None;
+        }
+        let dim = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?) as usize;
+        if dim == 0 || expect_dim.is_some_and(|d| d != dim) {
+            return None;
+        }
+        let count = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?) as usize;
+        let mut out = Self {
+            dim,
+            ids: Vec::with_capacity(count),
+            data: Vec::with_capacity(count * dim),
+            scales: Vec::with_capacity(count),
+        };
+        for _ in 0..count {
+            let id_len = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?) as usize;
+            out.ids.push(String::from_utf8(take(&mut at, id_len)?.to_vec()).ok()?);
+            if v2 {
+                out.scales.push(f32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?));
+                out.data.extend(take(&mut at, dim)?.iter().map(|&b| b as i8));
+            } else {
+                let v: Vec<f32> = take(&mut at, dim * 4)?
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().expect("chunks_exact(4)")))
+                    .collect();
+                let scale = v.iter().fold(0.0f32, |m, x| m.max(x.abs())).max(1e-12);
+                out.scales.push(scale);
+                out.data.extend(v.iter().map(|x| (x / scale * 127.0).round().clamp(-127.0, 127.0) as i8));
+            }
+        }
+        Some(out)
+    }
+
+    /// Top-`k` `(id, score)` by dot product, best first.
+    pub fn rank(&self, query: &[f32], k: usize) -> Vec<(String, f32)> {
+        let n = self.ids.len();
+        if n == 0 || k == 0 || query.len() != self.dim {
+            return Vec::new();
+        }
+        let dim = self.dim;
+        let score = |row: usize| -> f32 {
+            let v = &self.data[row * dim..(row + 1) * dim];
+            let dot: f32 = v.iter().zip(query).map(|(&b, &q)| b as f32 * q).sum();
+            dot * self.scales[row] / 127.0
+        };
+        // Each thread keeps its own top-k; the merge then picks from threads * k candidates.
+        let top = |lo: usize, hi: usize| -> Vec<(f32, usize)> {
+            let mut s: Vec<(f32, usize)> = (lo..hi).map(|r| (score(r), r)).collect();
+            let kk = k.min(s.len());
+            if kk > 0 && kk < s.len() {
+                s.select_nth_unstable_by(kk - 1, |a, b| b.0.total_cmp(&a.0));
+                s.truncate(kk);
+            }
+            s
+        };
+        let threads = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .clamp(1, SWEEP_THREADS)
+            .min(n.div_ceil(4096).max(1));
+        let mut all: Vec<(f32, usize)> = if threads == 1 {
+            top(0, n)
+        } else {
+            let per = n.div_ceil(threads);
+            std::thread::scope(|sc| {
+                let hs: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let (lo, hi) = (t * per, ((t + 1) * per).min(n));
+                        sc.spawn(move || top(lo, hi))
+                    })
+                    .collect();
+                hs.into_iter().flat_map(|h| h.join().expect("sweep thread")).collect()
+            })
+        };
+        let k = k.min(all.len());
+        all.select_nth_unstable_by(k - 1, |a, b| b.0.total_cmp(&a.0));
+        all.truncate(k);
+        all.sort_by(|a, b| b.0.total_cmp(&a.0));
+        all.into_iter().map(|(sc, r)| (self.ids[r].clone(), sc)).collect()
+    }
+}
+
+impl VectorIndex for SearchVecs {
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn len(&self) -> usize {
+        self.ids.len()
+    }
+    fn search(&self, query: &[f32], k: usize) -> Vec<(String, f32)> {
+        self.rank(query, k)
+    }
+}
+
 /// What gets a vector: every saved chunk, with a chunk past [`crate::rag_chunk::MAX_CHUNK_BYTES`]
 /// cut into pieces (`<id>`, `<id>~2`, ...) so the embedder, which reads ~1 KB of a text, sees
 /// all of it (rag-split-oversized). The lexical index keeps the whole chunk; [`parent_id`] maps
@@ -927,6 +1056,67 @@ mod tests {
         let mut back = VecStore::load(&path, None).unwrap();
         assert!(plan_embedding(&old, &mut back).1.is_empty(), "hash reloaded");
         assert_eq!(plan_embedding(&edited, &mut back).1.len(), 1);
+    }
+
+    /// A random unit vector (the same generator `sweep_latency_curve` uses).
+    fn unit(seed: &mut u64, dim: usize) -> Vec<f32> {
+        let mut v: Vec<f32> = (0..dim)
+            .map(|_| {
+                *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((*seed >> 33) as f32 / (1u64 << 31) as f32) - 0.5
+            })
+            .collect();
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        v.iter_mut().for_each(|x| *x /= n);
+        v
+    }
+
+    /// rag-compact-sweep: the i8 layout ranks like the f32 store it replaces for searching.
+    #[test]
+    fn the_compact_sweep_ranks_like_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.bin");
+        let mut seed = 7u64;
+        let mut st = VecStore::new(64);
+        for i in 0..10_000 {
+            st.vecs.insert(format!("f{i}.md#s"), unit(&mut seed, 64));
+        }
+        st.save(&path).unwrap();
+        let store = VecStore::load(&path, None).unwrap();
+        let compact = SearchVecs::load(&path, None).unwrap();
+        assert_eq!(compact.len(), store.vecs.len());
+        for _ in 0..20 {
+            let q = unit(&mut seed, 64);
+            let a: Vec<String> = store.rank(&q, 20).into_iter().map(|(i, _)| i).collect();
+            let b: Vec<String> = compact.rank(&q, 20).into_iter().map(|(i, _)| i).collect();
+            assert_eq!(a, b, "same top-20, same order");
+        }
+    }
+
+    /// The sweep on a REAL store, old against new: `RAG_BENCH_VECTORS=<rag-vectors.bin>`.
+    #[test]
+    #[ignore = "needs RAG_BENCH_VECTORS pointing at a real vector file"]
+    fn bench_the_sweep_on_a_real_store() {
+        let Ok(p) = std::env::var("RAG_BENCH_VECTORS") else { return };
+        let path = Path::new(&p);
+        let store = VecStore::load(path, None).unwrap();
+        let compact = SearchVecs::load(path, None).unwrap();
+        let queries: Vec<Vec<f32>> = store.vecs.values().step_by(997).take(30).cloned().collect();
+        let (mut t_old, mut t_new, mut same) = (0u128, 0u128, 0usize);
+        for q in &queries {
+            let t = std::time::Instant::now();
+            let a: Vec<String> = store.rank(q, 60).into_iter().map(|(i, _)| i).collect();
+            t_old += t.elapsed().as_micros();
+            let t = std::time::Instant::now();
+            let b: Vec<String> = compact.rank(q, 60).into_iter().map(|(i, _)| i).collect();
+            t_new += t.elapsed().as_micros();
+            same += usize::from(a == b);
+        }
+        let n = queries.len() as u128;
+        eprintln!(
+            "sweep over {} x {}: old {} us, new {} us per query; identical top-60 in {same}/{}",
+            compact.len(), compact.dim, t_old / n, t_new / n, queries.len()
+        );
     }
 
     /// rag-split-oversized: a piece's vector hit counts for its chunk, once, at its best place.

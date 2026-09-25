@@ -1007,7 +1007,7 @@ pub fn project_retrieval_tools(root: &Path) -> Option<ProjectRetrieval> {
         cache: tokio::sync::Mutex::new(Cached {
             index: Arc::new(index),
             indexed_at: fs::metadata(index_path(root)).and_then(|m| m.modified()).ok(),
-            vecs: crate::rag_embed::VecStore::load(&crate::rag_embed::vectors_path(root), None)
+            vecs: crate::rag_embed::SearchVecs::load(&crate::rag_embed::vectors_path(root), None)
                 .map(Arc::new),
             vecs_at: fs::metadata(crate::rag_embed::vectors_path(root))
                 .and_then(|m| m.modified())
@@ -1019,7 +1019,7 @@ pub fn project_retrieval_tools(root: &Path) -> Option<ProjectRetrieval> {
 struct Cached {
     index: Arc<LexicalIndex>,
     indexed_at: Option<std::time::SystemTime>,
-    vecs: Option<Arc<crate::rag_embed::VecStore>>,
+    vecs: Option<Arc<crate::rag_embed::SearchVecs>>,
     vecs_at: Option<std::time::SystemTime>,
 }
 
@@ -1033,7 +1033,7 @@ impl ProjectRetrieval {
     /// Refresh the index if the tree moved, then reload whichever of the two files changed.
     /// Same order as the servers: the answer should describe the tree as it is now, but a
     /// refresh that fails must degrade to searching what is on disk, never to failing the call.
-    async fn fresh(&self) -> (Arc<LexicalIndex>, Option<Arc<crate::rag_embed::VecStore>>) {
+    async fn fresh(&self) -> (Arc<LexicalIndex>, Option<Arc<crate::rag_embed::SearchVecs>>) {
         if index_path(&self.root).exists() {
             let root = self.root.clone();
             let _ = tokio::task::spawn_blocking(move || {
@@ -1053,7 +1053,7 @@ impl ProjectRetrieval {
         let vpath = crate::rag_embed::vectors_path(&self.root);
         let v_mtime = fs::metadata(&vpath).and_then(|m| m.modified()).ok();
         if v_mtime != c.vecs_at {
-            c.vecs = crate::rag_embed::VecStore::load(&vpath, None).map(Arc::new);
+            c.vecs = crate::rag_embed::SearchVecs::load(&vpath, None).map(Arc::new);
             c.vecs_at = v_mtime;
         }
         (c.index.clone(), c.vecs.clone())

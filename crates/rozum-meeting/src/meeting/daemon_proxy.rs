@@ -154,7 +154,7 @@ struct RagCache {
     tried: bool,
     /// Chunk vectors, loaded beside the index and reloaded on ITS mtime — kept separate because
     /// the vectors file is written by the embedding warmup, later than the index itself.
-    vecs: Option<Arc<rozum_agent::rag_embed::VecStore>>,
+    vecs: Option<Arc<rozum_agent::rag_embed::SearchVecs>>,
     vecs_at: Option<SystemTime>,
     /// The index version (its mtime) the last embed pass was kicked for, so a search after a
     /// pass that found nothing to embed — which saves nothing, leaving the vectors file older
@@ -870,7 +870,7 @@ impl DaemonProxy {
             if v_mtime.is_some() && v_mtime != cache.vecs_at {
                 cache.vecs_at = v_mtime;
                 cache.vecs =
-                    rozum_agent::rag_embed::VecStore::load(&vpath, None).map(Arc::new);
+                    rozum_agent::rag_embed::SearchVecs::load(&vpath, None).map(Arc::new);
             }
             let age = cache
                 .indexed_at

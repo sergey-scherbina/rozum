@@ -1,5 +1,25 @@
 # Changelog
 
+## rag-compact-sweep — the vector sweep reads i8 rows on a few threads
+Completed: 2026-09-25
+
+After rag-split-oversized the ranking stage was 50-130 ms of a ~150 ms search, nearly all of it
+the exact vector sweep, and HNSW was the asked-about fix. Not taken: vectors change on every
+commit (HNSW deletes are tombstones plus rebuilds of 50k x 1024), it would add a second on-disk
+structure every rozum binary must agree on, and it gives up recall — for ~100 ms.
+
+Instead `SearchVecs`: the `RZV2` bytes as they are on disk — one contiguous `i8` matrix and a
+scale per row, never widened to f32 — swept on up to `SWEEP_THREADS` (4) scoped threads, each
+keeping its own top-k. `dot(q, b) * scale / 127` is the dequantised dot product with the scale
+factored out, so the order is the store's. `VecStore` stays what the embed passes use; the
+proxy's RAG cache and `ProjectRetrieval` now hold `SearchVecs`.
+
+Measured on okay's real store (50,545 x 1024, box under load): 28.2 ms -> 6.6 ms per query,
+identical top-60 in 30/30 queries (`bench_the_sweep_on_a_real_store`, ignored, run with
+`RAG_BENCH_VECTORS`). Resident per project: ~205 MB of f32 -> ~51 MB. rag-eval floor 8/26
+unchanged. Test: `the_compact_sweep_ranks_like_the_store` (10k random vectors, 20 queries, same
+top-20 in the same order).
+
 ## rag-split-oversized — long chunks are embedded whole; sessions share one RAG cache
 Completed: 2026-09-25
 
