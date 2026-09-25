@@ -1,5 +1,35 @@
 # Changelog
 
+## rag-rerank — fast first, precise on `rerank: true`
+Completed: 2026-09-25
+
+The operator's ask: the answer should come very fast, and asking again with a rerank argument
+should be very precise. rag-ranking-levers had measured the precise half: re-ordering the fused
+top 20 by RRF of the served rank and a larger embedder's rank (`Qwen3-Embedding-4B`) took okay's
+code questions from 4/20 to 8/20 top-1 — at ~5 s per query, which is why it could not be the
+default.
+
+`rag.search` takes `rerank: bool`. The plain call answers exactly as before (~0.1 s) and then, in
+the background, embeds its top 20 candidates and the query with the rerank model into the
+project's shared cache (`rerank_vecs` by chunk id + text hash, `rerank_queries`; bounded, cleared
+past the cap). `rerank: true` recomputes the same 20 candidates and fuses (`rerank_order`, RRF
+k = 60, ties to the served order); when the prefetch ran, every vector is a cache hit. A rerank
+that arrives while the prefetch for its query is still running waits for it through
+`rerank_gate` instead of embedding the same candidates beside it (measured 12-16 s side by side,
+~5 s once). The plain answer carries a `rerank_hint`; the tool description says the rerank helps
+CODE questions, not prose. `ROZUM_RAG_RERANK_MODEL` picks the model,
+`ROZUM_RAG_RERANK_PREFETCH=0` turns the background work off. `scripts/rag-eval/run.py --mode
+both [--pause s]` measures the flow: the plain call, then the same query with `rerank: true`.
+
+Measured on okay, fresh proxy each time (so the cache starts empty):
+- plain: median 0.1-0.3 s; code 4/20 top-1, MRR 0.357; docs 9/10, MRR 0.911.
+- rerank asked 6 s after the plain call (an agent reading the first answer): median 0.25 s (max
+  4.7 s, the call that loaded the 4B model); code **8/20 top-1, 12/20 top-5, MRR 0.483**, right
+  file first 9/20 (was 6); docs 7/10, MRR 0.758 — worse on prose, as measured before.
+- rerank asked immediately: median 5.35 s (it waits for the prefetch), same ranks.
+
+Test: `rerank_order_fuses_served_and_model_ranks`. The gateway path is verified live only.
+
 ## rag-scala-items — Scala is chunked by definition; an eval for okay's code and docs
 Completed: 2026-09-25
 

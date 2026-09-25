@@ -81,6 +81,10 @@ pub struct RagSearchParams {
     pub query: String,
     /// How many chunks to return. Default 5, capped at 20.
     pub top_k: Option<u32>,
+    /// Re-rank with a larger embedding model: slower, more precise on CODE. Ask the plain
+    /// question first; asking it again with `rerank: true` is usually quick, because the plain
+    /// search prepares the re-ranking in the background.
+    pub rerank: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -160,6 +164,18 @@ struct RagCache {
     /// pass that found nothing to embed — which saves nothing, leaving the vectors file older
     /// than the index — does not kick the same pass again on every call.
     embed_pass_for: Option<SystemTime>,
+    /// The rerank model's vectors: chunk id -> (hash of its text, vector), and query -> vector.
+    /// Filled by the background prefetch after every plain search and by `rerank: true`; bounded
+    /// by [`RERANK_CACHE_MAX`] / [`RERANK_QUERY_CACHE_MAX`] (cleared, not evicted, past the cap).
+    rerank_vecs: std::collections::HashMap<String, (u64, Vec<f32>)>,
+    rerank_queries: std::collections::HashMap<String, Vec<f32>>,
+    /// One background prefetch per project at a time.
+    rerank_prefetching: bool,
+    /// Held for the whole of a rerank embedding (prefetch or `rerank: true`): a `rerank: true`
+    /// that arrives while the prefetch for its query is still running WAITS for it and then finds
+    /// the cache full, instead of embedding the same candidates a second time next to it —
+    /// measured 12-16 s when the two ran side by side against ~5 s for one.
+    rerank_gate: Arc<Mutex<()>>,
     /// The tree signature and index mtime right after this proxy's last refresh. When both are
     /// unchanged at the next search, the refresh would reuse everything, so it is skipped
     /// (rag-search-skip-refresh).
@@ -192,6 +208,124 @@ fn shared_rag(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let e = map.entry(p.to_string()).or_insert_with(fresh);
     (Arc::clone(&e.0), Arc::clone(&e.1))
+}
+
+/// How many fused candidates `rerank: true` re-orders (rag-rerank). Measured at 20 on okay.
+const RERANK_POOL: usize = 20;
+const RERANK_CACHE_MAX: usize = 8000;
+const RERANK_QUERY_CACHE_MAX: usize = 256;
+
+/// The larger embedding model the rerank uses: `ROZUM_RAG_RERANK_MODEL`, default the 4B Qwen3
+/// embedder — on okay's code eval its RRF with the served rank took top-1 4 -> 8/20 (MRR 0.36 ->
+/// 0.48) and cost prose 9 -> 7/10 (docs/specs/rag-code-retrieval-quality.md).
+fn rerank_model() -> String {
+    std::env::var("ROZUM_RAG_RERANK_MODEL")
+        .ok()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "mlx-community/Qwen3-Embedding-4B-4bit-DWQ".into())
+}
+
+/// Whether a plain search prepares the rerank in the background (`ROZUM_RAG_RERANK_PREFETCH=0`
+/// turns it off: no GPU work beyond what was asked).
+fn rerank_prefetch_enabled() -> bool {
+    !std::env::var("ROZUM_RAG_RERANK_PREFETCH").is_ok_and(|v| v == "0")
+}
+
+/// Embed `texts` with a NAMED gateway model; `None` on any failure, like the query embed.
+async fn embed_with_model(texts: &[String], query: bool, model: &str) -> Option<Vec<Vec<f32>>> {
+    let url = rozum_agent::rag_embed::gateway_url()?;
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).build().ok()?;
+    let resp = client
+        .post(format!("{url}/v1/embeddings"))
+        .json(&json!({ "model": model, "input": texts, "query": query }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: Value = resp.json().await.ok()?;
+    let rows = v["data"].as_array()?;
+    let out: Vec<Vec<f32>> = rows
+        .iter()
+        .filter_map(|r| r["embedding"].as_array())
+        .map(|e| e.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
+        .collect();
+    (out.len() == texts.len()).then_some(out)
+}
+
+/// The rerank model's vectors for `query` and `cands`, from the project's cache where present
+/// and from the gateway for the rest (then cached). `None` when the gateway cannot answer.
+async fn rerank_vectors(
+    rag: &Mutex<RagCache>,
+    query: &str,
+    cands: &[rozum_agent::rag_lite::Hit],
+) -> Option<(Vec<f32>, Vec<Vec<f32>>)> {
+    use rozum_agent::rag_embed::{distill, text_hash};
+    let gate = Arc::clone(&rag.lock().await.rerank_gate);
+    let _one_at_a_time = gate.lock().await;
+    let (mut qv, mut have): (Option<Vec<f32>>, Vec<Option<Vec<f32>>>) = {
+        let c = rag.lock().await;
+        let have = cands
+            .iter()
+            .map(|h| {
+                c.rerank_vecs
+                    .get(&h.id)
+                    .filter(|(hash, _)| *hash == text_hash(&h.text))
+                    .map(|(_, v)| v.clone())
+            })
+            .collect();
+        (c.rerank_queries.get(query).cloned(), have)
+    };
+    let model = rerank_model();
+    if qv.is_none() {
+        qv = embed_with_model(&[query.to_string()], true, &model).await?.into_iter().next();
+    }
+    let missing: Vec<usize> = (0..cands.len()).filter(|&i| have[i].is_none()).collect();
+    if !missing.is_empty() {
+        let texts: Vec<String> =
+            missing.iter().map(|&i| distill(&cands[i].id, &cands[i].text)).collect();
+        let got = embed_with_model(&texts, false, &model).await?;
+        for (&i, v) in missing.iter().zip(got) {
+            have[i] = Some(v);
+        }
+    }
+    let qv = qv?;
+    let vecs: Vec<Vec<f32>> = have.into_iter().collect::<Option<_>>()?;
+    let mut c = rag.lock().await;
+    if c.rerank_vecs.len() + cands.len() > RERANK_CACHE_MAX {
+        c.rerank_vecs.clear();
+    }
+    for (h, v) in cands.iter().zip(&vecs) {
+        c.rerank_vecs.insert(h.id.clone(), (text_hash(&h.text), v.clone()));
+    }
+    if c.rerank_queries.len() >= RERANK_QUERY_CACHE_MAX {
+        c.rerank_queries.clear();
+    }
+    c.rerank_queries.insert(query.to_string(), qv.clone());
+    Some((qv, vecs))
+}
+
+/// The rerank order of `n` candidates served in rank order: reciprocal-rank fusion of the served
+/// rank and the rank by `scores` (the rerank model's cosine), k = 60, ties to the served order.
+/// Fusion rather than the model alone, because alone it LOST on prose (6/10 against 9/10), while
+/// fused it kept 7/10 and took code to 8/20.
+fn rerank_order(scores: &[f32]) -> Vec<usize> {
+    let n = scores.len();
+    let mut by_model: Vec<usize> = (0..n).collect();
+    by_model.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+    let mut model_rank = vec![0usize; n];
+    for (r, &i) in by_model.iter().enumerate() {
+        model_rank[i] = r;
+    }
+    let rrf = |i: usize| 1.0 / (60.0 + i as f64) + 1.0 / (60.0 + model_rank[i] as f64);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| rrf(b).total_cmp(&rrf(a)).then(a.cmp(&b)));
+    order
+}
+
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Whether to kick a background embed pass: this call re-chunked something; or this proxy has
@@ -768,10 +902,13 @@ impl DaemonProxy {
          unfamiliar area whose shape you need before the detail. Do NOT use it when you already \
          know the string, the symbol, or the path — grep and Read are exact, instant and always \
          current, and this index can be stale (every result reports its age). Results name \
-         `path#item`, so treat a hit as a pointer to open, not as the answer."
+         `path#item`, so treat a hit as a pointer to open, not as the answer. The plain call is \
+         fast; when its hits miss, repeat the same query with `rerank: true` for a larger model's \
+         ordering of the top 20 — more precise on code questions, not on prose."
     )]
     pub async fn rag_search(&self, params: Parameters<RagSearchParams>) -> CallToolResult {
-        let RagSearchParams { query, top_k } = params.0;
+        let RagSearchParams { query, top_k, rerank } = params.0;
+        let rerank = rerank.unwrap_or(false);
         if query.trim().is_empty() {
             return tool_text(&json!({ "error": "`query` must not be empty" }));
         }
@@ -919,13 +1056,39 @@ impl DaemonProxy {
             false => None,
         };
         let t_embed = t0.elapsed();
-        let (picked, fused) = rozum_agent::rag_embed::rank_fused(
-            index.as_ref(),
-            vecs.as_ref().map(|v| v.as_ref() as &dyn rozum_agent::rag_embed::VectorIndex),
-            qv.as_deref(),
-            &query,
-            k,
-        );
+        let vref = vecs.as_ref().map(|v| v.as_ref() as &dyn rozum_agent::rag_embed::VectorIndex);
+        let (mut picked, fused) =
+            rozum_agent::rag_embed::rank_fused(index.as_ref(), vref, qv.as_deref(), &query, k);
+        let mut reranked = false;
+        if rerank {
+            let (cands, _) = rozum_agent::rag_embed::rank_fused(
+                index.as_ref(),
+                vref,
+                qv.as_deref(),
+                &query,
+                RERANK_POOL.max(k),
+            );
+            if let Some((q4, c4)) = rerank_vectors(&self.rag, &query, &cands).await {
+                let scores: Vec<f32> = c4.iter().map(|v| dot(&q4, v)).collect();
+                picked = rerank_order(&scores).into_iter().take(k).map(|i| cands[i].clone()).collect();
+                reranked = true;
+            }
+        } else if rag_embed_enabled()
+            && rerank_prefetch_enabled()
+            && !std::mem::replace(&mut self.rag.lock().await.rerank_prefetching, true)
+        {
+            // Prepare the answer to the likely next call — the same question with
+            // `rerank: true` — without making this one wait for it.
+            let (rag, ix, vs, qv2, q2) =
+                (Arc::clone(&self.rag), Arc::clone(&index), vecs.clone(), qv.clone(), query.clone());
+            tokio::spawn(async move {
+                let vref = vs.as_ref().map(|v| v.as_ref() as &dyn rozum_agent::rag_embed::VectorIndex);
+                let (cands, _) =
+                    rozum_agent::rag_embed::rank_fused(ix.as_ref(), vref, qv2.as_deref(), &q2, RERANK_POOL);
+                let _ = rerank_vectors(&rag, &q2, &cands).await;
+                rag.lock().await.rerank_prefetching = false;
+            });
+        }
         let t_rank = t0.elapsed();
         let results: Vec<Value> = picked
             .into_iter()
@@ -939,7 +1102,7 @@ impl DaemonProxy {
         // file instead of trusting that the call compiled. `proxy_log` is what every other
         // line in this file already reaches an operator through (see `initialize` above).
         proxy_log(&format!(
-            "rag.search query={query:?} top_k={k} fused={fused} hits={} chunks={chunks} stale={stale} \
+            "rag.search query={query:?} top_k={k} fused={fused} rerank={rerank} reranked={reranked} hits={} chunks={chunks} stale={stale} \
              ms: refresh={} load={} embed={} rank={} skipped_refresh={unchanged}",
             results.len(),
             t_refresh.as_millis(),
@@ -950,6 +1113,12 @@ impl DaemonProxy {
         tool_text(&json!({
             "results": results,
             "fused": fused,
+            "reranked": reranked,
+            "rerank_hint": if rerank { Value::Null } else {
+                json!("not what you needed? ask the same query again with rerank: true — a larger \
+                       model re-orders the top 20; more precise on code, usually quick because it \
+                       was prepared in the background")
+            },
             "chunks": chunks,
             "index_age_secs": age,
             // Freshness is `rag-index-freshness` (P1) and is NOT solved here. What IS solved is
@@ -1713,6 +1882,20 @@ mod tests {
         assert!(!Arc::ptr_eq(&d.rag, &e.rag), "no project: private caches");
     }
 
+    /// rag-rerank: the fused order puts the item both rankings like best first, and keeps the
+    /// served order where the model has no opinion.
+    #[test]
+    fn rerank_order_fuses_served_and_model_ranks() {
+        // served order 0,1,2,3; the model prefers 3, then 1
+        let order = rerank_order(&[0.1, 0.8, 0.2, 0.9]);
+        assert_eq!(order[0], 1, "second served, second by model: best fused");
+        assert_eq!(order.len(), 4);
+        // identical model scores: the served order stands
+        assert_eq!(rerank_order(&[0.5, 0.5, 0.5]), vec![0, 1, 2]);
+        // the model agreeing with the served order changes nothing
+        assert_eq!(rerank_order(&[0.9, 0.5, 0.1]), vec![0, 1, 2]);
+    }
+
     #[test]
     fn an_index_newer_than_its_vectors_is_due_an_embed_pass_once() {
         let t = |s: u64| Some(UNIX_EPOCH + Duration::from_secs(s));
@@ -1959,7 +2142,7 @@ mod tests {
             false,
         );
         let r = proxy
-            .rag_search(Parameters(RagSearchParams { query: "admission".into(), top_k: None }))
+            .rag_search(Parameters(RagSearchParams { query: "admission".into(), top_k: None , rerank: None}))
             .await;
         assert_ne!(r.is_error, Some(true), "a missing index is not an error");
         let v = tool_result_json(&r);
@@ -1994,7 +2177,7 @@ mod tests {
             &proxy
                 .rag_search(Parameters(RagSearchParams {
                     query: "zzq-live-pickup-sentinel".into(),
-                    top_k: None,
+                    top_k: None, rerank: None
                 }))
                 .await,
         );
@@ -2014,7 +2197,7 @@ mod tests {
             &proxy
                 .rag_search(Parameters(RagSearchParams {
                     query: "zzq-live-pickup-sentinel".into(),
-                    top_k: None,
+                    top_k: None, rerank: None
                 }))
                 .await,
         );
@@ -2049,7 +2232,7 @@ mod tests {
         let r = proxy
             .rag_search(Parameters(RagSearchParams {
                 query: "resident model admission".into(),
-                top_k: Some(3),
+                top_k: Some(3), rerank: None
             }))
             .await;
         let v = tool_result_json(&r);
@@ -2088,7 +2271,7 @@ mod tests {
         let r = proxy
             .rag_search(Parameters(RagSearchParams {
                 query: "admission".into(),
-                top_k: Some(9999),
+                top_k: Some(9999), rerank: None
             }))
             .await;
         let v = tool_result_json(&r);

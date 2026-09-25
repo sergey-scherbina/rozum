@@ -15,6 +15,10 @@ import argparse, json, re, sys, time, urllib.request
 ap = argparse.ArgumentParser()
 ap.add_argument("questions"); ap.add_argument("project")
 ap.add_argument("--url", default="http://127.0.0.1:8779/mcp"); ap.add_argument("--k", type=int, default=10)
+ap.add_argument("--mode", choices=["plain", "rerank", "both"], default="plain",
+                help="both: the plain query, then the same query with rerank: true right after it — "
+                     "the flow the rerank is built for; scores the SECOND answer, prints both times")
+ap.add_argument("--pause", type=float, default=0.0, help="seconds between the two calls of --mode both")
 a = ap.parse_args()
 U = f"{a.url}?project={a.project}"
 H = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -30,16 +34,28 @@ post({"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
 qs = json.load(open(a.questions))["questions"]
 top1 = top5 = 0; rr = 0.0; f1 = f5 = 0; frr = 0.0
 for i, q in enumerate(qs):
-    t = time.time()
-    _, raw = post({"jsonrpc": "2.0", "id": 10 + i, "method": "tools/call", "params": {"name": "rag.search", "arguments": {"query": q["q"], "top_k": a.k}}}, sid)
-    dt = time.time() - t
+    def ask(rerank, rid):
+        t = time.time()
+        args = {"query": q["q"], "top_k": a.k}
+        if rerank:
+            args["rerank"] = True
+        _, raw = post({"jsonrpc": "2.0", "id": rid, "method": "tools/call", "params": {"name": "rag.search", "arguments": args}}, sid)
+        return raw, time.time() - t
+    if a.mode == "both":
+        _, dt_plain = ask(False, 1000 + i)
+        time.sleep(a.pause)
+        raw, dt = ask(True, 10 + i)
+        dt_note = f"{dt_plain:4.1f}s+"
+    else:
+        raw, dt = ask(a.mode == "rerank", 10 + i)
+        dt_note = ""
     res = json.loads(json.loads(next(l[6:] for l in raw.splitlines() if l.startswith("data: {")))["result"]["content"][0]["text"])["results"]
     rank = next((n + 1 for n, h in enumerate(res) if q["path"] in h["id"].split("#")[0] and re.search(q["def"], h["text"])), None)
     top1 += rank == 1; top5 += bool(rank and rank <= 5); rr += 1 / rank if rank else 0
     frank = next((n + 1 for n, h in enumerate(res) if q["path"] and q["path"] in h["id"].split("#")[0]), None)
     f1 += frank == 1; f5 += bool(frank and frank <= 5); frr += 1 / frank if frank else 0
     first = res[0]["id"] if res else "-"
-    print(f"{('miss' if rank is None else rank):>4} {('-' if frank is None else frank):>3}f  {dt:4.1f}s  {q['q'][:70]:70s}  first: {first[:60]}")
+    print(f"{('miss' if rank is None else rank):>4} {('-' if frank is None else frank):>3}f  {dt_note}{dt:4.1f}s  {q['q'][:70]:70s}  first: {first[:60]}")
 urllib.request.urlopen(urllib.request.Request(U, method="DELETE", headers={"Mcp-Session-Id": sid}))
 n = len(qs)
 print(f"\ntop-1 {top1}/{n}   top-5 {top5}/{n}   MRR {rr / n:.3f}")
