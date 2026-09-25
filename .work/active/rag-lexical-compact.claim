@@ -1,0 +1,6 @@
+feature/rag-lexical-compact 2026-09-25T15:26:07Z
+agent: claude-code (okay session 013hkJA4B7z8s2CRHjfv668p, operator ask)
+heartbeat: 2026-09-25T15:26:07Z
+status: in-progress
+done-so-far: okay lexical index is 245 MB resident for 27 MB of text: one HashMap<String,usize> per doc
+next: interned term ids, sorted (term,count) slices, clone text for top-k only; same scores (rag-eval floor), memory + time measured
