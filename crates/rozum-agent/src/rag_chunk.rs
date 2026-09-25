@@ -391,6 +391,121 @@ pub fn chunk_text(path: &str, text: &str) -> Vec<Chunk> {
     chunks
 }
 
+/// Split a Scala file into definition-sized chunks: one per `def`, `val`, `class`, `object`,
+/// `trait`, `enum`, `given`, `type` or `extension` at the top level or one level in (indent of
+/// at most [`SCALA_MEMBER_INDENT`]), each with the scaladoc, comments and annotations directly
+/// above it (rag-scala-items). Ids read like the Rust ones: `Async.scala#def spawn`.
+///
+/// Scala had no chunker of its own and went through [`chunk_text`], blank-line paragraphs: a
+/// method with a blank line inside fell apart, a scaladoc could land in a different chunk from its
+/// `def`, and a lone `// ---- stage 3` separator became a chunk that ranked. Measured on a
+/// 20-question set about okay's Scala code (`scripts/rag-eval/okay-code.json`): 3/20 top-1.
+///
+/// Line-based, not a parser: a definition is recognised by its leading keywords at a shallow
+/// indent, outside block comments and triple-quoted strings. `case` counts only as `case class`
+/// / `case object` — otherwise it is a `match` arm or an enum case. Local definitions deeper
+/// than the member indent stay inside their enclosing chunk. A file with no definition falls back
+/// to [`chunk_text`].
+pub fn chunk_scala(path: &str, text: &str) -> Vec<Chunk> {
+    const MODS: &[&str] = &[
+        "final", "sealed", "abstract", "implicit", "override", "inline", "transparent", "lazy",
+        "opaque", "open", "infix", "private", "protected", "export",
+    ];
+    const KINDS: &[&str] =
+        &["def", "val", "var", "class", "object", "trait", "enum", "given", "type", "extension"];
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let mut starts: Vec<(usize, String)> = Vec::new(); // (line index, id fragment)
+    let (mut in_block, mut in_triple) = (false, false);
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        let (was_block, was_triple) = (in_block, in_triple);
+        if line.matches("\"\"\"").count() % 2 == 1 {
+            in_triple = !in_triple;
+        }
+        if !in_triple {
+            if t.starts_with("/*") && !t.contains("*/") {
+                in_block = true;
+            } else if in_block && t.contains("*/") {
+                in_block = false;
+            }
+        }
+        if was_block || was_triple || in_block {
+            continue;
+        }
+        let indent = line.len() - t.len();
+        if indent > SCALA_MEMBER_INDENT || t.starts_with("//") || t.starts_with('@') {
+            continue;
+        }
+        let words: Vec<&str> = t.split_whitespace().collect();
+        let mut w = 0;
+        while w < words.len() {
+            let x = words[w];
+            let modifier = MODS.contains(&x)
+                || x.starts_with("private[")
+                || x.starts_with("protected[")
+                || (x == "case" && matches!(words.get(w + 1), Some(&"class") | Some(&"object")));
+            if !modifier {
+                break;
+            }
+            w += 1;
+        }
+        let Some(kind) = words.get(w).copied().filter(|k| KINDS.contains(k)) else { continue };
+        let name: String = words
+            .get(w + 1)
+            .map(|n| n.split(|c: char| "[(:={".contains(c)).next().unwrap_or("").to_string())
+            .filter(|n| !n.is_empty() && kind != "extension")
+            .unwrap_or_default();
+        let frag = if name.is_empty() { kind.to_string() } else { format!("{kind} {name}") };
+        // Pull the start up over the doc comment, comments and annotations directly above.
+        let mut s = i;
+        while s > 0 {
+            let p = lines[s - 1].trim();
+            let attached = p.starts_with("/**")
+                || p.starts_with("/*")
+                || p.starts_with('*')
+                || p.ends_with("*/")
+                || p.starts_with("//")
+                || p.starts_with('@');
+            if p.is_empty() || !attached {
+                break;
+            }
+            s -= 1;
+        }
+        if starts.last().is_some_and(|(prev, _)| *prev >= s) {
+            continue;
+        }
+        starts.push((s, frag));
+    }
+    if starts.is_empty() {
+        return chunk_text(path, text);
+    }
+    let mut chunks: Vec<Chunk> = Vec::new();
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    let mut push = |frag: &str, from: usize, to: usize| {
+        let body: String = lines[from..to].concat();
+        if body.trim().is_empty() {
+            return;
+        }
+        let mut id = format!("{path}#{frag}");
+        let mut n = 1;
+        while !used.insert(id.clone()) {
+            n += 1;
+            id = format!("{path}#{frag}-{n}");
+        }
+        chunks.push(Chunk { id, text: body });
+    };
+    push("preamble", 0, starts[0].0);
+    for (k, (from, frag)) in starts.iter().enumerate() {
+        let to = starts.get(k + 1).map(|(l, _)| *l).unwrap_or(lines.len());
+        push(frag, *from, to);
+    }
+    chunks
+}
+
+/// The deepest indent at which a Scala definition starts its own chunk: the top level and one
+/// level in (members of a top-level `object`/`class`, at okay's 2-space indent).
+pub const SCALA_MEMBER_INDENT: usize = 2;
+
 /// The size past which a chunk is EMBEDDED as several pieces (rag-split-oversized). The embedder
 /// reads 255 tokens of a text (`MAX_TOKENS_PER_TEXT` in rozum-mlx), about 1 KB of prose, so an
 /// 18 KB markdown section — okay's AGENTS.md "Build facts that bite" — was one vector for its
@@ -728,6 +843,8 @@ fn index_one_file(
         chunk_markdown(&rel, &text)
     } else if tree_path {
         chunk_code(&rel, &text)
+    } else if ext == "scala" && text.len() <= MAX_MARKDOWN_TREE_BYTES {
+        chunk_scala(&rel, &text)
     } else {
         chunk_text(&rel, &text)
     };
@@ -792,6 +909,10 @@ fn collect_project_chunks(
 /// incremental pass possible. A flat chunk list would force reuse to be decided by scanning
 /// every chunk id for a path prefix — O(all chunks) per file, 46k × 2648 here, slower than
 /// re-parsing the tree it was meant to avoid.
+/// v3: Scala is chunked by definition ([`chunk_scala`]); a v2 index still SERVES searches, but
+/// its manifest is not reused, so the first pass after the upgrade rebuilds.
+const INDEX_VERSION: u32 = 3;
+
 #[derive(Serialize, Deserialize)]
 struct SavedIndex {
     version: u32,
@@ -919,7 +1040,7 @@ fn write_index(
         ignore_own_dir(dir);
     }
     let saved = SavedIndex {
-        version: 2,
+        version: INDEX_VERSION,
         generated_utc: chrono::Utc::now().to_rfc3339(),
         files,
         chunks: Vec::new(),
@@ -964,6 +1085,11 @@ fn load_manifest(root: &Path) -> HashMap<String, FileChunks> {
     let Ok(saved) = serde_json::from_slice::<SavedIndex>(&bytes) else {
         return HashMap::new();
     };
+    // Below v3 Scala files were paragraph-chunked (rag-scala-items): reusing those entries would
+    // keep the old chunks of every Scala file nobody edits, so the first pass rebuilds.
+    if saved.version < INDEX_VERSION {
+        return HashMap::new();
+    }
     saved.files.into_iter().map(|f| (f.path.clone(), f)).collect()
 }
 
@@ -1650,6 +1776,37 @@ unrelated prose about walking dogs
         assert_ne!(s2, s1, "a new file moves it");
         fs::remove_file(root.join("b.md")).unwrap();
         assert_eq!(tree_signature(root), Some(s1), "a removal moves it back");
+    }
+
+    /// rag-scala-items: definitions at the member indent start chunks, with their scaladoc and
+    /// annotations; match arms, enum cases, local defs and text in comments or strings do not.
+    #[test]
+    fn scala_is_chunked_by_definition_with_its_doc() {
+        let src = "package okay\n\nimport x.y\n\n/** The async effect. */\nobject Async:\n\n  /** Start in the background.\n   * def notABoundary\n   */\n  @inline\n  def spawn[A](p: A): Int =\n    def local = 1\n\n    p match\n      case _ => local\n\n  // ---- stage 3\n\n  final case class Handle(n: Int)\n\n  enum Supervise:\n    case Stop\n  case Restart\n\n  val doc = \"\"\"\ndef inString = 1\n\"\"\"\n";
+        let cs = chunk_scala("Async.scala", src);
+        let ids: Vec<&str> = cs.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "Async.scala#preamble",
+                "Async.scala#object Async",
+                "Async.scala#def spawn",
+                "Async.scala#case class Handle".replace("case class", "class").as_str(),
+                "Async.scala#enum Supervise",
+                "Async.scala#val doc",
+            ]
+        );
+        let spawn = &cs[2].text;
+        assert!(spawn.starts_with("  /** Start in the background."), "the doc is attached: {spawn:?}");
+        assert!(spawn.contains("@inline") && spawn.contains("def local") && spawn.contains("case _"));
+        assert_eq!(cs.iter().map(|c| c.text.as_str()).collect::<String>(), src, "lossless");
+    }
+
+    /// No definition at the member indent: paragraphs, as before.
+    #[test]
+    fn a_scala_file_without_definitions_falls_back_to_paragraphs() {
+        let cs = chunk_scala("s.scala", "// just a comment\n\nprintln(1)\n");
+        assert_eq!(cs[0].id, "s.scala#p1");
     }
 
     /// A v1 index (flat chunk list, no per-file stat) must still SERVE searches, and must fall

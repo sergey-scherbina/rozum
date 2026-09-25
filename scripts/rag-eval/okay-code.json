@@ -1,0 +1,25 @@
+{
+  "about": "Questions about okay's Scala CODE, phrased without the definition's name. A hit counts when its id path matches `path` and its text matches `def`. Run with scripts/rag-eval/run.py.",
+  "questions": [
+    {"q": "start a program in the background and get a handle to wait for its result", "path": "okay-async/src/main/scala/Async.scala", "def": "def spawn\\[A\\]"},
+    {"q": "give up on a computation that has not finished within some milliseconds", "path": "okay-async/src/main/scala/Async.scala", "def": "def timeout\\[A\\]"},
+    {"q": "run two programs and keep whichever one finishes first", "path": "okay-async/src/main/scala/Async.scala", "def": "def race\\[A\\]"},
+    {"q": "commit a group of reads and writes to shared transactional variables all at once", "path": "okay-stm/src/main/scala/Stm.scala", "def": "def atomically"},
+    {"q": "inside a transaction, wait until one of the variables it read is changed by someone else", "path": "okay-stm/src/main/scala/Stm.scala", "def": "def retry\\[A\\]"},
+    {"q": "cap how many calls to a dependency may be in flight at the same time", "path": "okay-resilience/src/main/scala/okay/resilience/Bulkhead.scala", "def": "class Bulkhead"},
+    {"q": "stop calling a failing service for a while after too many errors", "path": "okay-resilience/src/main/scala/okay/resilience/Breaker.scala", "def": "class Breaker"},
+    {"q": "allow at most N operations per time window", "path": "okay-resilience/src/main/scala/okay/resilience/Limiter.scala", "def": "class Limiter"},
+    {"q": "a fixed-size lock-free circular buffer between threads", "path": "okay-stream/src/main/scala/Ring.scala", "def": "class Ring"},
+    {"q": "an unbounded queue built from linked arrays", "path": "okay-stream/src/main/scala/Segments.scala", "def": "class Segments"},
+    {"q": "a buffer that gives every producer its own part so each producer's order is exact", "path": "okay-stream/src/main/scala/AdaptiveFifo.scala", "def": "class AdaptiveFifo"},
+    {"q": "a channel whose buffer is a set of transactional variables", "path": "okay-stream/src/main/scala/Channel.scala", "def": "class StmChannel"},
+    {"q": "interleave two streams, emitting from whichever produces an element next", "path": "okay-stream/src/main/scala/Channel.scala", "def": "def merge\\["},
+    {"q": "start a stateful message-processing entity with a mailbox and a failure policy", "path": "okay-actor/src/main/scala/okay/actor/Actor.scala", "def": "def spawn\\[S, M\\]"},
+    {"q": "what happens to a message handler after it throws: stop, restart or keep going", "path": "okay-actor/src/main/scala/okay/actor/Actor.scala", "def": "enum Supervise"},
+    {"q": "run many programs in parallel and collect every result", "path": "okay-platform/src/main/scala-jvm-native/Parallel.scala", "def": "def parAll"},
+    {"q": "a counter that only goes up and is replicated across nodes without coordination", "path": "okay-crdt/src/main/scala/okay/crdt/Counters.scala", "def": "case class GCounter"},
+    {"q": "record messages to send in the same database transaction as the state change, deliver later", "path": "okay-outbox/src/main/scala/okay/outbox/Outbox.scala", "def": "class Outbox"},
+    {"q": "fold over a stream but stop pulling elements once the state has seen enough", "path": "src/main/scala/Stream.scala", "def": "def foldUntil"},
+    {"q": "acquire something, use it, and always release it even on failure", "path": "src/main/scala/Resource.scala", "def": "enum Resource"}
+  ]
+}

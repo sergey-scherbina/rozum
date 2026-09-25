@@ -35,6 +35,11 @@ pub fn gateway_url() -> Option<String> {
 /// undocumented chunk becomes a bare name and is lost, and undocumented is common.
 pub fn distill(id: &str, text: &str) -> String {
     let (path, frag) = id.split_once('#').unwrap_or((id, ""));
+    // NOT done for Scala: embedding a leading `/** ... */` block instead of the source, the way
+    // `///` works for Rust, was measured and REFUTED on okay's code eval (rag-scala-items): top-1
+    // 4 -> 3/20, MRR 0.357 -> 0.252. okay keeps near-identical copies of its core in `okay2/`
+    // and `scala2/` with the same scaladoc, and without the code the vectors cannot tell them
+    // apart — the copies won more often. The source is what distinguishes them.
     let mut doc = String::new();
     for line in text.lines() {
         let t = line.trim_start();
@@ -776,6 +781,10 @@ pub fn rank_fused(
             h.text = t.to_string();
         }
     }
+    // A vector whose chunk the lexical index no longer has — the embed pass has not pruned it yet
+    // (a re-chunk renames ids wholesale, rag-scala-items) — would reach the agent as an id with
+    // no text, pointing at nothing. Drop it; the pass prunes it for good.
+    hits.retain(|h| !h.text.is_empty());
     (crate::rag_lite::rebalance(&hits, k), true)
 }
 
@@ -1093,6 +1102,32 @@ mod tests {
         }
     }
 
+    /// Where a proxy's memory goes for one project: `RAG_BENCH_ROOT=<project root>`.
+    #[test]
+    #[ignore = "needs RAG_BENCH_ROOT pointing at an indexed project"]
+    fn memory_of_one_project() {
+        let Ok(root) = std::env::var("RAG_BENCH_ROOT") else { return };
+        let root = Path::new(&root);
+        let rss = || -> u64 {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().unwrap_or(0) / 1024
+        };
+        let r0 = rss();
+        let ix = crate::rag_chunk::load_project_index(root).unwrap();
+        let r1 = rss();
+        let sv = SearchVecs::load(&vectors_path(root), None).unwrap();
+        let r2 = rss();
+        let vs = VecStore::load(&vectors_path(root), None).unwrap();
+        let r3 = rss();
+        eprintln!(
+            "rss MB: start {r0}, +lexical index {} ({} chunks), +SearchVecs {} ({} rows), +VecStore f32 {} ({} rows)",
+            r1 - r0, ix.len(), r2 - r1, sv.len(), r3 - r2, vs.vecs.len()
+        );
+    }
+
     /// The sweep on a REAL store, old against new: `RAG_BENCH_VECTORS=<rag-vectors.bin>`.
     #[test]
     #[ignore = "needs RAG_BENCH_VECTORS pointing at a real vector file"]
@@ -1117,6 +1152,22 @@ mod tests {
             "sweep over {} x {}: old {} us, new {} us per query; identical top-60 in {same}/{}",
             compact.len(), compact.dim, t_old / n, t_new / n, queries.len()
         );
+    }
+
+    /// rag-scala-items: a vector for a chunk the lexical index no longer has (renamed by a
+    /// re-chunk, not yet pruned) never reaches the answer as an empty hit, however close it is.
+    #[test]
+    fn a_vector_for_a_vanished_chunk_is_not_returned() {
+        let mut index = crate::rag_lite::LexicalIndex::new();
+        index.add("live.scala#def spawn", "def spawn starts a fiber");
+        let mut st = VecStore::new(2);
+        st.vecs.insert("live.scala#def spawn".into(), vec![0.0, 1.0]);
+        st.vecs.insert("gone.scala#p12".into(), vec![1.0, 0.0]);
+        let (hits, fused) = rank_fused(&index, Some(&st), Some(&[1.0, 0.0]), "spawn", 5);
+        assert!(fused);
+        assert!(hits.iter().all(|h| !h.text.is_empty()), "no empty hit: {:?}", hits.iter().map(|h| &h.id).collect::<Vec<_>>());
+        assert!(!hits.iter().any(|h| h.id == "gone.scala#p12"));
+        assert!(hits.iter().any(|h| h.id == "live.scala#def spawn"));
     }
 
     /// rag-split-oversized: a piece's vector hit counts for its chunk, once, at its best place.

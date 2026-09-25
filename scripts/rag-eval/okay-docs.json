@@ -1,0 +1,15 @@
+{
+  "about": "Questions whose answer is prose (scripts, docs, AGENTS.md), phrased without the answer's token. A hit counts when its text matches `def` (any path).",
+  "questions": [
+    {"q": "what kills my sbt builds when the Mac runs low on memory", "path": "", "def": "ram-guard"},
+    {"q": "how does the gate notice that a test run hung and stop it", "path": "", "def": "STALLED"},
+    {"q": "how to prove a -D system property really reached the forked benchmark JVM", "path": "", "def": "AbSwitchProbe|verify_arm"},
+    {"q": "the bounded default channel starts as one ring and switches when a second producer appears", "path": "", "def": "[Aa]dopt"},
+    {"q": "where is each benchmark measurement stored, one file per run", "path": "", "def": "history\\.d"},
+    {"q": "why does the landing script refuse to merge after master got new source commits", "path": "", "def": "RE-GATE|re-gate"},
+    {"q": "an unused program value in statement position must fail compilation", "path": "", "def": "Wconf|E175|DISCARDED"},
+    {"q": "a scope where one failing child cancels all its siblings", "path": "", "def": "supervised"},
+    {"q": "Scala Native test process lost, reported as one error with zero failures", "path": "", "def": "Errors 1|lost"},
+    {"q": "which JDK compiles the build versus which JDK runs the tests", "path": "", "def": "javaHome|Three JDKs|jdkFloor"}
+  ]
+}

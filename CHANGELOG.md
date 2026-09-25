@@ -1,5 +1,48 @@
 # Changelog
 
+## rag-scala-items — Scala is chunked by definition; an eval for okay's code and docs
+Completed: 2026-09-25
+
+Asked from okay: fix what still made rag weak there. The first thing missing was a ruler for
+CODE: `scripts/rag-eval/` now holds `okay-code.json` (20 questions about okay's Scala, phrased
+without the definition's name, each answered by a named definition in a named file),
+`okay-docs.json` (the 10 prose questions used so far) and `run.py`, which asks them through a
+live proxy in one session and prints top-1 / top-5 / MRR — for code sets also by FILE (the first
+hit from the right file), which tells "wrong file" from "right file, wrong chunk".
+
+Baseline on okay (fused, production proxy): code 3/20 top-1, 10/20 top-5, MRR 0.292 (file MRR
+0.479); docs 8/10, MRR 0.850.
+
+**`chunk_scala`**: Scala went through `chunk_text` (blank-line paragraphs), so a method with a
+blank line fell apart, a scaladoc could sit in another chunk than its `def`, and separator
+comments became chunks. Now one chunk per `def`/`val`/`class`/`object`/`trait`/`enum`/`given`/
+`type`/`extension` at indent <= 2, with the scaladoc, comments and annotations directly above;
+`case` only as `case class`/`case object`; nothing inside block comments or triple-quoted strings;
+a file without definitions falls back to paragraphs. Ids read like Rust's (`Async.scala#def
+spawn`). Index v3: a v2 index still serves, its manifest is not reused, the first pass rebuilds.
+okay: 42.6k -> 34.8k chunks, Scala 24.8k of them. Result: code 4/20, 10/20, MRR 0.357 (file MRR
+0.467, unchanged within noise); docs 9/10, MRR 0.911.
+
+**Vanished-chunk hits dropped**: a re-chunk renames ids wholesale, and until the embed pass prunes
+them the old vectors came back from fusion as ids with EMPTY text. `rank_fused` now drops a hit
+whose chunk the lexical index does not have (`a_vector_for_a_vanished_chunk_is_not_returned`,
+red without the filter).
+
+**Refuted, kept as a comment in `distill`**: embedding a leading scaladoc instead of the source,
+the way `///` works for Rust. Code eval 4 -> 3/20 top-1, MRR 0.357 -> 0.252: okay keeps
+near-identical copies of its core in `okay2/` and `scala2/` with the same scaladoc, and without
+the code the vectors cannot tell them apart.
+
+**Not done, on purpose**: demoting `okay2/`/`scala2/`. Excluding them outright would lift code
+top-1 4 -> 5/20 and top-5 10 -> 12/20 (simulated), but those trees have their own agents in the
+same repo, for whom it would be a regression; it needs a per-session notion of "my tree", not a
+global rule. Also measured: `memory_of_one_project` (ignored) — okay's lexical index was 245 MB
+resident, the reason for rag-lexical-compact.
+
+What is left weak is RANKING of code: the right file is first for 6/20 questions and in the top 5
+for 14/20. Next levers, unmeasured: file-level aggregation of chunk scores, and a larger
+embedding model.
+
 ## rag-lexical-compact — the BM25 index is a term table and sorted slices
 Completed: 2026-09-25
 
