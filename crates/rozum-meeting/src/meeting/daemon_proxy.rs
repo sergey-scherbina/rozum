@@ -128,7 +128,8 @@ struct State {
     /// The joined room's name, for the channel notification `meta`.
     room_name: Option<String>,
     /// The background channel-wakeup task (disk-tails the room, pushes deltas to the
-    /// session). One per proxy; started lazily at `initialize`, aborted on teardown.
+    /// session). One per proxy; started lazily at `initialize`. It holds the state WEAKLY and
+    /// ends by itself once the proxy is dropped or its client transport closes.
     wakeup_task: Option<tokio::task::JoinHandle<()>>,
     /// Whether this proxy has posted its `joined:` presence line yet — posted once on the
     /// first join (NOT on reconnects), via the agent's own session so it shares the agent's
@@ -428,7 +429,10 @@ impl DaemonProxy {
         if s.wakeup_task.is_some() {
             return;
         }
-        let state = Arc::clone(&self.state);
+        // WEAK, not a clone (mcp-http-fd-leak): the HTTP transport drops a session's proxy when
+        // the session ends, and a strong handle here kept its state — daemon socket included —
+        // alive for the life of the process, one leaked socket per session ever served.
+        let state = Arc::downgrade(&self.state);
         // Room activity keeps this proxy alive (see the bump below): an agent that
         // coordinates via `rozum meetings post` / the TUI rather than the MCP tools should
         // not lose its push channel to the idle watchdog while the room is live.
@@ -440,8 +444,17 @@ impl DaemonProxy {
             let mut since: Option<(String, u64)> = None;
             loop {
                 tokio::time::sleep(WAKEUP_POLL).await;
+                // Every handle to the proxy is gone: its session ended, and so does this task.
+                let Some(state) = state.upgrade() else { return };
                 let (root, peer, self_pid, room_name, agent) = {
-                    let s = state.lock().await;
+                    let mut s = state.lock().await;
+                    // The client's transport closed but something still holds the proxy: release
+                    // the daemon connection and the peer now rather than whenever that drops.
+                    if s.upstream_peer.as_ref().is_some_and(|p| p.is_transport_closed()) {
+                        s.conn = None;
+                        s.upstream_peer = None;
+                        return;
+                    }
                     match (s.room_root.clone(), s.upstream_peer.clone()) {
                         (Some(root), Some(peer)) => (
                             root,
@@ -1507,6 +1520,50 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("socket never appeared");
+    }
+
+    /// mcp-http-fd-leak (2026-09-25): the HTTP transport builds one `DaemonProxy` per session and
+    /// rmcp drops it when the session ends (5 min idle by default). The channel-wakeup task held a
+    /// STRONG `Arc<State>` in an endless loop, so the state — and the daemon socket in `conn` —
+    /// outlived every session: the long-lived `mcp-http` reached 260 FDs (234 unix sockets with no
+    /// peer) under launchd's soft limit of 256 and every new client got ECONNRESET. Dropping the
+    /// last handle to a proxy must release its state, connection included.
+    #[tokio::test]
+    async fn a_dropped_proxy_releases_its_state_and_daemon_socket() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("meeting.sock");
+        let registry = Arc::new(RoomRegistry::new(dir.path().join("state")));
+        {
+            let sock = sock.clone();
+            tokio::spawn(async move {
+                let _ = serve_daemon(&sock, registry).await;
+            });
+        }
+        wait_for_socket(&sock).await;
+        let project = tempdir().unwrap();
+        let proxy = DaemonProxy::build(
+            sock,
+            Some(project.path().to_string_lossy().into_owned()),
+            "claude".into(),
+            false,
+        );
+        let submitted = proxy
+            .submit(Parameters(SubmitParams { content: "hello".into() }))
+            .await;
+        assert_ne!(submitted.is_error, Some(true), "submit should succeed");
+        proxy.ensure_wakeup_task().await; // what `initialize` does for every session
+        assert!(proxy.state.lock().await.conn.is_some(), "the proxy holds a daemon connection");
+
+        let state = Arc::downgrade(&proxy.state);
+        drop(proxy);
+        // the wakeup task must notice within a poll or two
+        for _ in 0..20 {
+            if state.upgrade().is_none() {
+                return;
+            }
+            tokio::time::sleep(WAKEUP_POLL / 4).await;
+        }
+        panic!("the proxy's state (and its daemon socket) outlived the proxy");
     }
 
     #[tokio::test]

@@ -1,5 +1,28 @@
 # Changelog
 
+## mcp-http-fd-leak — a closed HTTP MCP session no longer keeps its daemon socket
+Completed: 2026-09-25
+
+Found from the okay project: `/mcp reconnect rozum` failed with ECONNRESET while `curl` to the
+same port sometimes worked. The long-lived `rozum-meet mcp-http` (up 3d23h) held 260 FDs —
+246 unix sockets, 234 of them with no peer — under launchd's soft `maxfiles` of 256, so accept
+failed for every NEW connection while established sessions kept working.
+
+Cause: `http_proxy` builds one `DaemonProxy` per MCP session and rmcp drops it when the session
+ends (DELETE, or 5 min idle). But `initialize` starts the channel-wakeup task, an endless loop
+that held a STRONG `Arc<State>` — and `State.conn` is the daemon socket. Every session ever
+served leaked its socket (and a 1.5 s disk poll) for the life of the process. The field's own
+comment said "aborted on teardown"; nothing aborted it. The stdio proxy never showed it because
+that process exits with its session.
+
+Fix: the task holds the state through a `Weak` and returns once the upgrade fails; it also
+releases `conn` and the peer and returns when the client transport reports closed. Test:
+`a_dropped_proxy_releases_its_state_and_daemon_socket` (red before: the state outlived the
+proxy). End to end against a private daemon (own HOME and XDG_RUNTIME_DIR), 20 sessions of
+initialize → `rooms.list` → DELETE: the installed binary went 3 → 23 unix FDs; the patched one
+3 → 3, and one session read 4 while open, 3 after its DELETE. Deploy: rebuild `rozum-meet`,
+then `launchctl kickstart -k gui/$UID/com.rozum.mcp-http`.
+
 ## meetings-tail — `rozum meetings tail`: follow a room from a shell
 Completed: 2026-09-23
 
