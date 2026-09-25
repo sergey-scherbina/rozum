@@ -162,9 +162,11 @@ struct RagCache {
     embed_pass_for: Option<SystemTime>,
 }
 
-/// Whether `rag.search` should kick a background embed pass: this call re-chunked something, or
-/// the index changed after the vectors were last written (an indexer outside this proxy ran)
-/// and no pass has been kicked for this index version yet. No index, no pass.
+/// Whether to kick a background embed pass: this call re-chunked something; or this proxy has
+/// not checked yet (`pass_for` is `None` — a restart can interrupt a pass, and the vectors file
+/// it left is NEWER than the index though chunks are still missing); or the index changed after
+/// the vectors were last written (an indexer outside this proxy ran) and no pass has been kicked
+/// for this index version yet. No index, no pass. A pass with nothing to do is one plan.
 fn embed_pass_due(
     rechunked: bool,
     index_mtime: Option<SystemTime>,
@@ -172,7 +174,7 @@ fn embed_pass_due(
     pass_for: Option<SystemTime>,
 ) -> bool {
     let Some(index) = index_mtime else { return false };
-    if rechunked {
+    if rechunked || pass_for.is_none() {
         return true;
     }
     if pass_for == Some(index) {
@@ -180,6 +182,41 @@ fn embed_pass_due(
     }
     vectors_mtime.is_none_or(|v| v < index)
 }
+
+/// Kick a background embed pass for `root` if [`embed_pass_due`] says so: one in flight per
+/// proxy (`flag`), at most once per index version (`RagCache::embed_pass_for`), and across
+/// proxies and processes the embed lock inside [`embed_missing_vectors`] lets one of them work.
+/// Called by `rag.search` and, every [`EMBED_CHECK_TICKS`], by the session's wakeup task.
+async fn kick_embed_if_due(
+    rag: &Mutex<RagCache>,
+    flag: &Arc<std::sync::atomic::AtomicBool>,
+    root: &std::path::Path,
+    rechunked: bool,
+) {
+    let index_mtime = file_mtime(&rozum_agent::rag_chunk::index_path(root));
+    let vectors_mtime = file_mtime(&rozum_agent::rag_embed::vectors_path(root));
+    let due = {
+        let mut cache = rag.lock().await;
+        let due = embed_pass_due(rechunked, index_mtime, vectors_mtime, cache.embed_pass_for);
+        if due {
+            cache.embed_pass_for = index_mtime;
+        }
+        due
+    };
+    if due && rag_embed_enabled() && !flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let flag = flag.clone();
+        let embed_root = root.to_path_buf();
+        tokio::spawn(async move {
+            embed_missing_vectors(&embed_root).await;
+            flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+}
+
+/// How often (in wakeup ticks of [`WAKEUP_POLL`]) a live session checks whether its project's
+/// vectors lag the index: 20 x 1.5 s = 30 s. Without it the vectors followed an index refreshed
+/// by the git hooks only when somebody SEARCHED (rag-embed-on-tick). The check is two `stat`s.
+const EMBED_CHECK_TICKS: u32 = 20;
 
 fn file_mtime(path: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
@@ -464,15 +501,26 @@ impl DaemonProxy {
         // coordinates via `rozum meetings post` / the TUI rather than the MCP tools should
         // not lose its push channel to the idle watchdog while the room is live.
         let last_active = Arc::clone(&self.last_active);
+        // Weak for the same reason as `state`: the RAG cache can hold a 31 MB index.
+        let rag = Arc::downgrade(&self.rag);
+        let rag_embedding = Arc::clone(&self.rag_embedding);
+        let project = s.project.clone().map(PathBuf::from);
         s.wakeup_task = Some(tokio::spawn(async move {
             // The room this loop is primed against, and the next `(date, n)` to deliver
             // (one past the last delivered entry — `read_since` is inclusive of `n`).
             let mut primed_root: Option<PathBuf> = None;
             let mut since: Option<(String, u64)> = None;
+            let mut tick: u32 = 0;
             loop {
                 tokio::time::sleep(WAKEUP_POLL).await;
                 // Every handle to the proxy is gone: its session ended, and so does this task.
                 let Some(state) = state.upgrade() else { return };
+                tick = tick.wrapping_add(1);
+                if tick % EMBED_CHECK_TICKS == 0 {
+                    if let (Some(root), Some(rag)) = (project.as_deref(), rag.upgrade()) {
+                        kick_embed_if_due(&rag, &rag_embedding, root, false).await;
+                    }
+                }
                 let (root, peer, self_pid, room_name, agent) = {
                     let mut s = state.lock().await;
                     // The client's transport closed but something still holds the proxy: release
@@ -742,28 +790,7 @@ impl DaemonProxy {
             // with chunks of deleted files, text ""). Kicked in the background (the search must
             // not wait ~seconds of embedding), one in flight at a time, at most once per index
             // version; the store's per-batch saves make it interruptible.
-            let index_mtime = file_mtime(&rozum_agent::rag_chunk::index_path(&root));
-            let vectors_mtime = file_mtime(&rozum_agent::rag_embed::vectors_path(&root));
-            let due = {
-                let mut cache = self.rag.lock().await;
-                let due =
-                    embed_pass_due(rechunked, index_mtime, vectors_mtime, cache.embed_pass_for);
-                if due {
-                    cache.embed_pass_for = index_mtime;
-                }
-                due
-            };
-            if due
-                && rag_embed_enabled()
-                && !self.rag_embedding.swap(true, std::sync::atomic::Ordering::SeqCst)
-            {
-                let flag = self.rag_embedding.clone();
-                let embed_root = root.clone();
-                tokio::spawn(async move {
-                    embed_missing_vectors(&embed_root).await;
-                    flag.store(false, std::sync::atomic::Ordering::SeqCst);
-                });
-            }
+            kick_embed_if_due(&self.rag, &self.rag_embedding, &root, rechunked).await;
         }
 
         let (index, vecs, chunks, age) = {
@@ -1615,15 +1642,18 @@ mod tests {
     fn an_index_newer_than_its_vectors_is_due_an_embed_pass_once() {
         let t = |s: u64| Some(UNIX_EPOCH + Duration::from_secs(s));
         // the hook's case: nothing re-chunked here, the index moved past the vectors
-        assert!(embed_pass_due(false, t(200), t(100), None));
+        assert!(embed_pass_due(false, t(200), t(100), t(150)));
         // no vectors at all yet
-        assert!(embed_pass_due(false, t(200), None, None));
+        assert!(embed_pass_due(false, t(200), None, t(150)));
         // already kicked for this index version: not again
         assert!(!embed_pass_due(false, t(200), t(100), t(200)));
         // a newer index after that pass: due again
         assert!(embed_pass_due(false, t(300), t(100), t(200)));
-        // vectors current: nothing to do
-        assert!(!embed_pass_due(false, t(200), t(250), None));
+        // vectors newer than the index, checked before: nothing to do
+        assert!(!embed_pass_due(false, t(200), t(250), t(150)));
+        // ...but the FIRST check in a process always plans once: a restart can interrupt a pass
+        // and leave vectors newer than the index with chunks still missing (rag-embed-on-tick)
+        assert!(embed_pass_due(false, t(200), t(250), None));
         // this call re-chunked: always, as before
         assert!(embed_pass_due(true, t(200), t(250), t(200)));
         // no index: never

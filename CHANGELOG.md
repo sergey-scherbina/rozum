@@ -1,5 +1,23 @@
 # Changelog
 
+## rag-embed-on-tick — the vectors follow the index without anyone searching
+Completed: 2026-09-25
+
+The operator's question from okay, after rag-vectors-follow-index: "why does it not happen right
+away?" Because the only trigger was a `rag.search`: the git hooks refresh the LEXICAL index
+(`rozum rag index`, 60 s timeout, no embedder), and until some agent searched that project, its
+vectors stayed behind — okay's own re-embed only started when one was run by hand.
+
+Now every live session's wakeup task (the 1.5 s tick that already tails the room) also checks its
+project every 20 ticks — 30 s, two `stat`s — and kicks the same background pass `rag.search` does
+(`kick_embed_if_due`, one helper for both). One pass per proxy, once per index version, and the
+cross-process embed lock lets exactly one proxy work when several sessions share a project. It
+holds the RAG cache WEAKLY, like the state since mcp-http-fd-leak. And the FIRST check in a
+process always plans once: a restart can interrupt a pass and leave the vectors file newer than
+the index with chunks still missing, which the mtime rule alone would never resume. Test: the
+extended `an_index_newer_than_its_vectors_is_due_an_embed_pass_once` (that last case is red on the
+previous rule); the tick itself was checked live on okay after deploying.
+
 ## rag-vectors-content-hash — a chunk whose text changed is re-embedded
 Completed: 2026-09-25
 
