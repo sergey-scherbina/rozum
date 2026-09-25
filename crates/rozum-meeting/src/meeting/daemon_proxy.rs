@@ -156,6 +156,33 @@ struct RagCache {
     /// the vectors file is written by the embedding warmup, later than the index itself.
     vecs: Option<Arc<rozum_agent::rag_embed::VecStore>>,
     vecs_at: Option<SystemTime>,
+    /// The index version (its mtime) the last embed pass was kicked for, so a search after a
+    /// pass that found nothing to embed — which saves nothing, leaving the vectors file older
+    /// than the index — does not kick the same pass again on every call.
+    embed_pass_for: Option<SystemTime>,
+}
+
+/// Whether `rag.search` should kick a background embed pass: this call re-chunked something, or
+/// the index changed after the vectors were last written (an indexer outside this proxy ran)
+/// and no pass has been kicked for this index version yet. No index, no pass.
+fn embed_pass_due(
+    rechunked: bool,
+    index_mtime: Option<SystemTime>,
+    vectors_mtime: Option<SystemTime>,
+    pass_for: Option<SystemTime>,
+) -> bool {
+    let Some(index) = index_mtime else { return false };
+    if rechunked {
+        return true;
+    }
+    if pass_for == Some(index) {
+        return false;
+    }
+    vectors_mtime.is_none_or(|v| v < index)
+}
+
+fn file_mtime(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 #[derive(Clone)]
@@ -697,30 +724,45 @@ impl DaemonProxy {
                 rozum_agent::rag_chunk::reindex_incremental(&root_for_refresh, &mut |_, _, _| {})
             })
             .await;
-            match refreshed {
-                // The lexical index is now fresh, but the VECTORS for re-chunked files are not:
-                // without this, a file edited mid-session loses its embedding-side retrieval
-                // until the NEXT proxy start — BM25 finds it, fusion half-misses it, silently.
-                // Kicked in the background (the search must not wait ~seconds of embedding), one
-                // in flight at a time; the store's per-batch saves make it interruptible.
-                Ok(Ok((stats, _))) if stats.rechunked > 0 || stats.removed > 0 => {
-                    if rag_embed_enabled()
-                        && !self.rag_embedding.swap(true, std::sync::atomic::Ordering::SeqCst)
-                    {
-                        let flag = self.rag_embedding.clone();
-                        let embed_root = root.clone();
-                        tokio::spawn(async move {
-                            embed_missing_vectors(&embed_root).await;
-                            flag.store(false, std::sync::atomic::Ordering::SeqCst);
-                        });
-                    }
-                }
+            let rechunked = match refreshed {
+                Ok(Ok((stats, _))) => stats.rechunked > 0 || stats.removed > 0,
                 Ok(Err(e)) => {
                     tracing::debug!(
                         "rag.search: incremental refresh failed, serving what is on disk: {e}"
                     );
+                    false
                 }
-                _ => {}
+                Err(_) => false,
+            };
+            // The lexical index is now fresh, but the VECTORS may not be: for files this pass
+            // re-chunked, and for everything an indexer OUTSIDE this proxy changed — the git
+            // hooks' `rozum rag index` refreshes the lexical index only, so by the time a search
+            // gets here nothing is left to re-chunk and, before rag-vectors-follow-index, no
+            // embed pass ever ran (okay's vectors sat at 2026-09-03 for three weeks and answered
+            // with chunks of deleted files, text ""). Kicked in the background (the search must
+            // not wait ~seconds of embedding), one in flight at a time, at most once per index
+            // version; the store's per-batch saves make it interruptible.
+            let index_mtime = file_mtime(&rozum_agent::rag_chunk::index_path(&root));
+            let vectors_mtime = file_mtime(&rozum_agent::rag_embed::vectors_path(&root));
+            let due = {
+                let mut cache = self.rag.lock().await;
+                let due =
+                    embed_pass_due(rechunked, index_mtime, vectors_mtime, cache.embed_pass_for);
+                if due {
+                    cache.embed_pass_for = index_mtime;
+                }
+                due
+            };
+            if due
+                && rag_embed_enabled()
+                && !self.rag_embedding.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                let flag = self.rag_embedding.clone();
+                let embed_root = root.clone();
+                tokio::spawn(async move {
+                    embed_missing_vectors(&embed_root).await;
+                    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
             }
         }
 
@@ -1564,6 +1606,28 @@ mod tests {
             tokio::time::sleep(WAKEUP_POLL / 4).await;
         }
         panic!("the proxy's state (and its daemon socket) outlived the proxy");
+    }
+
+    /// rag-vectors-follow-index (2026-09-25): the git hooks refresh the LEXICAL index with
+    /// `rozum rag index`, so the search's own incremental pass finds nothing to re-chunk. The
+    /// embed pass was keyed on that alone and never ran — okay's vectors stayed three weeks old.
+    #[test]
+    fn an_index_newer_than_its_vectors_is_due_an_embed_pass_once() {
+        let t = |s: u64| Some(UNIX_EPOCH + Duration::from_secs(s));
+        // the hook's case: nothing re-chunked here, the index moved past the vectors
+        assert!(embed_pass_due(false, t(200), t(100), None));
+        // no vectors at all yet
+        assert!(embed_pass_due(false, t(200), None, None));
+        // already kicked for this index version: not again
+        assert!(!embed_pass_due(false, t(200), t(100), t(200)));
+        // a newer index after that pass: due again
+        assert!(embed_pass_due(false, t(300), t(100), t(200)));
+        // vectors current: nothing to do
+        assert!(!embed_pass_due(false, t(200), t(250), None));
+        // this call re-chunked: always, as before
+        assert!(embed_pass_due(true, t(200), t(250), t(200)));
+        // no index: never
+        assert!(!embed_pass_due(true, None, None, None));
     }
 
     #[tokio::test]

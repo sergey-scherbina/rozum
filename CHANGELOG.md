@@ -1,5 +1,24 @@
 # Changelog
 
+## rag-vectors-follow-index — the vectors follow an index someone else refreshed
+Completed: 2026-09-25
+
+Asked from okay: "why does rag not help?". Its `rag.search` answered with hits whose text was
+empty — `src/test/scala-jvm/TestParallel.scala#p1`, a file deleted days earlier. The lexical index
+was 19 s old; `.rozum/rag-vectors.bin` was from 2026-09-03. The fused ranking was pulling chunk
+ids out of a three-week-old vector store that no longer matched the index.
+
+Cause: the embed pass ran only when `rag.search`'s OWN incremental refresh re-chunked a file.
+okay's git hooks run `rozum rag index` after every commit, merge and checkout — lexical only — so
+by the time a search arrives there is nothing left to re-chunk, and the pass never ran. The one
+other trigger, the startup warmup, exists in the stdio proxy only; `mcp-http` has none.
+
+Fix: `embed_pass_due` — also kick the background pass when the index is newer than the vectors
+file (or there is none), once per index version (`RagCache.embed_pass_for`). The pass itself is
+unchanged: it embeds what is missing and prunes vectors of chunks that are gone. Test:
+`an_index_newer_than_its_vectors_is_due_an_embed_pass_once` (a new pure function, so it cannot
+be red before; the red was the live okay index).
+
 ## mcp-http-fd-leak — a closed HTTP MCP session no longer keeps its daemon socket
 Completed: 2026-09-25
 
