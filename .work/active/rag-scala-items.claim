@@ -1,6 +1,0 @@
-feature/rag-scala-items 2026-09-25T14:56:42Z
-agent: claude-code (okay session 013hkJA4B7z8s2CRHjfv668p, operator ask: fix rag shortcomings)
-heartbeat: 2026-09-25T14:56:42Z
-status: in-progress
-done-so-far: -
-next: scripts/rag-eval/ (okay code + docs question sets, runner); Scala chunked by definition with its scaladoc; measure before/after on a side proxy
