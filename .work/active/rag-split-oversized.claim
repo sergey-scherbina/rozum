@@ -1,6 +1,0 @@
-feature/rag-split-oversized 2026-09-25T13:21:04Z
-agent: claude-code (okay session 013hkJA4B7z8s2CRHjfv668p, operator ask: make rag faster and better)
-heartbeat: 2026-09-25T13:21:04Z
-status: in-progress
-done-so-far: the embedder sees 255 tokens (~1 KB) of a chunk; okay has 328 chunks > 4 KB (AGENTS.md sections 13-18 KB), so their vectors see ~5% of the text; both misses of a 10-question okay eval live in one
-next: split chunks > ~1.2 KB at paragraph/line boundaries (first piece keeps the id), index v3 forces one rechunk; rag-eval floor must hold; okay 10-question eval before/after on a side proxy
