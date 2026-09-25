@@ -42,8 +42,17 @@ fn tokenize(text: &str) -> Vec<String> {
 struct Doc {
     id: String,
     text: String,
-    tf: HashMap<String, usize>,
+    /// `(term id, count)`, sorted by term id — looked up by binary search. A `HashMap<String,
+    /// usize>` per doc was ~9x the corpus text in memory (okay: 245 MB resident for 27 MB of
+    /// chunks, rag-lexical-compact): a table and an owned String per distinct term per chunk.
+    tf: Box<[(u32, u32)]>,
     len: usize,
+}
+
+impl Doc {
+    fn tf(&self, term: u32) -> u32 {
+        self.tf.binary_search_by_key(&term, |&(t, _)| t).map(|i| self.tf[i].1).unwrap_or(0)
+    }
 }
 
 /// How much a term in a chunk's IDENTIFIER counts against the same term in its body.
@@ -91,8 +100,10 @@ fn tokenize_ident(ident: &str) -> Vec<String> {
 /// A BM25 lexical index over small text documents.
 pub struct LexicalIndex {
     docs: Vec<Doc>,
-    /// term → number of documents containing it.
-    df: HashMap<String, usize>,
+    /// term → its id; each term's string is held once, here.
+    terms: HashMap<String, u32>,
+    /// term id → number of documents containing it.
+    df: Vec<u32>,
     total_len: usize,
     k1: f32,
     b: f32,
@@ -126,7 +137,7 @@ const BM25_B: f32 = 0.5;
 
 impl Default for LexicalIndex {
     fn default() -> Self {
-        Self { docs: Vec::new(), df: HashMap::new(), total_len: 0, k1: 1.2, b: BM25_B }
+        Self { docs: Vec::new(), terms: HashMap::new(), df: Vec::new(), total_len: 0, k1: 1.2, b: BM25_B }
     }
 }
 
@@ -151,20 +162,33 @@ impl LexicalIndex {
         let text = text.into();
         let tokens = tokenize(&text);
         let len = tokens.len();
-        let mut tf: HashMap<String, usize> = HashMap::new();
+        let mut counts: HashMap<u32, u32> = HashMap::new();
         for t in tokens {
-            *tf.entry(t).or_insert(0) += 1;
+            *counts.entry(self.intern(t)).or_insert(0) += 1;
         }
         for t in tokenize_ident(title) {
-            *tf.entry(t).or_insert(0) += TITLE_BOOST;
+            *counts.entry(self.intern(t)).or_insert(0) += TITLE_BOOST as u32;
         }
-        for term in tf.keys() {
-            *self.df.entry(term.clone()).or_insert(0) += 1;
+        for &term in counts.keys() {
+            self.df[term as usize] += 1;
         }
+        let mut tf: Vec<(u32, u32)> = counts.into_iter().collect();
+        tf.sort_unstable_by_key(|&(t, _)| t);
+        let tf = tf.into_boxed_slice();
         // `len` counts the BODY only. Adding the boosted identifier terms here too would feed
         // BM25's length normalisation the very inflation the boost just created, cancelling it.
         self.total_len += len;
         self.docs.push(Doc { id: id.into(), text, tf, len });
+    }
+
+    fn intern(&mut self, term: String) -> u32 {
+        if let Some(&id) = self.terms.get(&term) {
+            return id;
+        }
+        let id = self.df.len() as u32;
+        self.terms.insert(term, id);
+        self.df.push(0);
+        id
     }
 
     /// The stored text of a chunk id — for filling in a fusion hit that only the embedding
@@ -191,9 +215,9 @@ impl LexicalIndex {
     }
 
     /// BM25 idf with the standard `+1` so it never goes negative for common terms.
-    fn idf(&self, term: &str) -> f32 {
+    fn idf(&self, term: u32) -> f32 {
         let n = self.docs.len() as f32;
-        let df = *self.df.get(term).unwrap_or(&0) as f32;
+        let df = self.df[term as usize] as f32;
         ((n - df + 0.5) / (df + 0.5) + 1.0).ln()
     }
 }
@@ -204,28 +228,37 @@ impl Retriever for LexicalIndex {
             return Vec::new();
         }
         let avg_len = self.avg_len();
-        let q_terms = tokenize(query);
-        let mut hits: Vec<Hit> = self
+        // A query term the corpus never saw scores nothing anywhere; the rest keep their ids
+        // and their idf, computed once rather than per document.
+        let q: Vec<(u32, f32)> = tokenize(query)
+            .iter()
+            .filter_map(|t| self.terms.get(t).map(|&id| (id, self.idf(id))))
+            .collect();
+        let mut scored: Vec<(f32, usize)> = self
             .docs
             .iter()
-            .map(|doc| {
+            .enumerate()
+            .filter_map(|(i, doc)| {
                 let mut score = 0.0f32;
-                for term in &q_terms {
-                    let tf = *doc.tf.get(term).unwrap_or(&0) as f32;
+                for &(term, idf) in &q {
+                    let tf = doc.tf(term) as f32;
                     if tf == 0.0 {
                         continue;
                     }
-                    let idf = self.idf(term);
                     let denom = tf + self.k1 * (1.0 - self.b + self.b * doc.len as f32 / avg_len);
                     score += idf * (tf * (self.k1 + 1.0)) / denom;
                 }
-                Hit { id: doc.id.clone(), score, text: doc.text.clone() }
+                (score > 0.0).then_some((score, i))
             })
-            .filter(|h| h.score > 0.0)
             .collect();
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        hits.truncate(k);
-        hits
+        // Stable on ties, like the sort it replaces: equal scores keep document order.
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        scored.truncate(k);
+        // Texts are cloned for the k survivors only — not for every document that scored.
+        scored
+            .into_iter()
+            .map(|(score, i)| Hit { id: self.docs[i].id.clone(), score, text: self.docs[i].text.clone() })
+            .collect()
     }
 }
 
@@ -524,4 +557,31 @@ mod tests {
         // Missing query → recoverable error.
         assert!(tools.dispatch("search_documents", json!({})).await.is_err());
     }
+
+    /// Resident size and search time of a real project's lexical index:
+    /// `RAG_BENCH_ROOT=<project root>` (rag-lexical-compact).
+    #[test]
+    #[ignore = "needs RAG_BENCH_ROOT pointing at an indexed project"]
+    fn lexical_index_memory_and_speed() {
+        let Ok(root) = std::env::var("RAG_BENCH_ROOT") else { return };
+        let rss = || -> u64 {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().unwrap_or(0) / 1024
+        };
+        let r0 = rss();
+        let ix = crate::rag_chunk::load_project_index(std::path::Path::new(&root)).unwrap();
+        let r1 = rss();
+        let qs = ["start a program in the background", "fold over a stream but stop early", "what kills sbt builds under memory pressure", "a lock-free circular buffer between threads", "which JDK runs the tests"];
+        let t = std::time::Instant::now();
+        for _ in 0..5 {
+            for q in qs {
+                let _ = ix.search(q, 40);
+            }
+        }
+        eprintln!("lexical index: {} chunks, +{} MB resident, {:.1} ms per search", ix.len(), r1 - r0, t.elapsed().as_secs_f64() * 1000.0 / 25.0);
+    }
+
 }

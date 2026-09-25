@@ -1,5 +1,23 @@
 # Changelog
 
+## rag-lexical-compact — the BM25 index is a term table and sorted slices
+Completed: 2026-09-25
+
+Measuring where the `mcp-http` proxy's memory went (asked from okay): okay's lexical index was
+245 MB resident for 27 MB of chunk text. Each chunk carried its own `HashMap<String, usize>` of
+term frequencies — a table and an owned String per distinct term per chunk — and every search
+cloned the text of every chunk that scored at all, before cutting to `k`.
+
+Now terms are interned once (`terms: HashMap<String, u32>`, `df: Vec<u32>`), a chunk holds its
+frequencies as a `Box<[(u32, u32)]>` sorted by term id and looked up by binary search, the query's
+idf is computed once per term instead of per chunk, and texts are cloned for the `k` survivors
+only. Scores are computed by the same formula in the same order and ties keep document order, so
+rankings are unchanged: the rag-eval floor is 8/26 top-1 with the identical list of misses.
+
+Measured on okay's index (43k chunks, `lexical_index_memory_and_speed`, ignored, run with
+`RAG_BENCH_ROOT`), old code against new on the same benchmark: 245 MB -> 91 MB resident,
+19.1 ms -> 1.8 ms per search.
+
 ## rag-compact-sweep — the vector sweep reads i8 rows on a few threads
 Completed: 2026-09-25
 
