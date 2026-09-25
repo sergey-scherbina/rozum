@@ -1427,14 +1427,14 @@ async fn embed_missing_vectors(root: &std::path::Path) {
         }
         let Ok(v) = resp.json::<Value>().await else { break };
         let Some(data) = v["data"].as_array() else { break };
-        for (row, (id, _)) in data.iter().zip(group.iter()) {
+        for (row, (id, t)) in data.iter().zip(group.iter()) {
             let Some(emb) = row.get("embedding").and_then(|e| e.as_array()) else { continue };
             let vec: Vec<f32> = emb.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect();
             if store.dim == 0 {
                 store.dim = vec.len();
             }
             if vec.len() == store.dim && store.dim > 0 {
-                store.vecs.insert(id.clone(), vec);
+                store.insert(id, t, vec);
                 embedded += 1;
             }
         }

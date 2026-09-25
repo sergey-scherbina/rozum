@@ -65,6 +65,14 @@ pub fn vectors_path(root: &Path) -> PathBuf {
 const MAGIC_V1: &[u8; 4] = b"RZV1";
 const MAGIC_V2: &[u8; 4] = b"RZV2";
 
+/// The text hashes live BESIDE the vectors, not in them: the `RZV2` file is read and written by
+/// every rozum binary on the machine, and one that predates the hashes would read a new format
+/// as "no vectors" and write back a near-empty store. A sidecar it simply never opens. See
+/// [`VecStore::hashes`] for why the hashes exist and [`VecStore::save`] for the write order.
+fn hashes_path(vectors: &Path) -> PathBuf {
+    vectors.with_extension("hash")
+}
+
 /// The seam an external vector store would implement — Qdrant, LanceDB, a remote service, or
 /// the in-process [`VecStore`] below, interchangeably.
 ///
@@ -107,11 +115,48 @@ pub trait VectorIndex: Send + Sync {
 pub struct VecStore {
     pub dim: usize,
     pub vecs: HashMap<String, Vec<f32>>,
+    /// Chunk-id → hash of the text its vector was made from (the `.hash` sidecar). A paragraph
+    /// chunk's id is its POSITION, so the id alone cannot say the text changed; without this an
+    /// edited file kept the vectors of its old text (rag-vectors-content-hash). A vector with no
+    /// hash here — every one from before the sidecar, or written by an older binary — is of
+    /// unknown text and is re-embedded once.
+    pub hashes: HashMap<String, u64>,
+}
+
+/// The sidecar: `(u32 id length, id, u64 hash)` repeated. Missing or truncated reads as whatever
+/// was whole — an entry that is absent only means one more re-embed.
+fn load_hashes(path: &Path) -> HashMap<String, u64> {
+    let mut out = HashMap::new();
+    let Ok(bytes) = fs::read(path) else { return out };
+    let mut at = 0usize;
+    while let Some(l) = bytes.get(at..at + 4) {
+        let l = u32::from_le_bytes(l.try_into().expect("4 bytes")) as usize;
+        let (Some(id), Some(x)) = (bytes.get(at + 4..at + 4 + l), bytes.get(at + 4 + l..at + 12 + l))
+        else {
+            break;
+        };
+        let Ok(id) = std::str::from_utf8(id) else { break };
+        out.insert(id.to_string(), u64::from_le_bytes(x.try_into().expect("8 bytes")));
+        at += 12 + l;
+    }
+    out
+}
+
+/// FNV-1a over the chunk text: stable across Rust releases and processes, unlike `DefaultHasher`,
+/// which is what a hash written to disk needs.
+pub fn text_hash(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
 impl VecStore {
     pub fn new(dim: usize) -> Self {
-        Self { dim, vecs: HashMap::new() }
+        Self { dim, vecs: HashMap::new(), hashes: HashMap::new() }
+    }
+
+    /// Store `id`'s vector together with the hash of the text it was embedded from.
+    pub fn insert(&mut self, id: &str, text: &str, v: Vec<f32>) {
+        self.hashes.insert(id.to_string(), text_hash(text));
+        self.vecs.insert(id.to_string(), v);
     }
 
     /// Load, or `None` for missing/corrupt/wrong-dimension — all three mean the same thing to a
@@ -150,7 +195,8 @@ impl VecStore {
             };
             vecs.insert(id, v);
         }
-        Some(Self { dim, vecs })
+        let hashes = load_hashes(&hashes_path(path));
+        Some(Self { dim, vecs, hashes })
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -173,7 +219,22 @@ impl VecStore {
         // Write-temp + rename, so a reader never sees a half-written store.
         let tmp = path.with_extension("bin.tmp");
         fs::write(&tmp, out)?;
-        fs::rename(tmp, path)
+        fs::rename(tmp, path)?;
+        // Hashes AFTER the vectors: a crash between the two leaves hashes of OLDER text, which
+        // only costs a re-embed. The other order could claim a vector matches text it was never
+        // made from — the one failure this file exists to prevent.
+        let mut h: Vec<u8> = Vec::with_capacity(self.hashes.len() * 64);
+        for (id, x) in &self.hashes {
+            if self.vecs.contains_key(id) {
+                h.extend_from_slice(&(id.len() as u32).to_le_bytes());
+                h.extend_from_slice(id.as_bytes());
+                h.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+        let hpath = hashes_path(path);
+        let htmp = hpath.with_extension("hash.tmp");
+        fs::write(&htmp, h)?;
+        fs::rename(htmp, hpath)
     }
 
     /// Ranked ids by cosine (dot product — vectors are normalised), best first.
@@ -227,8 +288,16 @@ pub fn plan_embedding<'a>(
     let live: std::collections::HashSet<&str> = chunks.iter().map(|(id, _)| id.as_str()).collect();
     let before = store.vecs.len();
     store.vecs.retain(|id, _| live.contains(id.as_str()));
+    store.hashes.retain(|id, _| live.contains(id.as_str()));
     let pruned = before - store.vecs.len();
-    let missing = chunks.iter().filter(|(id, _)| !store.vecs.contains_key(id)).collect();
+    // Missing, or made from other text: a paragraph id is a position, so the id surviving says
+    // nothing about the text behind it (rag-vectors-content-hash).
+    let missing = chunks
+        .iter()
+        .filter(|(id, t)| {
+            !store.vecs.contains_key(id) || store.hashes.get(id) != Some(&text_hash(t))
+        })
+        .collect();
     (pruned, missing)
 }
 
@@ -264,12 +333,12 @@ pub fn gateway_less_warmup(root: &Path) -> std::io::Result<usize> {
     for group in missing.chunks(64) {
         let texts: Vec<String> = group.iter().map(|(id, t)| distill(id, t)).collect();
         let Some(Ok(vecs)) = rozum_core::embedding::embed(&texts, false) else { break };
-        for (v, (id, _)) in vecs.into_iter().zip(group.iter()) {
+        for (v, (id, t)) in vecs.into_iter().zip(group.iter()) {
             if store.dim == 0 {
                 store.dim = v.len();
             }
             if v.len() == store.dim && store.dim > 0 {
-                store.vecs.insert(id.clone(), v);
+                store.insert(id, t, v);
                 added += 1;
             }
         }
@@ -440,12 +509,12 @@ pub async fn embed_missing_with(
         }
         let Some(vecs) = vecs else { break };
         added += vecs.len();
-        for (v, (id, _)) in vecs.into_iter().zip(group.iter()) {
+        for (v, (id, t)) in vecs.into_iter().zip(group.iter()) {
             if store.dim == 0 {
                 store.dim = v.len();
             }
             if v.len() == store.dim && store.dim > 0 {
-                store.vecs.insert(id.clone(), v);
+                store.insert(id, t, v);
             }
         }
         if store.dim > 0 {
@@ -795,6 +864,30 @@ mod tests {
         assert!(regained.is_some(), "free again after drop (and 1s of fork-window grace)");
     }
 
+    /// rag-vectors-content-hash (2026-09-25): a paragraph chunk's id is its POSITION
+    /// (`Foo.scala#p3`), so editing a file keeps the id and changes the text. Keyed by id alone,
+    /// the plan kept the vector of the OLD text for ever — and inserting one paragraph shifted
+    /// every chunk below it onto its neighbour's vector.
+    #[test]
+    fn a_chunk_whose_text_changed_under_the_same_id_is_re_embedded() {
+        let old = vec![("Foo.scala#p3".to_string(), "old text".to_string())];
+        let mut st = VecStore::new(2);
+        st.insert(&old[0].0, &old[0].1, vec![1.0, 0.0]);
+        assert!(plan_embedding(&old, &mut st).1.is_empty(), "same text: nothing to do");
+
+        let edited = vec![("Foo.scala#p3".to_string(), "new text".to_string())];
+        let (_, missing) = plan_embedding(&edited, &mut st);
+        assert_eq!(missing.len(), 1, "same id, different text: the vector is stale");
+
+        // the hash survives a save/load round trip
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.bin");
+        st.save(&path).unwrap();
+        let mut back = VecStore::load(&path, None).unwrap();
+        assert!(plan_embedding(&old, &mut back).1.is_empty(), "hash reloaded");
+        assert_eq!(plan_embedding(&edited, &mut back).1.len(), 1);
+    }
+
     #[test]
     fn plan_prunes_dead_vectors_and_names_only_the_missing() {
         let chunks = vec![
@@ -802,8 +895,8 @@ mod tests {
             ("new.rs#fn b".to_string(), "text b".to_string()),
         ];
         let mut st = VecStore::new(2);
-        st.vecs.insert("kept.rs#fn a".into(), vec![1.0, 0.0]);
-        st.vecs.insert("deleted.rs#fn gone".into(), vec![0.0, 1.0]);
+        st.insert("kept.rs#fn a", "text a", vec![1.0, 0.0]);
+        st.insert("deleted.rs#fn gone", "gone", vec![0.0, 1.0]);
         let (pruned, missing) = plan_embedding(&chunks, &mut st);
         assert_eq!(pruned, 1, "the deleted chunk's vector is dropped");
         assert!(!st.vecs.contains_key("deleted.rs#fn gone"));

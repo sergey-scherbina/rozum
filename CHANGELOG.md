@@ -1,5 +1,24 @@
 # Changelog
 
+## rag-vectors-content-hash — a chunk whose text changed is re-embedded
+Completed: 2026-09-25
+
+Asked from okay right after rag-vectors-follow-index: "is it not incremental?" It is — by chunk
+ID only: `plan_embedding` embedded ids it had no vector for and pruned ids that were gone, and
+never looked at the text. A paragraph chunk's id is its POSITION (`Foo.scala#p3`; okay's Scala and
+Markdown are almost all paragraph chunks), so an edit kept the id and the vector of the OLD text
+for ever, and inserting one paragraph moved every chunk below it onto its neighbour's vector. A
+Rust item id (`path#fn name`) is far more stable, which is why this repo never showed it.
+
+Fix: the store keeps the FNV-1a hash of the text each vector was made from, and the plan
+re-embeds a chunk whose hash differs. The hashes live in a SIDECAR, `rag-vectors.hash`, not in a
+new `RZV3`: every rozum binary on the machine reads and writes `rag-vectors.bin`, and one that
+predates the hashes would read a new format as "no vectors" and write back a near-empty store.
+Written after the vectors, so a crash between the two costs a re-embed and never claims a vector
+matches text it was not made from. A vector with no hash (all existing ones, or one an older
+binary wrote) is re-embedded once. Test: `a_chunk_whose_text_changed_under_the_same_id_is_re_embedded`
+(red before: same id, new text, nothing planned), including the save/load round trip.
+
 ## rag-vectors-follow-index — the vectors follow an index someone else refreshed
 Completed: 2026-09-25
 
