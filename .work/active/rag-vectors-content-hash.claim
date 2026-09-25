@@ -1,6 +1,0 @@
-feature/rag-vectors-content-hash 2026-09-25T10:55:39Z
-agent: claude-code (okay session 013hkJA4B7z8s2CRHjfv668p, operator ask)
-heartbeat: 2026-09-25T10:55:39Z
-status: in-progress
-done-so-far: plan_embedding keys vectors by chunk id only; paragraph ids (#pN) are positional, so an edited file keeps vectors of its OLD text
-next: RZV3 stores a content hash per vector; plan re-embeds on mismatch; test; land; deploy
