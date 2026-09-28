@@ -3139,6 +3139,37 @@ the CLIENT layer; no binary split (process separation already gives (a)).
   OpenAI /v1/chat/completions+/v1/responses, Anthropic /v1/messages; control: status + share ledger;
   the sole meetings↔models seam = model_participant → /v1/chat/completions, HTTP not code).
 
+### okay-workspace-ui — one remote workspace over rozum + nadia, drawn by any host (operator 2026-09-28, spec `docs/specs/okay-workspace-ui.md`)
+Operator direction, in-session: one abstract UI answers "what" (projects, rooms, agents, chats, switching
+between them with focus and context kept), okay-ui answers "how" (terminal, web, Telegram, native), and
+«Okay тоже есть практически всё, что есть в scalascript» — so this SUPERSEDES the Tk track below for the
+UI layer; `control-serve`, the daemon REST/SSE and the launchd/Tailscale deployment stay as data. The
+Telegram bot is eventually a new bot on okay (Bot API transport: operator, in `../okay`); stage 1 uses the
+Rust bridge as a transport for `Telegram.Act`/`Update`. Code lands in `../nadia/ui/` (own sbt build on
+okay; not `nadia/scala`, which is the one-dependency statement). Recon 2026-09-28: okay-ui already has
+the view-as-value, `Hello{vocab}` + `Ui.lower`, `Wire`, durable `Sessions`, and hosts for terminal / React /
+DOM / Swing / GTK / Telegram / SwiftUI / Compose; what it lacks is a pane/focus manager, any multi-agent
+model, and a Telegram transport. What rozum lacks: presence on REST (MCP-only), one agent list across
+roster ∪ control/status ∪ nadia `/agents`, any client that keeps a draft across a switch.
+- [ ] **workspace-ui-skeleton** (S0) — `nadia/ui` builds against okay `0.2.0-SNAPSHOT` (publishLocal);
+  `Workspace` data with `Schema`; project list from a fixture; the `TestPortable`-style equality of the
+  scripted host and `Frame`. No network.
+- [ ] **workspace-ui-readonly** (S1) — projects from `/rooms`, transcript from `/messages/{date}`, refresh
+  from `/rooms/{n}/events`; `Wire.serve` behind a Live page + the terminal via `Wire.client(Terminal.host)`.
+  Gate: headless browser and headless terminal show the same rooms and last message from the live daemon.
+- [ ] **workspace-ui-switching** (S2) — composer as a `Form` with a `live` input; `Context` per item
+  (draft, anchor `(date, n)`, addressee, seen); `Focus` in the session; `Sessions`-durable. Gates: draft +
+  anchor survive A→B→A, survive A→B on one client and →A on another, and live run == recovery.
+- [ ] **workspace-ui-telegram-bridge** (S3) — the Rust bridge as transport: forwards `Update`s, performs
+  `Act`s, keeps its ACL in front. Gate: the `ui-telegram` seam test + a scripted room-switch-and-post walk
+  equal to the terminal's final state.
+- [ ] **workspace-ui-agents** (S4) — agents panel (roster ∪ control/status ∪ nadia `/agents`); presence
+  added to the daemon's SSE; `/tell` chat; `rozum launch` from the panel.
+- [ ] **workspace-ui-approvals** (S5) — BLOCKED on nadia NAD-14 (event stream + approval hook in `serve`).
+- [ ] **workspace-ui-native** (S6) — first product screen on a thin client; which target first is an OPEN
+  question to the operator (spec §Open questions).
+- [ ] **retire** — meeting PWA `:8405`, UCC SPA `:8410`, `crates/rozum-meeting-tui`: each when covered.
+
 ### Unified control center — one `.ssc` UI for TUI + web/PWA (operator vision 2026-06-23, spec `docs/specs/unified-control-center.md`)
 TUI + web + `.ssc` + PWA = ONE app, one `.ssc` source, compiled twice (TUI + web/React/PWA), for ALL
 of rozum (meetings, models, gateway/residency, …). KEY RECON FINDING: ssc already ships **Tk** — a

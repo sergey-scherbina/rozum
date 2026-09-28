@@ -1593,6 +1593,10 @@ Details and reproductions in `docs/specs/ucc-ssc-backend.md` § Slice 3.
 
 ## UCC backend on .ssc→Rust (strategic, 2026-07-07)
 
+> **2026-09-28, operator:** the UI layer moves to okay-ui (`docs/specs/okay-workspace-ui.md`); the
+> control-API stays as a data source for it, in Rust. A `.ssc` server is no longer on the path to the
+> remote UI, so this entry is only revived by a need that is not the UI.
+
 - [~] **ucc-ssc-backend** (spec: `docs/specs/ucc-ssc-backend.md`) — **slice 1 SPEC'd 2026-08-08, and
   the measurement moved the whole plan.** 63 routes: 19 read, 23 action, 5 terminal, 16 auth; only
   **4 are public** (`/view/{token}` + the three `/control/public/matrix*`), the other 59 sit behind

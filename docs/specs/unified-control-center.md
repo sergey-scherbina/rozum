@@ -1,6 +1,9 @@
 # Unified control center — one `.ssc` UI for TUI + web/PWA (and beyond)
 
-Status: active; read-only dual-target PoC complete (2026-07-20). Cross-repo (rozum + `scalascript`).
+Status: **superseded for the UI layer (operator, 2026-09-28)** by
+[`okay-workspace-ui.md`](okay-workspace-ui.md) — the "how" layer is okay-ui, not ScalaScript Tk; the
+control-API and the deployment below stay as its data layer. Previously: active; read-only dual-target
+PoC complete (2026-07-20). Cross-repo (rozum + `scalascript`).
 
 ## Vision (operator)
 
