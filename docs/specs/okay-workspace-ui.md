@@ -176,9 +176,12 @@ the point of the host being pure.
 
 ## Stages (each a claim on its own; a stage lands only with its test)
 
-- [ ] **S0 — skeleton (`workspace-ui-skeleton`)**: `nadia/ui` builds against okay; `Workspace` data
+- [x] **S0 — skeleton (`workspace-ui-skeleton`)**: `nadia/ui` builds against okay; `Workspace` data
       with `Schema`; a `view` that renders the project list from a fixture; `TestPortable`-style test:
       the same program on the scripted host and on `Frame` yields the same frames. No network.
+      **Landed 2026-09-28** (nadia `ui/`, 5 tests; the `Schema` derivation is deferred to S2's durable
+      half). The prototype also carries S2's in-session half and the seam test of S3 with `Telegram.host`
+      behind `Wire.serve` — see nadia `ui/README.md` and rozum SPRINT `okay-workspace-ui`.
 - [ ] **S1 — read-only workspace, terminal + web from one program**: projects from `/rooms`, a
       transcript from `/messages/{date}`, live refresh from `/rooms/{n}/events`; `Wire.serve` behind
       a Live page; the terminal binary via `Wire.client(Terminal.host)`. Gate: one headless browser

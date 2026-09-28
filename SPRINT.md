@@ -3151,9 +3151,20 @@ the view-as-value, `Hello{vocab}` + `Ui.lower`, `Wire`, durable `Sessions`, and 
 DOM / Swing / GTK / Telegram / SwiftUI / Compose; what it lacks is a pane/focus manager, any multi-agent
 model, and a Telegram transport. What rozum lacks: presence on REST (MCP-only), one agent list across
 roster ∪ control/status ∪ nadia `/agents`, any client that keeps a draft across a switch.
-- [ ] **workspace-ui-skeleton** (S0) — `nadia/ui` builds against okay `0.2.0-SNAPSHOT` (publishLocal);
-  `Workspace` data with `Schema`; project list from a fixture; the `TestPortable`-style equality of the
-  scripted host and `Frame`. No network.
+- [x] **workspace-ui-skeleton** (S0) — **DONE 2026-09-28** (`nadia/ui`, nadia branch
+  `claude/multi-platform-remote-ui-qtn4zc`): its own sbt build on okay `0.2.0-SNAPSHOT` (publishLocal of
+  okay-ui's closure — 15 JVM modules; on a JDK < 22 the `okayJdk22`/`okayPlatformJdk25` test shims must be
+  emptied, `set okayJdk22 / Compile / sources := Nil`), `Model` (World · Context · Workspace), ONE
+  `Program.view(layout)` + `Program.update(feed)`, `InMemory` and `Rozum` (REST) feeds, three hosts in
+  `Main` (terminal · chat = `Telegram.host` driven from the console · wire = Protocol lines on stdio),
+  5 tests green: the scripted host and `Frame` agree; switching keeps each room's draft and `send` clears
+  only that one; posted-while-away is unread, posted-while-looking is seen; an agent is an addressee;
+  THE SEAM — the same walk in a chat behind `Wire.serve` reaches the scripted host's state and the message
+  landed. `Test/runMain nadia.ui.Show` prints the wide terminal frame and the chat's one message from the
+  same state. Not yet `Schema`-derived (S2's durable half). Found: sbt reads stdin before a forked host
+  does — `run.sh` runs the JVM directly.
+- [~] **workspace-ui-switching** (S2) — the in-session half is in S0 above (draft, anchor, seen,
+  addressee per item, one `update`); OPEN: `Sessions`-durable + a second attached client (gates b, c).
 - [ ] **workspace-ui-readonly** (S1) — projects from `/rooms`, transcript from `/messages/{date}`, refresh
   from `/rooms/{n}/events`; `Wire.serve` behind a Live page + the terminal via `Wire.client(Terminal.host)`.
   Gate: headless browser and headless terminal show the same rooms and last message from the live daemon.
