@@ -3184,8 +3184,18 @@ roster ∪ control/status ∪ nadia `/agents`, any client that keeps a draft acr
 - [ ] **workspace-ui-telegram-bridge** (S3) — the Rust bridge as transport: forwards `Update`s, performs
   `Act`s, keeps its ACL in front. Gate: the `ui-telegram` seam test + a scripted room-switch-and-post walk
   equal to the terminal's final state.
-- [ ] **workspace-ui-agents** (S4) — agents panel (roster ∪ control/status ∪ nadia `/agents`); presence
-  added to the daemon's SSE; `/tell` chat; `rozum launch` from the panel.
+- [x] **workspace-ui-agents** (S4) — **DONE 2026-09-29.** rozum: `GET /rooms/{name}/presence` on the
+  daemon REST — `{responding, polling}` as `{id, handle, display}`, the facts `meeting.status` carried
+  on the socket only (live room only; unknown room 404); test `presence_names_who_is_responding_in_a_live_room`,
+  18/18 `rest_read`. nadia/ui: `Agent` carries its source and its CAPS (Tell/Pause/Resume/Stop) as data, so
+  the page draws exactly the commands that act and a stale press is a notice; sources `NadiaServe`
+  (list, tell, pause/resume/stop, spawn with a per-project workspace) and `ControlApi` (model participants
+  + coders, stop; `rozum_sess` cookie) beside the roster; the composer TELLS an inbox agent and
+  @-mentions a room agent; a "new agent" form (task + project); rooms show who is typing. 13 tests.
+  Deviation: presence is a GET beside the SSE, not in it — the SSE says only "changed", and the client
+  re-reads on it anyway. Not done: `rozum launch` of a Claude/codex coder from the panel (control API
+  `/control/coder/launch` is there; the form is nadia-only for now). Nothing verified against live
+  daemons from the cloud container.
 - [ ] **workspace-ui-approvals** (S5) — BLOCKED on nadia NAD-14 (event stream + approval hook in `serve`).
 - [ ] **workspace-ui-native** (S6) — first product screen on a thin client; which target first is an OPEN
   question to the operator (spec §Open questions).

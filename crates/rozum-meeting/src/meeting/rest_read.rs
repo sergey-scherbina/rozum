@@ -179,6 +179,7 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/threads/{id}/pin", post(thread_pin))
         .route("/rooms/{name}/threads/{id}/link", post(thread_link))
         .route("/rooms/{name}/messages", post(submit))
+        .route("/rooms/{name}/presence", get(presence))
         .route("/rooms/{name}/redact", post(redact))
         .route("/rooms/{name}/reactions", get(reactions))
         .route("/rooms/{name}/react", post(react))
@@ -423,6 +424,40 @@ async fn events(
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// `GET /rooms/{name}/presence` — who is composing a reply right now and who is waiting on the
+/// room, the two liveness facts the socket's `meeting.status` has always carried and REST did not
+/// (`okay-workspace-ui` S4: a remote client could see who is IN a room but not who is TYPING).
+/// Each entry is `{id, handle, display}`; stale markers are filtered by the room itself, with the
+/// same thresholds the socket uses. A room that is not open in this daemon has no live markers, so
+/// it answers empty lists rather than opening it — presence is about the running room, not disk.
+async fn presence(State(state): State<RestState>, AxumPath(name): AxumPath<String>) -> Response {
+    if room_root(&state.registry, &name).is_none() {
+        return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
+    }
+    let (responding, polling) = match state.registry.get_by_name(&name).ok().flatten() {
+        None => (Vec::new(), Vec::new()),
+        Some(handle) => {
+            let room = handle.lock().await;
+            let named = |ids: Vec<super::participant::ParticipantId>| -> Vec<Value> {
+                ids.into_iter()
+                    .map(|id| {
+                        let entry = room.roster().participants.iter().find(|e| e.id == id.0);
+                        json!({
+                            "id": id.0,
+                            "handle": entry.map(|e| e.handle.clone()).unwrap_or_default(),
+                            "display": entry
+                                .map(|e| super::identity::display_name(&e.base_name, &e.handle))
+                                .unwrap_or_default(),
+                        })
+                    })
+                    .collect()
+            };
+            (named(room.active_responding()), named(room.active_polling()))
+        }
+    };
+    Json(json!({ "room": name, "responding": responding, "polling": polling })).into_response()
 }
 
 /// `GET /rooms/{name}/search?q=&kind=&severity=&tag=&thread=&since=&limit=` — full-history message
@@ -970,6 +1005,39 @@ mod tests {
             serve(listener, registry, secret, rx).await.unwrap();
         });
         (addr, tx)
+    }
+
+    #[tokio::test]
+    async fn presence_names_who_is_responding_in_a_live_room() {
+        let dir = tempdir().unwrap();
+        seed_room(dir.path(), "alpha", &["one"]);
+        let registry = Arc::new(RoomRegistry::new(dir.path().to_path_buf()));
+        // A participant joins the LIVE room and starts composing — the socket's `mark_responding`.
+        let handle = registry.get_by_name("alpha").unwrap().expect("seeded room resolves");
+        let who = {
+            let mut room = handle.lock().await;
+            let (id, who) = room.join(Some("tok"), "claude", "mcp", Some("alpha"));
+            room.mark_responding(&id);
+            who
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (_tx, rx) = watch::channel(false);
+        let reg = registry.clone();
+        tokio::spawn(async move { serve(listener, reg, "sekret".into(), rx).await.unwrap() });
+        let c = reqwest::Client::new();
+
+        let p: Value = c.get(format!("http://{addr}/rooms/alpha/presence"))
+            .bearer_auth("sekret").send().await.unwrap().json().await.unwrap();
+        assert_eq!(p["room"], "alpha");
+        assert_eq!(p["responding"].as_array().unwrap().len(), 1, "{p}");
+        assert_eq!(p["responding"][0]["handle"], who.as_str());
+        assert!(p["responding"][0]["display"].as_str().unwrap().contains("claude"), "{p}");
+        assert_eq!(p["polling"].as_array().unwrap().len(), 0);
+
+        // an unknown room is a 404, not an empty presence
+        let res = c.get(format!("http://{addr}/rooms/nope/presence")).bearer_auth("sekret").send().await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

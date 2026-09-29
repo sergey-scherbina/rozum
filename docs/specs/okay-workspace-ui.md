@@ -197,9 +197,12 @@ the point of the host being pure.
 - [ ] **S3 — Telegram over the Rust bridge as transport**: the same program, `Telegram.host`, the
       bridge performs `Act`s. Gate: the `ui-telegram` seam test, plus a scripted `Update` walk that
       switches rooms and posts, asserted equal to the terminal's final state.
-- [ ] **S4 — agents**: the agents panel from roster ∪ control/status ∪ nadia `/agents`; presence
+- [x] **S4 — agents**: the agents panel from roster ∪ control/status ∪ nadia `/agents`; presence
       added to the daemon's SSE; a chat with a nadia agent via `/tell`; `rozum launch` from the panel.
       Gate: an agent that ran `hello` appears within its TTL; `responding` flips while it types.
+      **Landed 2026-09-29**, offline-tested: presence is `GET /rooms/{n}/presence` (the SSE only says
+      "changed"; the client re-reads on it); agents carry their commands as caps; tell for inbox
+      agents, @-mention for room agents; a nadia spawn form. Coder launch from the panel is open.
 - [ ] **S5 — approvals**: a nadia tool approval shown as a `Form` (the elicitation circle), answered
       from any host. **Blocked on nadia**: `serve` needs an event stream and an approval hook
       (`nadia:BACKLOG.md` NAD-14).
