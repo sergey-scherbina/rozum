@@ -3163,8 +3163,18 @@ roster ∪ control/status ∪ nadia `/agents`, any client that keeps a draft acr
   landed. `Test/runMain nadia.ui.Show` prints the wide terminal frame and the chat's one message from the
   same state. Not yet `Schema`-derived (S2's durable half). Found: sbt reads stdin before a forked host
   does — `run.sh` runs the JVM directly.
-- [~] **workspace-ui-switching** (S2) — the in-session half is in S0 above (draft, anchor, seen,
-  addressee per item, one `update`); OPEN: `Sessions`-durable + a second attached client (gates b, c).
+- [x] **workspace-ui-switching** (S2) — **DONE 2026-09-29.** `Shared`: ONE session cell every device
+  folds into and is announced to (a `Key('\0')` sync — permitted on the wire because it names no
+  capability, never journaled); `attach` for in-process hosts, `serve` for wire clients, each with its
+  own layout; the journal is JSON lines of the human's events (refresh/sync excluded), appended
+  intent-first, refolded through the SAME `update` — but over `feed.replaying`, whose posts already
+  happened: the recovery test caught a refold re-sending every journaled message. 3 more tests (8
+  total): two devices see each other's draft and room switch; live == recovery over one journal and
+  the message is in the room once; the file journal survives a damaged line. Live: `./run.sh chat`
+  types a draft, a fresh `./run.sh wire` process over the same journal serves a tree carrying it.
+  Not okay's `Sessions`: the state holds Maps `Schema` does not derive, and okay-persist has no file
+  store here — a plain JSONL file the operator can read. Decision to revisit: focus is shared across
+  devices ("continue where I left off"); per-device focus is a map keyed by device.
 - [ ] **workspace-ui-readonly** (S1) — projects from `/rooms`, transcript from `/messages/{date}`, refresh
   from `/rooms/{n}/events`; `Wire.serve` behind a Live page + the terminal via `Wire.client(Terminal.host)`.
   Gate: headless browser and headless terminal show the same rooms and last message from the live daemon.

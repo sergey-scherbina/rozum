@@ -186,10 +186,14 @@ the point of the host being pure.
       transcript from `/messages/{date}`, live refresh from `/rooms/{n}/events`; `Wire.serve` behind
       a Live page; the terminal binary via `Wire.client(Terminal.host)`. Gate: one headless browser
       and one headless terminal show the same rooms and the same last message from the live daemon.
-- [ ] **S2 — switching with context**: the composer, `Context` per item, `Focus` in the session,
+- [x] **S2 — switching with context**: the composer, `Context` per item, `Focus` in the session,
       `Sessions`-durable. Gates: (a) type in room A, switch to B, switch back — the draft and the
       anchor are there; (b) the same, but "back" happens on a second attached client; (c) live run ==
-      recovery after a restart of the service.
+      recovery after a restart of the service. **Landed 2026-09-29** (nadia `ui/Shared.scala`): (a)
+      in `WorkspaceTest`, (b) and (c) in `SharedTest`. The journal is a JSONL file of the human's
+      events, not okay's `Sessions` (Maps in the state, no file store) — same doctrine, refold
+      through the same `update`, and through a feed whose posts already happened. Focus is shared
+      across devices; per-device focus is an open decision.
 - [ ] **S3 — Telegram over the Rust bridge as transport**: the same program, `Telegram.host`, the
       bridge performs `Act`s. Gate: the `ui-telegram` seam test, plus a scripted `Update` walk that
       switches rooms and posts, asserted equal to the terminal's final state.
