@@ -194,9 +194,11 @@ the point of the host being pure.
       events, not okay's `Sessions` (Maps in the state, no file store) — same doctrine, refold
       through the same `update`, and through a feed whose posts already happened. Focus is shared
       across devices; per-device focus is an open decision.
-- [ ] **S3 — Telegram over the Rust bridge as transport**: the same program, `Telegram.host`, the
+- [x] **S3 — Telegram over the Rust bridge as transport**: the same program, `Telegram.host`, the
       bridge performs `Act`s. Gate: the `ui-telegram` seam test, plus a scripted `Update` walk that
-      switches rooms and posts, asserted equal to the terminal's final state.
+      switches rooms and posts, asserted equal to the terminal's final state. **Landed 2026-09-29 as
+      stage 2 directly**: okay-telegram is the transport (the Rust bridge is skipped), the seam test
+      is in `WorkspaceTest`, the bot's rules in `TelegramBotTest`. A plain message is the composer.
 - [x] **S4 — agents**: the agents panel from roster ∪ control/status ∪ nadia `/agents`; presence
       added to the daemon's SSE; a chat with a nadia agent via `/tell`; `rozum launch` from the panel.
       Gate: an agent that ran `hello` appears within its TTL; `responding` flips while it types.

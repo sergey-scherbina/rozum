@@ -3181,9 +3181,14 @@ roster ∪ control/status ∪ nadia `/agents`, any client that keeps a draft acr
 - [ ] **workspace-ui-switching** (S2) — composer as a `Form` with a `live` input; `Context` per item
   (draft, anchor `(date, n)`, addressee, seen); `Focus` in the session; `Sessions`-durable. Gates: draft +
   anchor survive A→B→A, survive A→B on one client and →A on another, and live run == recovery.
-- [ ] **workspace-ui-telegram-bridge** (S3) — the Rust bridge as transport: forwards `Update`s, performs
-  `Act`s, keeps its ACL in front. Gate: the `ui-telegram` seam test + a scripted room-switch-and-post walk
-  equal to the terminal's final state.
+- [x] **workspace-ui-telegram-bridge** (S3) — **DONE 2026-09-29, and straight to stage 2**: okay-telegram
+  (`Bot`, `Chats`) landed in okay master, so no Rust bridge in between. nadia `ui/TelegramBot.scala` +
+  `./run.sh telegram`: one narrow host per chat on the shared session; only `NADIA_TELEGRAM_USERS` get in
+  (strangers dropped silently, logged with the id to allow); a plain message is the composer (room post, or
+  `tell` to an inbox agent). 16 tests in ui/, 3 over a recording Bot API; live smoke against
+  api.telegram.org with a wrong token (401 logged, backoff). NOT yet run with a real token and live
+  daemons — that is the operator's first run (nadia `ui/README.md`, "Telegram, on your machine"). The Rust
+  bot keeps running for its own commands until the operator retires it.
 - [x] **workspace-ui-agents** (S4) — **DONE 2026-09-29.** rozum: `GET /rooms/{name}/presence` on the
   daemon REST — `{responding, polling}` as `{id, handle, display}`, the facts `meeting.status` carried
   on the socket only (live room only; unknown room 404); test `presence_names_who_is_responding_in_a_live_room`,
