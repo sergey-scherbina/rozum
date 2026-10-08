@@ -2,7 +2,9 @@
 
 ## BUG-067 — MLX no longer builds from source with Xcode 27's Metal compiler; only a cached `mlx-sys` keeps the gateway buildable
 
-OPEN 2026-10-08. Found while building `gateway-start-visible`.
+FIXED 2026-10-08 (`bug067-mlx-xcode27`): mlx-rs `d7f0e6e9` (branch `fix/metal-4.1-xcode27`), whose
+mlx-c (`6c83776`) applies upstream ef5fc0fab to v0.31.2 as a third `PATCH_COMMAND` patch. Found while
+building `gateway-start-visible`.
 
 **Symptom.** A build of the default features (`mlx-native`) in any directory without an already
 built `mlx-sys` — a fresh worktree, a `cargo clean`, a new machine — fails in `mlx-sys`'s build
@@ -24,10 +26,19 @@ rev does not change. `./install.sh` therefore still works — and is the ONLY th
 build --release …`, or build `--no-default-features` (no native MLX) for code that does not need
 it. Do not `cargo clean` the main checkout's release target.
 
-**Fix (not done).** Move the `mlx-rs` fork to an MLX whose Metal kernels compile with Xcode 27's
-compiler (upstream MLX has followed each Metal release), or pin the Metal language standard the
-kernels are compiled with, if MLX's CMake exposes it for this rev. Either is its own lane: it
-touches every MLX model and needs the matrix re-run.
+**Fix.** Upstream fixed exactly this in ef5fc0fab ("Fix implicit `thread` address space qualifier
+becoming explicit in metal 4.1", #3963), first released in v0.32.3; its other macOS 27 fix, #4594
+(91c83d19b, merged after v0.32.3), touches only `gated_delta_*` kernels, which v0.31.2 does not have.
+ef5fc0fab cherry-picks onto v0.31.2 cleanly (36 files, kernels only, no API change) and applies after
+the two ROZUM patches. Carried as `patches/mlx-metal41-thread-address-space.patch` in the mlx-c fork,
+the same idempotent `PATCH_COMMAND` shape as the other two — not a move to MLX 0.32, which would
+also move mlx-c's API.
+
+Verified: `mlx.metallib` builds with 0 errors from v0.31.2 + all three patches (Metal 4.1, SDK 27.0);
+`rozum-gateway` builds `--release` in a worktree with an EMPTY target, against the local fork and
+again from git at the new rev (3.5 min each); `rozum-mlx` lib tests 19 pass. Same output: five
+prompts at temperature 0 through the old installed gateway (old kernels, the cached metallib) and the
+new build on a side port — byte-identical, each build also identical to itself on a second run.
 
 ## BUG-066 — hybrid continuous batching never grew `pads`, panicking the mlx worker and leaving the gateway claiming a model it could no longer run
 

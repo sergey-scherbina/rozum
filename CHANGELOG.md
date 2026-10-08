@@ -1,5 +1,20 @@
 # Changelog
 
+## bug067-mlx-xcode27 — MLX builds from source again with Xcode 27
+Completed: 2026-10-08
+
+BUG-067: after the update to Xcode 27, the Metal Toolchain was a separate download, and with it
+installed MLX v0.31.2's kernels did not compile under Metal 4.1 — only the main checkout's cached
+`mlx-sys` kept `install.sh` working; a fresh worktree, a `cargo clean` or a new machine could not build
+the gateway at all. Upstream's fix (ef5fc0fab, #3963, in v0.32.3) is backported onto v0.31.2 as a
+third patch in the mlx-c fork's `PATCH_COMMAND` (mlx-c `6c83776`, mlx-rs `d7f0e6e9` on
+`fix/metal-4.1-xcode27`); `crates/rozum-mlx` pins the new rev. MLX stays 0.31.2: kernels only, no API
+change.
+
+Verified: the whole metallib builds with 0 errors; `rozum-gateway --release` builds from an empty
+target (local fork, then git); `rozum-mlx` lib tests pass; five temperature-0 prompts answer
+byte-identically through the old and the new build.
+
 ## gateway-start-visible — a gateway waiting for RAM says so; the plists match the repo; binaries current
 Completed: 2026-10-08
 
