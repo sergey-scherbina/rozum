@@ -2289,6 +2289,19 @@ the guard above is what makes the question stop mattering.
 
 ---
 
+
+**Reproduced 2026-10-08, 12:44 (`gateway-start-visible`).** Two `scripts/install-bins.sh
+rozum-gateway …` runs a minute apart, the second replacing `~/.cargo/bin/rozum-gateway` with a build
+of the same tree, while the jobs running it were up. The script restarted them in order: gateway and
+both assistant pools came back; `meeting-daemon` and `ucc-control` — restarted last, each after a
+45 s "did not settle" — went into `spawn scheduled` with `last exit code = 78: EX_CONFIG`, `runs =
+21` and `16`, nothing on :8401/:8411; the periodic `doctor` job's next run exited 78 too. All four
+`ProgramArguments[0]` are the same path and inode as the jobs that recovered, so the path is not
+the difference. `launchctl bootout` + `bootstrap` of each fixed it at once (`(never exited)`,
+:8401 → 401, :8411 → 200, doctor run → exit 0). Still not established: why launchd keeps refusing
+the exec for some jobs and not others after an in-place replace — the repeat install within a
+minute is the new ingredient. Until it is: after `install-bins` reports "did not settle", check
+`launchctl print` for 78 and bootout/bootstrap that job.
 ## BUG-012 — UCC launch registries: concurrency races + terminal reconnect loop (audit sweep)
 
 - **Status:** fixed on `a1c073c`, deployed 2026-07-08; live-verified (concurrent launch, stop-during-start).
