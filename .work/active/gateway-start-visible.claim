@@ -1,0 +1,6 @@
+feature/gateway-start-visible 2026-10-08T10:35:13Z
+agent: claude-code (operator ask 2026-10-08: fix the hangs, the plist drift, update the binaries)
+heartbeat: 2026-10-08T10:35:13Z
+status: in-progress
+done-so-far: found — a gateway blocked in startup RAM admission (acquire_residency, up to 240 s) binds nothing, so clients see "no gateway" with no reason and launchd restarts it in a loop; the machine's gateway plist loads at the arch max n_ctx (262144, ~10 GiB reserved) since 2026-08-28 although elastic-context grows on demand from a baseline; assistant plists in the repo still pass --model removed on 2026-08-28 (ef1cd9b)
+next: gateway/starting.json while waiting for admission; gateway_ensure waits on a starting gateway (never spawns beside it) and reports why; repo plists fixed (gateway log path, assistant --model); machine plist reinstalled from the repo; install-bins for rozum-gateway + rozum-meet (mcp-http 9 commits behind)
