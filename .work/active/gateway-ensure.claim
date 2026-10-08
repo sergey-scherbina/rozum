@@ -1,0 +1,6 @@
+feature/gateway-ensure 2026-10-08T09:56:24Z
+agent: claude-code (operator ask 2026-10-08: nadia found no gateway — it was on another port; discovery + autostart so starting nadia just works)
+heartbeat: 2026-10-08T09:56:24Z
+status: in-progress
+done-so-far: cause found — Rust nadia defaults to :8080, the shared gateway is :8089 and publishes itself in gateway/active.json, which nadia never reads; Scala nadia was fixed 2026-10-06 via 'rozum gateway status --json', the Rust one never was
+next: spec docs/specs/gateway-ensure.md; rozum-core gateway ensure (reuse healthy active.json, else launchd kickstart com.rozum.gateway, else spawn detached under the spawn lock); 'rozum gateway ensure --json'; Rust nadia uses it; then nadia repo (Scala/ssc) call the command
