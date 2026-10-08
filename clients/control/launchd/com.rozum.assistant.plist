@@ -23,8 +23,6 @@
     <string>/Users/sergiy/.cargo/bin/rozum-gateway</string>
     <string>meetings</string>
     <string>participant-pool</string>
-    <string>--model</string>
-    <string>mlx-community:Qwen3.5-4B-MLX-4bit</string>
     <string>--room</string>
     <string>assistant</string>
     <string>--as</string>

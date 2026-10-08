@@ -1,5 +1,34 @@
 # Bugs
 
+## BUG-067 — MLX no longer builds from source with Xcode 27's Metal compiler; only a cached `mlx-sys` keeps the gateway buildable
+
+OPEN 2026-10-08. Found while building `gateway-start-visible`.
+
+**Symptom.** A build of the default features (`mlx-native`) in any directory without an already
+built `mlx-sys` — a fresh worktree, a `cargo clean`, a new machine — fails in `mlx-sys`'s build
+script. Two layers:
+
+1. After the update to Xcode 27 the Metal Toolchain is no longer part of Xcode: `metal` fails with
+   `cannot execute tool 'metal' due to missing Metal Toolchain`. Fixed on this machine with
+   `xcodebuild -downloadComponent MetalToolchain` (838 MB, Metal Toolchain 27A266a).
+2. With the toolchain present, the MLX kernels this `mlx-rs` rev vendors do not compile under that
+   compiler — address-space errors in `steel/gemm/nax.h:585`, `steel/gemm/mma.h:245/251`,
+   `steel/utils/integral_constant.h:23` (`reference to type 'thread vec<...>' could not bind to an
+   lvalue of type 'vec<...>'`, `return value cannot be qualified with address space`), dozens each.
+
+**Why nobody noticed.** `scripts/install-bins.sh` builds `--release` in the main checkout, whose
+`target/release/build/mlx-sys-*` was compiled before the Xcode update and is reused as long as the
+rev does not change. `./install.sh` therefore still works — and is the ONLY thing that does.
+
+**Workaround in use.** Build where that cache is: `CARGO_TARGET_DIR=<main checkout>/target cargo
+build --release …`, or build `--no-default-features` (no native MLX) for code that does not need
+it. Do not `cargo clean` the main checkout's release target.
+
+**Fix (not done).** Move the `mlx-rs` fork to an MLX whose Metal kernels compile with Xcode 27's
+compiler (upstream MLX has followed each Metal release), or pin the Metal language standard the
+kernels are compiled with, if MLX's CMake exposes it for this rev. Either is its own lane: it
+touches every MLX model and needs the matrix re-run.
+
 ## BUG-066 — hybrid continuous batching never grew `pads`, panicking the mlx worker and leaving the gateway claiming a model it could no longer run
 
 FIXED 2026-09-06 (`mlx-hybrid-pads-desync`).

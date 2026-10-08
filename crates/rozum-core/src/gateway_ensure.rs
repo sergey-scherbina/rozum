@@ -76,11 +76,14 @@ pub struct Opts {
     pub start: bool,
     /// How long to wait for a started gateway to answer.
     pub wait: Duration,
+    /// Told, once, why the wait is long — a gateway that is up but waiting for host RAM binds no
+    /// port, and a client that says nothing for minutes looks hung (`starting.json`).
+    pub notify: Option<fn(&str)>,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { model: None, start: true, wait: Duration::from_secs(300) }
+        Opts { model: None, start: true, wait: Duration::from_secs(300), notify: None }
     }
 }
 
@@ -109,6 +112,30 @@ pub async fn ensure(opts: &Opts) -> Result<Found, String> {
     if let Some(found) = find().await {
         return Ok(found);
     }
+    if let Some(st) = read_starting() {
+        // Up, but not serving yet: starting it again would make a second gateway queue for the
+        // same RAM. Wait for this one while it lives, and say why the wait is long; if it gives up
+        // (admission refused, it exits), what is left is the ordinary "nothing answers" below.
+        if !opts.start {
+            return Err(st.reason());
+        }
+        if let Some(n) = opts.notify {
+            n(&st.reason());
+        }
+        let deadline = Instant::now() + opts.wait;
+        while read_starting().is_some() && Instant::now() < deadline {
+            if let Some(f) = find().await {
+                return Ok(f);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        if let Some(f) = find().await {
+            return Ok(f);
+        }
+        if let Some(st) = read_starting() {
+            return Err(format!("still not serving after {}s — {}", opts.wait.as_secs(), st.reason()));
+        }
+    }
     if !opts.start {
         return Err(format!(
             "no gateway answers: looked at {} and :{DEFAULT_GATEWAY_PORT}",
@@ -121,7 +148,7 @@ pub async fn ensure(opts: &Opts) -> Result<Found, String> {
     match start_plan(job, lock.is_some()) {
         StartPlan::AskLaunchd => {
             launchd_kickstart(GATEWAY_LAUNCHD_LABEL);
-            wait_for(opts.wait, || false).await.map(|f| Found { how: How::Launchd, ..f }).map_err(|e| {
+            wait_for(opts.wait, || false, opts.notify).await.map(|f| Found { how: How::Launchd, ..f }).map_err(|e| {
                 format!(
                     "launchd job {GATEWAY_LAUNCHD_LABEL} did not bring the gateway up ({e}); \
                      see `launchctl print gui/$(id -u)/{GATEWAY_LAUNCHD_LABEL}` and {}",
@@ -129,13 +156,13 @@ pub async fn ensure(opts: &Opts) -> Result<Found, String> {
                 )
             })
         }
-        StartPlan::WaitForOther => wait_for(opts.wait, || false).await.map_err(|e| {
+        StartPlan::WaitForOther => wait_for(opts.wait, || false, opts.notify).await.map_err(|e| {
             format!("another client is starting the gateway and it did not come up ({e})")
         }),
         StartPlan::SpawnOwn => {
             let log = share::gateway_dir().join("gateway.log");
             let mut child = spawn_gateway(&gateway_binary(), spawn_model(opts.model.as_deref()), &log)?;
-            let found = wait_for(opts.wait, || matches!(child.try_wait(), Ok(Some(_)))).await;
+            let found = wait_for(opts.wait, || matches!(child.try_wait(), Ok(Some(_))), opts.notify).await;
             drop(lock);
             match found {
                 Ok(f) => Ok(Found { how: How::Spawned, ..f }),
@@ -205,20 +232,96 @@ async fn fetch_models(port: u16) -> Option<serde_json::Value> {
     r.json().await.ok()
 }
 
-/// Poll `find` every 500 ms until it answers, `gave_up` says the start failed, or `max` passes.
-async fn wait_for(max: Duration, mut gave_up: impl FnMut() -> bool) -> Result<Found, String> {
+/// Poll `find` every 500 ms until it answers, `gave_up` says the start failed, or `max` passes. A
+/// gateway seen waiting for RAM is reported once through `notify`, and is the reason given on timeout.
+async fn wait_for(max: Duration, mut gave_up: impl FnMut() -> bool, notify: Option<fn(&str)>) -> Result<Found, String> {
     let deadline = Instant::now() + max;
+    let mut told = false;
     loop {
         if let Some(f) = find().await {
             return Ok(f);
+        }
+        let starting = read_starting();
+        if let (Some(st), Some(n), false) = (&starting, notify, told) {
+            n(&st.reason());
+            told = true;
         }
         if gave_up() {
             return Err("the start failed".into());
         }
         if Instant::now() >= deadline {
-            return Err(format!("nothing answered within {}s", max.as_secs()));
+            return Err(match starting {
+                Some(st) => format!("still not serving after {}s — {}", max.as_secs(), st.reason()),
+                None => format!("nothing answered within {}s", max.as_secs()),
+            });
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// A gateway that is up but not serving yet: published by the daemon while it waits in the startup
+/// RAM admission (`acquire_residency`, up to `ROZUM_GATEWAY_RESIDENCY_WAIT_SECS`), removed as soon
+/// as it is admitted or exits. Without it that wait is invisible — no port is bound, so to a client
+/// it is the same as no gateway at all, for minutes, while launchd restarts it in a loop.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Starting {
+    pub pid: u32,
+    pub model: String,
+    pub footprint_bytes: u64,
+    pub min_free_bytes: u64,
+    /// Free RAM as admission counts it, when the wait began; `None` when it cannot be measured.
+    pub available_bytes: Option<u64>,
+    pub since: u64,
+}
+
+impl Starting {
+    pub fn reason(&self) -> String {
+        let mb = |b: u64| b / 1_048_576;
+        let free = self.available_bytes.map(|a| format!("~{} MB free", mb(a))).unwrap_or_else(|| "free RAM unknown".into());
+        format!(
+            "the gateway (pid {}) is up but waiting for host RAM to load {}: it needs ~{} MB + {} MB kept free, {free}, \
+             for {}s — free memory, or start it with a smaller --n-ctx",
+            self.pid,
+            self.model,
+            mb(self.footprint_bytes),
+            mb(self.min_free_bytes),
+            share::now_unix().saturating_sub(self.since),
+        )
+    }
+}
+
+pub fn starting_path() -> PathBuf {
+    share::gateway_dir().join("starting.json")
+}
+
+/// Publish this process as a gateway waiting for admission (write-temp + rename).
+pub fn write_starting(st: &Starting) {
+    let _ = share::ensure_dir();
+    let tmp = share::gateway_dir().join(format!("starting.json.tmp.{}", st.pid));
+    if std::fs::write(&tmp, serde_json::to_vec(st).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(&tmp, starting_path());
+    }
+}
+
+/// The waiting gateway, if its process is alive; a record left by a dead one is removed.
+pub fn read_starting() -> Option<Starting> {
+    let st: Starting = serde_json::from_slice(&std::fs::read(starting_path()).ok()?).ok()?;
+    if share::pid_alive(st.pid) {
+        Some(st)
+    } else {
+        let _ = std::fs::remove_file(starting_path());
+        None
+    }
+}
+
+/// Remove the record only if it is still this process's — never a newer gateway's.
+pub fn clear_starting_if_mine(pid: u32) {
+    let mine = std::fs::read(starting_path())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Starting>(&b).ok())
+        .is_some_and(|st| st.pid == pid);
+    if mine {
+        let _ = std::fs::remove_file(starting_path());
     }
 }
 
@@ -404,6 +507,31 @@ mod tests {
         let none_resident = json!({"data":[{"id":"a","resident":false},{"id":"b"}]});
         assert_eq!(held_model(&none_resident, None), ("a".to_string(), false));
         assert_eq!(held_model(&json!({"data":[]}), None), (String::new(), false));
+    }
+
+    #[test]
+    fn a_waiting_gateway_says_what_it_waits_for() {
+        let st = Starting {
+            pid: 42,
+            model: "org/m".into(),
+            footprint_bytes: 12_135 * 1_048_576,
+            min_free_bytes: 2048 * 1_048_576,
+            available_bytes: Some(7_242 * 1_048_576),
+            since: share::now_unix(),
+        };
+        let r = st.reason();
+        for part in ["pid 42", "org/m", "~12135 MB", "2048 MB kept free", "~7242 MB free", "--n-ctx"] {
+            assert!(r.contains(part), "{part} missing from: {r}");
+        }
+        let unknown = Starting { available_bytes: None, ..st };
+        assert!(unknown.reason().contains("free RAM unknown"));
+    }
+
+    #[test]
+    fn the_starting_record_round_trips_as_json() {
+        let st = Starting { pid: 7, model: "m".into(), footprint_bytes: 1, min_free_bytes: 2, available_bytes: None, since: 3 };
+        let back: Starting = serde_json::from_slice(&serde_json::to_vec(&st).unwrap()).unwrap();
+        assert_eq!(back, st);
     }
 
     #[test]

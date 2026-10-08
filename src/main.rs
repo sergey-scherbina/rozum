@@ -2787,10 +2787,24 @@ async fn acquire_residency_or_exit(
     }
     let footprint = footprint_override.unwrap_or_else(|| estimate_model_footprint_bytes(model, n_ctx));
     let model_owned = model.to_string();
-    match tokio::task::spawn_blocking(move || {
+    // The wait below can last minutes with NO port bound — to a client, the same as no gateway at
+    // all. Say that a gateway is up and what it waits for, until it is admitted or gives up
+    // (`docs/specs/gateway-ensure.md`, "A gateway waiting for RAM").
+    let me = std::process::id();
+    rozum_core::gateway_ensure::write_starting(&rozum_core::gateway_ensure::Starting {
+        pid: me,
+        model: model.to_string(),
+        footprint_bytes: footprint,
+        min_free_bytes: rozum::share::min_free_ram_bytes(),
+        available_bytes: rozum::share::available_ram_for_admission(),
+        since: rozum::share::now_unix(),
+    });
+    let admitted = tokio::task::spawn_blocking(move || {
         rozum::share::acquire_residency(&model_owned, footprint)
     })
-    .await
+    .await;
+    rozum_core::gateway_ensure::clear_starting_if_mine(me);
+    match admitted
     {
         Ok(Ok(guard)) => guard,
         Ok(Err(denied)) => {
@@ -6267,7 +6281,12 @@ fn run_meetings_uninstall() {
 /// `rozum gateway ensure`: exit 0 with a gateway, 1 without (the reason on stderr).
 async fn run_gateway_ensure(model: Option<String>, no_start: bool, json: bool) {
     use rozum_core::gateway_ensure as ge;
-    let opts = ge::Opts { model, start: !no_start, ..ge::Opts::default() };
+    let opts = ge::Opts {
+        model,
+        start: !no_start,
+        notify: Some(|m| eprintln!("rozum gateway ensure: {m}")),
+        ..ge::Opts::default()
+    };
     match ge::ensure(&opts).await {
         Ok(f) => {
             if json {

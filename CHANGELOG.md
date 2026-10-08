@@ -1,5 +1,28 @@
 # Changelog
 
+## gateway-start-visible — a gateway waiting for RAM says so; the plists match the repo; binaries current
+Completed: 2026-10-08
+
+A gateway reserves its model's RAM before it binds its port and can wait up to 240 s for the host to
+free it — a wait no client could see: a refused connection, no reason, then a refusal, an exit and a
+launchd restart into the same wait. Seen live the same day.
+
+- The daemon publishes `gateway/starting.json` while it waits (model, need, keep-free, free, since)
+  and removes it when admitted or refused. `gateway_ensure` reads it: it does not start a second
+  gateway beside a waiting one, says why the wait is long (once, `Opts::notify`), waits while that
+  process lives and goes on to an ordinary start if it gives up. `docs/specs/gateway-ensure.md`, "A
+  gateway waiting for RAM". Verified live with the job booted out and a gateway forced to wait
+  (`ROZUM_GATEWAY_AVAILABLE_RAM_BYTES`): `gateway ensure --no-start` exits 1 with the reason; nadia
+  printed it at once, waited the 20 s that gateway lived, then started its own — 18 s in all, where
+  it had been a silent "no gateway". Tests: `gateway_ensure` 9 (2 new).
+- `clients/control/launchd`: the gateway job logs to `gateway/service.log` (where `rozum service
+  install` and the machine put it); the assistant jobs no longer pass `--model`, which the machine
+  dropped on 2026-08-28 when participants started resolving it from the gateway (`ef1cd9b`). The
+  machine's gateway job had lost `--n-ctx 32768` the same day and was reserving the architecture
+  maximum (~10 GiB) up front; reinstalled from the repo.
+- BUG-067: MLX does not build from source with Xcode 27's Metal compiler — only the main checkout's
+  cached `mlx-sys` keeps `install.sh` working.
+
 ## gateway-ensure — nadia finds the shared gateway, and starts it when it is not there
 Completed: 2026-10-08
 

@@ -68,6 +68,30 @@ runs. That keeps a launch-managed daemon from idle-exiting under a quiet chat, a
 and `rozum launch`'s takeover that someone is attached. `gateway_ensure::LeaseGuard` heartbeats every
 20 s and removes the lease on drop.
 
+## A gateway waiting for RAM
+
+Added 2026-10-08 (`gateway-start-visible`). A daemon reserves its model's RAM BEFORE it binds its
+port (`acquire_residency`, which waits up to `ROZUM_GATEWAY_RESIDENCY_WAIT_SECS`, 240 s, for the host
+to free enough). During that wait it is up and serving nothing, which to a client is exactly "no
+gateway": measured the same day, a launchd-restarted gateway sat in that wait for minutes, every
+client saw a refused connection with no reason, and the wait ended in a refusal, an exit and a
+launchd restart into the same wait.
+
+- While it waits, the daemon publishes `gateway/starting.json` — `{pid, model, footprint_bytes,
+  min_free_bytes, available_bytes, since}` — and removes it once admitted or refused (only if still
+  its own). A record whose pid is dead is removed by the reader.
+- `ensure` finding no gateway but a live `starting.json` does NOT start one: a second daemon would
+  queue for the same RAM. It says why the wait is long — once, through `Opts::notify` (nadia and
+  `rozum gateway ensure` print it) — and waits while that process lives. If it gives up, `ensure`
+  goes on to the ordinary start. On timeout the reason is the record's; with `--no-start` the reason
+  is the error.
+- The line names the numbers and the two remedies: free memory, or a smaller `--n-ctx`.
+
+The machine's job starts the model at `--n-ctx 32768` (`clients/control/launchd/com.rozum.gateway.plist`)
+and lets elastic context grow it on demand (`elastic-context-on-demand.md`). Started without
+`--n-ctx`, the gateway reserves the architecture maximum up front — 262144 for Qwen3.5, ~10 GiB —
+which is what put it into that wait.
+
 ## Surfaces
 
 ```

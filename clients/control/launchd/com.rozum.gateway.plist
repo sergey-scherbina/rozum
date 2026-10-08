@@ -54,7 +54,7 @@
   <key>WorkingDirectory</key><string>/Users/sergiy/work/my/rozum</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/sergiy/.rozum-gateway.log</string>
-  <key>StandardErrorPath</key><string>/Users/sergiy/.rozum-gateway.log</string>
+  <key>StandardOutPath</key><string>/Users/sergiy/.local/state/rozum/gateway/service.log</string>
+  <key>StandardErrorPath</key><string>/Users/sergiy/.local/state/rozum/gateway/service.log</string>
 </dict>
 </plist>

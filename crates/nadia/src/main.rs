@@ -105,7 +105,12 @@ fn needs_gateway(mode: &str, opts: &Opts) -> bool {
 /// rozum gateway answers with the model it has (`nadia:SPEC.md` §8 rule 6).
 async fn find_gateway(model: &str) -> Result<String, String> {
     use rozum_core::gateway_ensure::{self as ge, How};
-    let found = ge::ensure(&ge::Opts { model: Some(model.to_string()), ..ge::Opts::default() }).await?;
+    let found = ge::ensure(&ge::Opts {
+        model: Some(model.to_string()),
+        notify: Some(|m| eprintln!("nadia: {m}")),
+        ..ge::Opts::default()
+    })
+    .await?;
     if found.how != How::Running {
         eprintln!("nadia: no gateway was running — {} at {}", found.how.as_str(), found.url());
     }
