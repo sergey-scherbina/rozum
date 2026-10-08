@@ -789,6 +789,46 @@ index answers prose queries correctly (`"residency admission queue"` → the rig
 - [ ] **teach-dpo** — phase 3: when corrected pairs accumulate, preference training
   (correction ≻ original) over plain SFT; same trainer plumbing, different loss.
 
+## Skill refinement from agent traces (operator, 2026-10-08)
+
+The skills in `vendor/agent-plugins` are improved by hand, after incidents (okay's AGENTS.md is a
+record of them: "INCIDENT 2026-09-03", "THE 143, SOLVED"). SkillRefiner (Khatry, Smith, Durrett,
+Dillig, Neubig et al., "Offline Skill Refinement from Historical Agent Traces",
+https://www.alphaxiv.org/abs/2610.skillrefiner-offline-skill-refinement) does the same from the
+traces the agents leave, with no new rollouts: summarize each trace with its outcome, cluster
+successes and failures apart, propose ONE skill edit per cluster, check each failure-derived edit
+against the evidence, merge the accepted ones into the skill. Reported: better in all eight of its
+settings (SpreadsheetBench 84% vs Trace2Skill's 79%) at 1.4-42x fewer refinement tokens than the
+other refiners. Its code is announced, not released — so this is built here.
+
+- [ ] **skill-refine — the pipeline as a rozum tool, and a thin skill over it.** A program, not a
+  skill alone: a skill is text an agent reads, and this walks gigabytes of traces, clusters them
+  and makes hundreds of model calls — an agent following it as instructions would spend its context
+  on the first few dozen traces and come out different every run. Why rozum and not a standalone
+  script: it already has the parts — embeddings for the clustering (`rozum-core/src/embedding.rs`,
+  `rozum-agent/src/rag_embed.rs`), local models for the expensive stage, summarizing every trace
+  (`rozum-mlx`, `rozum-gguf`), the gateway to a cloud model for the edits and their check
+  (`rozum-gateway`), per-project state for the summary cache (a re-run pays only for new traces),
+  the `?project=` binding, MCP (`skills.refine`, callable by Claude and codex alike), and the rooms
+  to post the proposed edits to. Shape:
+  1. **collect** traces for a period, by project and by the skill they loaded: Claude Code
+     (`~/.claude/projects/<project>/*.jsonl`) and codex (`~/.codex/sessions/**/*.jsonl`);
+  2. **label** outcomes WITHOUT a model, through a per-project adapter reading what the repository
+     already records (okay's is its BACKLOG `skill-refine-pilot`: landed / abandoned / reverted
+     lanes, ci-runner verdicts, flakes, BUGS);
+  3. **summarize** each trace with its outcome — local model, cached by trace hash;
+  4. **cluster** successes and failures apart; **propose** one edit per cluster; **check**
+     failure-derived edits against the traces they cite;
+  5. **emit** a diff to the skill's `commands/<name>.md` and a report naming the traces behind
+     every edit — for the operator to accept or reject, never applied by the tool.
+  The skill (`skill-refine`, in agent-plugins): when to run it (weekly, or after a run of incidents
+  around one skill), how to read the report, that a failure-derived edit is a hypothesis — checked
+  with `replay` on a recorded run where it can be — and that edits land as a PR to agent-plugins.
+  DONE WHEN: okay's pilot (`multi-agent` over two weeks of its traces) produces a diff whose every
+  edit cites its traces, and the operator has ruled on each. Alternative considered and not taken
+  first: the same pipeline in Scala on okay's okay-llm/okay-rag/okay-agent — dogfooding okay, but
+  rebuilding the embeddings, cache and MCP door this repository already has.
+
 ## Rescued from the parked bucket (triage 2026-08-08)
 
 Both were moved into *Deprioritised — the model is frozen* on 2026-08-04, and neither carries a
