@@ -1,6 +1,0 @@
-feature/bug067-mlx-xcode27 2026-10-08T11:36:09Z
-agent: claude-code (operator ask 2026-10-08: "берись" — fix BUG-067)
-heartbeat: 2026-10-08T11:36:09Z
-status: in-progress
-done-so-far: MLX v0.31.2 kernels fail under Xcode 27's Metal 4.1 (address-space errors); upstream fixed it in ef5fc0fab (#3963, in v0.32.3) and #4594 (91c83d19b, gated_delta only — absent in 0.31.2). ef5fc0fab cherry-picks cleanly onto v0.31.2 and the whole mlx.metallib builds with 0 errors
-next: mlx-rs fork branch fix/metal-4.1-xcode27 (from d15537e): FetchContent PATCH_COMMAND with the backport; bump the rev in crates/rozum-mlx; build from a clean target; same-output check old vs new gateway at temperature 0; install
