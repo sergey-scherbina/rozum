@@ -35,6 +35,7 @@ USAGE:
 OPTIONS:
     --workspace <DIR>     where the agent may act        [default: current directory]
     --gateway <URL>       rozum gateway base URL         [env: ROZUM_GATEWAY_URL]
+                          [default: the shared gateway, found or started]
     --model <ID>          model id to ask the gateway for [env: NADIA_MODEL]
     --max-steps <N>       model round-trips per task     [default: 24]
     --allow-net           let `bash` reach the network   [default: denied]
@@ -66,13 +67,18 @@ EXIT CODES (batch):
     0  finished          1  budget exhausted          2  gateway/transport failure
 ";
 
-/// Where to reach the gateway when the caller did not say.
+/// Where to reach the gateway when the caller said so — empty when nobody did, and then
+/// `find_gateway` asks the shared one where it is.
 ///
 /// `rozum launch` already exports both of these to every agent it starts
 /// (`src/main.rs`: `OPENAI_BASE_URL` = `<base>/v1`, `ROZUM_GATEWAY_URL` = `<base>`), so
 /// honouring them is what makes `AGENTS=nadia scripts/bench/agentic.sh` work with no
 /// change to the launcher at all — nadia is wired by the same env contract as every
 /// other OpenAI-compatible client.
+///
+/// There is no default port here any more. There was one, `:8080`, while the shared gateway lived
+/// on `:8089` and said so in its registry: nadia reported "no gateway" with one running
+/// (`docs/specs/gateway-ensure.md`).
 fn default_gateway() -> String {
     if let Ok(v) = std::env::var("OPENAI_BASE_URL") {
         return with_v1(&v);
@@ -80,7 +86,43 @@ fn default_gateway() -> String {
     if let Ok(v) = std::env::var("ROZUM_GATEWAY_URL") {
         return with_v1(&v);
     }
-    "http://127.0.0.1:8080/v1".into()
+    String::new()
+}
+
+/// Does this invocation talk to a model? `mcp`, `runs` and a strict replay (the model's replies
+/// come from the journal) touch no gateway, and must not start one.
+fn needs_gateway(mode: &str, opts: &Opts) -> bool {
+    match mode {
+        "run" => opts.replay.is_none() || opts.replay_live_tools || opts.replay_fork.is_some(),
+        "chat" | "serve" => true,
+        _ => false,
+    }
+}
+
+/// The shared gateway, found or started (`rozum_core::gateway_ensure`), as a `/v1` base URL. Says
+/// on stderr when it had to start one, when the model is not loaded yet, and when the gateway holds
+/// a different model than `--model` asked for — the one failure invisible in the output, because a
+/// rozum gateway answers with the model it has (`nadia:SPEC.md` §8 rule 6).
+async fn find_gateway(model: &str) -> Result<String, String> {
+    use rozum_core::gateway_ensure::{self as ge, How};
+    let found = ge::ensure(&ge::Opts { model: Some(model.to_string()), ..ge::Opts::default() }).await?;
+    if found.how != How::Running {
+        eprintln!("nadia: no gateway was running — {} at {}", found.how.as_str(), found.url());
+    }
+    let asked = ge::spawn_model(Some(model));
+    if let Some(asked) = asked {
+        if !found.model.is_empty() && !rozum_models::model_source::same_model(asked, &found.model) {
+            eprintln!(
+                "nadia: warning: --model {asked}, but the gateway holds {} and will answer with it \
+                 (switch it with `rozum gateway switch --model {asked}`)",
+                found.model
+            );
+        }
+    }
+    if !found.resident && !found.model.is_empty() {
+        eprintln!("nadia: {} is not loaded — the first reply loads it", found.model);
+    }
+    Ok(with_v1(&found.url()))
 }
 
 /// The two spellings of a gateway URL differ by exactly one path segment, and which one
@@ -303,7 +345,7 @@ async fn run_mcp_list(opts: &Opts, workspace: &std::path::Path) -> i32 {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (mode, task, opts) = match parse(&args) {
+    let (mode, task, mut opts) = match parse(&args) {
         Ok(v) => v,
         Err(msg) => {
             eprintln!("{msg}");
@@ -328,6 +370,22 @@ async fn main() {
     sb.confine = opts.confine && cfg!(target_os = "macos");
     let root = sb.root().to_path_buf();
     let sandbox = Arc::new(sb);
+
+    // No gateway named: find the shared one, or start it. Only where a model is talked to, and
+    // with a lease held for as long as nadia runs, so a gateway it started does not idle-exit
+    // under a quiet chat.
+    let _lease = if opts.gateway.is_empty() && needs_gateway(&mode, &opts) {
+        match find_gateway(&opts.model).await {
+            Ok(url) => opts.gateway = url,
+            Err(e) => {
+                eprintln!("nadia: no gateway — {e}");
+                std::process::exit(2);
+            }
+        }
+        Some(rozum_core::gateway_ensure::LeaseGuard::hold())
+    } else {
+        None
+    };
 
     // Which gateway and which model a run actually talked to is the first question asked
     // of any surprising matrix row, and it is not recoverable after the fact.
@@ -1035,6 +1093,26 @@ mod tests {
         assert_eq!(with_v1("http://127.0.0.1:8080/"), "http://127.0.0.1:8080/v1");
         assert_eq!(with_v1("http://127.0.0.1:8080/v1"), "http://127.0.0.1:8080/v1");
         assert_eq!(with_v1("http://127.0.0.1:8080/v1/"), "http://127.0.0.1:8080/v1");
+    }
+
+    #[test]
+    fn only_what_talks_to_a_model_looks_for_a_gateway() {
+        let opts = |args: &[&str]| parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).unwrap();
+        for (args, want) in [
+            (&["run", "do it"][..], true),
+            (&["chat"][..], true),
+            (&[][..], true),
+            (&["serve"][..], true),
+            (&["mcp", "list"][..], false),
+            (&["runs", "list"][..], false),
+            // a strict replay answers from the journal: no gateway, none started
+            (&["run", "--replay", "x.jsonl"][..], false),
+            (&["run", "--replay", "x.jsonl", "--replay-live-tools"][..], true),
+            (&["run", "--replay", "x.jsonl", "--replay-fork", "y.jsonl"][..], true),
+        ] {
+            let (mode, _, o) = opts(args);
+            assert_eq!(needs_gateway(&mode, &o), want, "{args:?}");
+        }
     }
 
     #[test]

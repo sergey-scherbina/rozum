@@ -22,4 +22,5 @@ pub mod prefetch;
 pub mod sampler;
 pub mod serving;
 pub mod share;
+pub mod gateway_ensure;
 pub mod shed;

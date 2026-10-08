@@ -1,5 +1,39 @@
 # Changelog
 
+## gateway-ensure — nadia finds the shared gateway, and starts it when it is not there
+Completed: 2026-10-08
+
+The operator started `nadia`; it said there was no gateway. There was one, on `:8089`, where
+`com.rozum.gateway` puts it and where it announces itself in `gateway/active.json`. The Rust nadia,
+with no `--gateway` and neither environment variable, went to a literal `:8080`. The Scala nadia had
+been fixed for the same mismatch two days earlier; this one, in this repository, never was.
+
+One function now finds the gateway or starts it, and every client calls it
+(`docs/specs/gateway-ensure.md`): `rozum_core::gateway_ensure::ensure` in-process, `rozum gateway
+ensure [--model M] [--no-start] [--json]` for everything else. The registry if its port answers,
+else the default port, else a start: `launchctl kickstart` (no `-k`) where `com.rozum.gateway` is
+installed — never a spawn beside the job, the rule `meeting-daemon-ownership.md` already set — else a
+detached launch-managed daemon under the spawn lock, which idle-exits once no lease is held. It
+reports the model held and whether it is resident, and never switches a running gateway's model.
+
+nadia: the `:8080` default is gone. An explicit URL still wins; otherwise `ensure`, only in the modes
+that talk to a model (`run`, `chat`, `serve`, a replay with live tools — not `mcp list`, `runs`, a
+strict replay), with a lease held while nadia runs. It says when it started a gateway, when the model
+is not loaded yet, and when `--model` names a model the gateway does not hold (`same_model`).
+
+Verified on this machine, against the live gateway: `rozum gateway ensure` answers `:8089` from the
+registry with `resident: false`; `nadia chat` with no environment finds it (it went to `:8080`
+before), warns on a mismatched `--model`, still honours `ROZUM_GATEWAY_URL`, touches no gateway for
+`mcp list`, and leaves no lease behind. The two START paths (launchd, spawn) are covered by the
+decision's unit tests, not exercised live — that needs the running gateway taken down. Tests:
+`rozum-core` 7 new (`gateway_ensure`), `nadia` 1 new (`only_what_talks_to_a_model_looks_for_a_gateway`),
+`cargo test -p nadia` green (55 + 7). Built with `--no-default-features`: the MLX build fails on this
+machine for a reason outside the change — `metal` is missing (`xcodebuild -downloadComponent
+MetalToolchain`).
+
+The Scala and ScalaScript nadias call `rozum gateway ensure --json` in the nadia repository
+(`nadia:SPEC.md` §8 rule 7), falling back to `gateway status` on an older rozum.
+
 ## rag-rerank — fast first, precise on `rerank: true`
 Completed: 2026-09-25
 

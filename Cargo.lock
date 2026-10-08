@@ -3818,6 +3818,7 @@ dependencies = [
  "rozum-confine",
  "rozum-core",
  "rozum-gateway",
+ "rozum-models",
  "rozum-paths",
  "serde",
  "serde_json",

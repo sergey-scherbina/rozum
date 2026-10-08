@@ -1348,6 +1348,21 @@ enum GatewayAction {
         #[arg(long)]
         json: bool,
     },
+    /// Find the shared gateway, and start it if nothing answers (docs/specs/gateway-ensure.md):
+    /// the registry, else the default port, else launchd's `com.rozum.gateway` where it is
+    /// installed, else a detached daemon. The one discovery every client uses — never a port of
+    /// its own. Never switches a running gateway's model.
+    Ensure {
+        /// The model to START a gateway with, when one has to be started (default: `[runtime].model`).
+        #[arg(long)]
+        model: Option<String>,
+        /// Find only; start nothing.
+        #[arg(long)]
+        no_start: bool,
+        /// `{"url","port","model","pid","how","resident"}` on stdout.
+        #[arg(long)]
+        json: bool,
+    },
     /// Serve the control snapshot over HTTP (always-up, no gateway needed) for a dashboard / the UCC.
     ControlServe {
         /// Port for `GET /control/status` (with permissive CORS).
@@ -1634,6 +1649,7 @@ async fn main() {
                 run_gateway(port, model, n_ctx, cfg).await;
             }
             Some(GatewayAction::Status { json }) => run_gateway_status(json).await,
+            Some(GatewayAction::Ensure { model, no_start, json }) => run_gateway_ensure(model, no_start, json).await,
             Some(GatewayAction::ControlServe { port }) => {
                 #[cfg(not(feature = "ucc"))]
                 {
@@ -6246,6 +6262,33 @@ fn run_meetings_uninstall() {
         xml.display(),
         launcher.display()
     );
+}
+
+/// `rozum gateway ensure`: exit 0 with a gateway, 1 without (the reason on stderr).
+async fn run_gateway_ensure(model: Option<String>, no_start: bool, json: bool) {
+    use rozum_core::gateway_ensure as ge;
+    let opts = ge::Opts { model, start: !no_start, ..ge::Opts::default() };
+    match ge::ensure(&opts).await {
+        Ok(f) => {
+            if json {
+                let v = serde_json::json!({
+                    "url": f.url(),
+                    "port": f.port,
+                    "model": f.model,
+                    "pid": f.pid,
+                    "how": f.how.key(),
+                    "resident": f.resident,
+                });
+                println!("{v}");
+            } else {
+                println!("gateway {}  model {}  ({})", f.url(), f.model, f.how.as_str());
+            }
+        }
+        Err(e) => {
+            eprintln!("rozum gateway ensure: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 async fn run_gateway_status(json: bool) {
