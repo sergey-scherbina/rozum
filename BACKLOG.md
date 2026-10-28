@@ -40,6 +40,12 @@ is by evidence, not by fashion.
   1.3 GB, the full 262k ≈ 5 GB. **PagedAttention would save little here**: mlx-native already grows KV lazily per
   token; paging pays off for hundreds of concurrent requests, not one or two agents. The memory is the WEIGHTS.
 
+**Said in public** (the operator's LinkedIn reply, 2026-10-28): prefill ~1k tok/s; a new session waits 12-17 s;
+most turns 0.3-2 s with the prefix cache; past the window every turn re-prefilled ~31k tokens, 40+ s; next in rozum:
+keep the cached prefix alive when trimming, cache it on disk across sessions, retrieve snippets instead of whole
+files. The follow-up post needs the after-numbers: ttft per turn past the window, cold start with the prefix on
+disk, tokens read per task with `rag.search` — measured by `obs-prefill`, before/after on the same task.
+
 **Items, in order:**
 
 - [ ] **ctx-trim-hysteresis** — the biggest, cheapest win (37–49 s → seconds per turn past the window). When a
