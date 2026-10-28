@@ -1,5 +1,21 @@
 # Changelog
 
+## local-model-usability — sbt (and any socket-file tool) runs inside the agent jail
+Completed: 2026-10-28
+
+A local model (Qwen3.6-35B-A3B under `rozum launch`) made the right edits to a Scala project, then
+looped: every `sbt` died at boot with `UnixDomainServerSocket.bind: Operation not permitted`. The
+Seatbelt profile allowed `~/.sbt`, `~/.ivy2` and Coursier for files, but its only network rule is
+IP loopback, and Seatbelt files unix-domain sockets under `network*`. The profile now allows
+binding and connecting unix sockets whose file is in a writable dir — no wider than the write
+jail itself (none under `--network full`, which already allows everything).
+
+Verified: okay-guard's `sbt localJVM/test` passes under the generated profile (it failed at boot
+before); `sandbox` unit tests pass, with a new one for the rule. Not changed, on purpose: the
+default context — mlx-native already starts at the model's max and grows on demand within free RAM;
+the 32k a run saw was free RAM at the time, and a fixed 64k would turn that into a refused load.
+The stuck-loop breaker already exists and stopped the looping run.
+
 ## bug067-mlx-xcode27 — MLX builds from source again with Xcode 27
 Completed: 2026-10-08
 

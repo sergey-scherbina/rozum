@@ -289,6 +289,20 @@ impl SandboxPolicy {
             }
             NetPolicy::Full => p.push_str("(allow network*)\n"),
         }
+        // Unix-domain sockets are local IPC, not network, but Seatbelt files them under
+        // `network*` — and the loopback rule above is IP-only. A socket whose FILE lives in a
+        // writable dir is as confined as that dir, so allow binding/connecting there: sbt boots
+        // its server on `~/.sbt/1.0/server/<hash>/sock` and dies with EPERM without it (as do
+        // gradle's daemon and anything else that talks to itself over a socket file).
+        if self.network != NetPolicy::Full && !self.writable.is_empty() {
+            p.push_str("(allow network-bind network-outbound network-inbound\n");
+            for w in &self.writable {
+                let q = sbpl_quote(w);
+                p.push_str(&format!("  (local unix-socket (subpath {q}))\n"));
+                p.push_str(&format!("  (remote unix-socket (subpath {q}))\n"));
+            }
+            p.push_str(")\n");
+        }
         p
     }
 
@@ -642,6 +656,18 @@ mod tests {
     }
 
     #[test]
+    fn unix_sockets_only_in_writable_dirs() {
+        let pol = SandboxPolicy::rust_coding(&[PathBuf::from("/private/tmp/ws")], NetPolicy::GatewayOnly);
+        let p = pol.to_seatbelt_profile();
+        assert!(p.contains("(local unix-socket (subpath \"/private/tmp/ws\"))"));
+        assert!(p.contains("(remote unix-socket (subpath \"/private/tmp/ws\"))"));
+        // a secret dir is never writable, so never a socket dir either
+        assert!(!p.contains("unix-socket (subpath \"/Users/x/.ssh\")"));
+        let full = SandboxPolicy::rust_coding(&[PathBuf::from("/private/tmp/ws")], NetPolicy::Full);
+        assert!(!full.to_seatbelt_profile().contains("unix-socket"));
+    }
+
+    #[test]
     fn network_variants() {
         let base = |n| SandboxPolicy {
             writable: vec![PathBuf::from("/ws")],
@@ -650,7 +676,9 @@ mod tests {
             network: n,
         }
         .to_seatbelt_profile();
-        assert!(!base(NetPolicy::None).contains("allow network")); // deny-default only
+        // deny-default only: no IP rule (the unix-socket rule is local IPC in writable dirs)
+        assert!(!base(NetPolicy::None).contains("(local ip)"));
+        assert!(!base(NetPolicy::None).contains("(allow network*"));
         assert!(base(NetPolicy::GatewayOnly).contains("(allow network* (local ip) (remote ip \"localhost:*\"))"));
         // Seatbelt loopback-only is already strict → GatewayStrict renders identically.
         assert_eq!(base(NetPolicy::GatewayStrict), base(NetPolicy::GatewayOnly));
