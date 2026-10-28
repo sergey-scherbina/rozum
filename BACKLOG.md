@@ -17,6 +17,63 @@ committed while fixing the other two.
 
 # LIVE
 
+## Local agents at repo scale: prefill, context, memory (operator 2026-10-28)
+
+Context: on 2026-10-28 Qwen3.6-35B-A3B under `rozum launch` did a real Scala task in okay-guard (edit + test + sbt,
+1m43s). A reader asked the right question: five lines in three files is a small context — what happens when the
+agent must read most of the repo first, since prefill is what makes local inference feel slow? The operator also
+wants the model to need less memory (vLLM's PagedAttention, SGLang's RadixAttention were the prompt). Order below
+is by evidence, not by fashion.
+
+**Measured, gateway.jsonl 2026-10-28 (M4 Max 36 GB, Qwen3.6-35B-A3B-4bit; `est_prompt_tokens` × `ttft_ms`):**
+
+- Claude Code's fixed head (system prompt + tools) ≈ 14.6k tokens: **cold ttft 11.5–17 s** (≈ 0.9–1.25k tok/s
+  prefill). Paid at every new session, and again after `gateway_idle_unload` (300 s idle drops the model AND the
+  prefix store).
+- A turn reusing the stored prefix: **0.3–2 s**. A turn that adds a file read of ~4.5k tokens: **~5 s** (≈ 900
+  tok/s on the delta). The `PrefixStore` (SGLang's idea, already here) is what makes agent turns usable at all.
+- At a 32k window, from the first overflow on: **37–49 s on EVERY turn** (≈ 31k tokens re-prefilled each time).
+  Cause, read in `auto_context::fit_to_context`: it drops the oldest turns until the prompt JUST fits; the next
+  turn overflows again by its own few hundred tokens, one more turn is dropped, the prompt's head shifts — and the
+  prefix store misses every time. The same run at 64k never reached the window and stayed in seconds.
+- Memory: weights ≈ 19 GB; KV ≈ 20 KB/token (10 of 40 layers full attention × 2 KV heads × 256 × bf16) — 64k ≈
+  1.3 GB, the full 262k ≈ 5 GB. **PagedAttention would save little here**: mlx-native already grows KV lazily per
+  token; paging pays off for hundreds of concurrent requests, not one or two agents. The memory is the WEIGHTS.
+
+**Items, in order:**
+
+- [ ] **ctx-trim-hysteresis** — the biggest, cheapest win (37–49 s → seconds per turn past the window). When a
+  prompt overflows, cut to ~60% of the budget, not to "just fits", and KEEP that cut: a per-conversation memo in
+  the gateway (key: hash of the system + first kept message ids) remembers the drop point and reuses it while the
+  prompt still fits, so the prompt's head — and the elision note, which must be byte-stable for the same dropped
+  set — stays identical turn after turn and the prefix store hits. Re-cut only when the kept part overflows again
+  (≈ every 40% of a window of new tokens). Test: a synthetic growing conversation — one cold prefill per re-cut,
+  warm otherwise (`ROZUM_PREFIX_DEBUG`). Spec first (`docs/specs/gateway-auto-context.md` or its successor).
+- [ ] **obs-prefill** — `request_done` logs `prompt_tokens` (real, not estimated), `reused_tokens` (the prefix
+  hit), `prefill_ms`, `decode_ms`. Today these numbers need a join of start/done by id and a guess. Needed to
+  measure every item below honestly (`performance` skill: one measurement is a hypothesis).
+- [ ] **prefix-on-disk** — SGLang/llama.cpp's prompt cache, made durable: persist the KV (hybrid: full-attention KV
+  + the linear-layer snapshot, as `HybridPrefix` holds) of the longest COMMON head — Claude Code's ~14.6k tokens is
+  the same in every session of the same client version — keyed by (model, token-ids hash), under
+  `~/.rozum/prefix/`. A new session, or a reload after idle unload, loads it instead of prefilling: 12–17 s → a
+  read of ~0.3 GB from SSD. Size the store, evict LRU, never trust a file whose model/tokenizer hash differs.
+- [ ] **prefill-throughput** — ~1k tok/s means a 100k-token "read the repo" costs ~100 s cold. Bench prefill tok/s
+  at 2k/8k/32k/64k (cold, same prompt, minima of 5 runs), against `mlx_lm` on the same weights to know the
+  headroom; profile where MoE prefill goes (expert gather/`gather_qmm`, the GatedDeltaNet scan, chunk size). Only
+  then optimise.
+- [ ] **agents read less** — the cheapest prefill is the one not made: `rag.search` (syntactic RAG, LIVE above)
+  returns the relevant spans instead of whole files. Measure tokens read per task with and without it on the same
+  task in a big repo (okay-guard: ~25k lines).
+- [ ] **moe-expert-offload** — the real "less memory for the model": 8 of 256 experts are active per token, so
+  most of the 19 GB is idle at any moment. Measure first (≈ 1 h): log the experts chosen per layer over a real
+  agent run; if a hot set covers most activations, keep shared layers + hot experts resident and read cold ones
+  from the safetensors by mmap (SSD ~7 GB/s; "LLM in a flash", llama.cpp's mmap). Goal: the model loads in 8–12
+  GB instead of the ~23.6 GB the admission asks today, so it fits beside an IDE and a browser. Risk: scattered
+  activation on code turns decode from 46 tok/s into I/O stalls — the measurement decides.
+- [ ] **kv-quant-8bit** — KV in 8 bits (mlx_lm's `QuantizedKVCache`): halves the KV, ~0.6 GB at 64k, more at long
+  context. Small, after the above; check output equality at temperature 0 on a fixed prompt set.
+
+
 ## Syntactic RAG (phases 2–3; phase 1 is on SPRINT as `rag-syntactic-md`)
 
 Operator's design (2026-08, in-session, binding): RAG over project sources with a SYNTACTIC
