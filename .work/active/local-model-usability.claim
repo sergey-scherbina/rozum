@@ -1,6 +1,0 @@
-feature/local-model-usability 2026-10-28T08:15:24Z
-agent: claude-code (operator ask 2026-10-28: make local-model work on real projects succeed — "Да. Да (как советуешь)")
-heartbeat: 2026-10-28T08:15:24Z
-status: in-progress
-done-so-far: sbt under the Seatbelt jail dies at boot: UnixDomainServerSocket.bind EPERM (no unix-socket rule; loopback is ip-only). A hand-added unix-socket rule for the writable paths makes okay-guard localJVM/test pass in the jail
-next: unix-socket rule in to_seatbelt_profile + test; 64k default context for >=32 GB; loop breaker for repeated identical tool errors; rerun Qwen3.6-35B-A3B on the okay-guard --version task
