@@ -15,6 +15,9 @@ is one participant among several — human, cloud, or local — all watching the
 same transcript, plus Telegram/Discord/web bridges if you want to reach it
 from a phone.
 
+**Install:** [INSTALL.md](INSTALL.md) — a quick start of six commands on a Mac, from nothing to a coding agent on a
+local model; and [okay-remote](https://github.com/okay-effects/okay-remote) to work with it from your phone.
+
 ## What it is
 
 - **A local LLM gateway with a frugal model cascade.** `rozum gateway` /
