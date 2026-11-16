@@ -33,12 +33,18 @@ pub fn plugins_dir(cwd: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Where a skill is installed TO for Claude Code.
-pub fn commands_dir() -> PathBuf {
-    rozum_paths::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
-        .join("commands")
+/// Where skills are installed TO: the agent-neutral place (`~/.agents/skills`, read by opencode, Codex and others)
+/// and Claude Code's own (`~/.claude/skills`). A skill is a directory with a `SKILL.md` (the open Agent Skills
+/// format) — the same in both, tied to no agent.
+pub fn skills_dirs() -> Vec<PathBuf> {
+    let home = rozum_paths::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    vec![home.join(".agents").join("skills"), home.join(".claude").join("skills")]
+}
+
+/// Where the OLD installer copied skills, as Claude Code commands: a copy there is removed when the skill is
+/// installed (it would show twice, and go stale).
+pub fn legacy_commands_dir() -> PathBuf {
+    rozum_paths::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".claude").join("commands")
 }
 
 /// What a single skill's installed copy is, relative to the source.
@@ -53,24 +59,33 @@ pub enum SkillState {
     Missing,
 }
 
-/// Compare every skill in `plugins` against what is installed in `commands`.
+/// A skill's source file: `<name>/SKILL.md`, or — a checkout from before the Agent Skills layout —
+/// `<name>/commands/<name>.md`.
+fn source(plugins: &Path, name: &str) -> Option<PathBuf> {
+    let skill = plugins.join(name).join("SKILL.md");
+    if skill.is_file() {
+        return Some(skill);
+    }
+    let old = plugins.join(name).join("commands").join(format!("{name}.md"));
+    old.is_file().then_some(old)
+}
+
+/// Compare every skill in `plugins` against what is installed in `skills`.
 ///
 /// Pure and directory-driven so it is testable without a home directory, and so adding a skill to
 /// the repo needs no edit here — the recurring way a list like this goes wrong is by being a list.
-pub fn skill_states(plugins: &Path, commands: &Path) -> Vec<(String, SkillState)> {
+pub fn skill_states(plugins: &Path, skills: &Path) -> Vec<(String, SkillState)> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(plugins) else { return out };
     let mut names: Vec<String> = entries
         .filter_map(Result::ok)
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            e.path().join("commands").join(format!("{name}.md")).is_file().then_some(name)
-        })
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|name| source(plugins, name).is_some())
         .collect();
     names.sort();
     for name in names {
-        let src = plugins.join(&name).join("commands").format_md(&name);
-        let dst = commands.join(format!("{name}.md"));
+        let Some(src) = source(plugins, &name) else { continue };
+        let dst = skills.join(&name).join("SKILL.md");
         let state = match (std::fs::read(&src), std::fs::read(&dst)) {
             (Ok(a), Ok(b)) if a == b => SkillState::Current,
             (Ok(_), Ok(_)) => SkillState::Stale,
@@ -82,26 +97,32 @@ pub fn skill_states(plugins: &Path, commands: &Path) -> Vec<(String, SkillState)
     out
 }
 
-trait JoinMd {
-    fn format_md(&self, name: &str) -> PathBuf;
-}
-impl JoinMd for PathBuf {
-    fn format_md(&self, name: &str) -> PathBuf {
-        self.join(format!("{name}.md"))
+/// Install (or refresh) one skill in `skills`: a LINK to the source's directory (a pull of the checkout is then the
+/// update — nothing to go stale), or, for a source in the old layout, a directory with a copy as its `SKILL.md`. A
+/// link or a file in the way is replaced; a real directory keeps what else it holds. Returns the destination.
+pub fn install_skill(plugins: &Path, skills: &Path, name: &str) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(skills)?;
+    let src = source(plugins, name)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("no skill {name}")))?;
+    let dst = skills.join(name);
+    let meta = std::fs::symlink_metadata(&dst);
+    let is_dir = meta.as_ref().map(|m| m.file_type().is_dir()).unwrap_or(false);
+    if meta.is_ok() && !is_dir {
+        std::fs::remove_file(&dst)?;
     }
-}
-
-/// Install (or refresh) one skill. Returns the destination on success.
-pub fn install_skill(plugins: &Path, commands: &Path, name: &str) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(commands)?;
-    let src = plugins.join(name).join("commands").format_md(name);
-    let dst = commands.join(format!("{name}.md"));
-    std::fs::copy(&src, &dst)?;
+    if src.file_name().is_some_and(|f| f == "SKILL.md") && !is_dir {
+        let target = std::fs::canonicalize(plugins.join(name))?;
+        std::os::unix::fs::symlink(target, &dst)?;
+    } else {
+        std::fs::create_dir_all(&dst)?;
+        std::fs::copy(&src, dst.join("SKILL.md"))?;
+    }
     Ok(dst)
 }
 
-/// The skills half of the report, and — when `fix` — the repair.
-pub fn check_skills(plugins: Option<&Path>, commands: &Path, fix: bool) -> Vec<Check> {
+/// The skills half of the report for every place, and — when `fix` — the repair (the old copies in `legacy`
+/// removed with it).
+pub fn check_skills(plugins: Option<&Path>, dirs: &[PathBuf], legacy: &Path, fix: bool) -> Vec<Check> {
     let Some(plugins) = plugins else {
         return vec![Check::warn(
             "agent skills",
@@ -110,51 +131,58 @@ pub fn check_skills(plugins: Option<&Path>, commands: &Path, fix: bool) -> Vec<C
              directory",
         )];
     };
-    let states = skill_states(plugins, commands);
+    dirs.iter().map(|skills| check_place(plugins, skills, legacy, fix)).collect()
+}
+
+fn check_place(plugins: &Path, skills: &Path, legacy: &Path, fix: bool) -> Check {
+    // a check's name is static: the two places by name, any other as plain "agent skills"
+    let label: &'static str = if skills.ends_with(".agents/skills") {
+        "agent skills (~/.agents/skills)"
+    } else if skills.ends_with(".claude/skills") {
+        "agent skills (~/.claude/skills)"
+    } else {
+        "agent skills"
+    };
+    let states = skill_states(plugins, skills);
     if states.is_empty() {
-        return vec![Check::warn_bare(
-            "agent skills",
-            format!("no skills found under {}", plugins.display()),
-        )];
+        return Check::warn_bare(label, format!("no skills found under {}", plugins.display()));
     }
-    let mut behind: Vec<String> = states
+    let behind: Vec<String> = states
         .iter()
         .filter(|(_, s)| *s != SkillState::Current)
         .map(|(n, s)| format!("{n} ({})", if *s == SkillState::Stale { "stale" } else { "missing" }))
         .collect();
     if behind.is_empty() {
-        return vec![Check::ok(
-            "agent skills",
-            format!("{} installed and current", states.len()),
-        )];
+        return Check::ok(label, format!("{} installed and current", states.len()));
     }
     if !fix {
-        return vec![Check::fail(
-            "agent skills",
+        return Check::fail(
+            label,
             format!("{} of {} not current: {}", behind.len(), states.len(), behind.join(", ")),
             "rozum setup --fix",
-        )];
+        );
     }
     let mut failed = Vec::new();
-    for (name, state) in states.iter().filter(|(_, s)| *s != SkillState::Current) {
-        if let Err(e) = install_skill(plugins, commands, name) {
+    for (name, _) in states.iter().filter(|(_, s)| *s != SkillState::Current) {
+        if let Err(e) = install_skill(plugins, skills, name) {
             failed.push(format!("{name}: {e}"));
         }
-        let _ = state;
+        let old = legacy.join(format!("{name}.md"));
+        if std::fs::symlink_metadata(&old).is_ok_and(|m| m.file_type().is_file()) {
+            let _ = std::fs::remove_file(&old);
+        }
     }
-    behind.clear();
     if failed.is_empty() {
-        vec![Check::ok("agent skills", "installed/refreshed the ones that were behind")]
+        Check::ok(label, "installed/refreshed the ones that were behind")
     } else {
-        vec![Check::fail_bare("agent skills", failed.join("; "))]
+        Check::fail_bare(label, failed.join("; "))
     }
 }
 
 /// The whole report.
 pub fn run(cwd: &Path, fix: bool) -> DoctorReport {
     let plugins = plugins_dir(cwd);
-    let commands = commands_dir();
-    let mut checks = check_skills(plugins.as_deref(), &commands, fix);
+    let mut checks = check_skills(plugins.as_deref(), &skills_dirs(), &legacy_commands_dir(), fix);
     checks.extend(check_mcp());
     checks.extend(check_meetings());
     checks.extend(check_rag(cwd));
@@ -345,9 +373,14 @@ mod tests {
     use super::*;
 
     fn skill(root: &Path, name: &str, body: &str) {
-        let d = root.join(name).join("commands");
+        let d = root.join(name);
         std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join(format!("{name}.md")), body).unwrap();
+        std::fs::write(d.join("SKILL.md"), body).unwrap();
+    }
+
+    fn installed(dst: &Path, name: &str, body: &str) {
+        std::fs::create_dir_all(dst.join(name)).unwrap();
+        std::fs::write(dst.join(name).join("SKILL.md"), body).unwrap();
     }
 
     /// Behavior: the three states are distinguished, and STALE is distinguished from CURRENT.
@@ -363,8 +396,8 @@ mod tests {
         skill(src.path(), "alpha", "same");
         skill(src.path(), "beta", "new text");
         skill(src.path(), "gamma", "never installed");
-        std::fs::write(dst.path().join("alpha.md"), "same").unwrap();
-        std::fs::write(dst.path().join("beta.md"), "OLD text").unwrap();
+        installed(dst.path(), "alpha", "same");
+        installed(dst.path(), "beta", "OLD text");
 
         let states = skill_states(src.path(), dst.path());
         assert_eq!(
@@ -385,35 +418,60 @@ mod tests {
         let dst = tempfile::tempdir().unwrap();
         skill(src.path(), "alpha", "current");
         skill(src.path(), "beta", "new text");
-        std::fs::write(dst.path().join("beta.md"), "OLD text").unwrap();
+        installed(dst.path(), "beta", "OLD text");
+        let legacy = tempfile::tempdir().unwrap();
+        std::fs::write(legacy.path().join("alpha.md"), "an old command copy").unwrap();
+        let dirs = vec![dst.path().to_path_buf()];
 
-        let before = check_skills(Some(src.path()), dst.path(), false);
+        let before = check_skills(Some(src.path()), &dirs, legacy.path(), false);
         assert_eq!(before[0].status, CheckStatus::Fail, "{before:?}");
         assert!(before[0].detail.contains("alpha (missing)"), "{before:?}");
         assert!(before[0].detail.contains("beta (stale)"), "{before:?}");
 
-        let fixed = check_skills(Some(src.path()), dst.path(), true);
+        let fixed = check_skills(Some(src.path()), &dirs, legacy.path(), true);
         assert_eq!(fixed[0].status, CheckStatus::Ok, "{fixed:?}");
-        assert_eq!(std::fs::read_to_string(dst.path().join("beta.md")).unwrap(), "new text");
-        assert_eq!(std::fs::read_to_string(dst.path().join("alpha.md")).unwrap(), "current");
+        assert_eq!(std::fs::read_to_string(dst.path().join("beta/SKILL.md")).unwrap(), "new text");
+        assert_eq!(std::fs::read_to_string(dst.path().join("alpha/SKILL.md")).unwrap(), "current");
+        // the missing one LINKED to its source: a change there is the installed skill at once
+        assert!(std::fs::symlink_metadata(dst.path().join("alpha")).unwrap().file_type().is_symlink());
+        std::fs::write(src.path().join("alpha/SKILL.md"), "edited").unwrap();
+        assert_eq!(std::fs::read_to_string(dst.path().join("alpha/SKILL.md")).unwrap(), "edited");
+        // the old command copy gone with it
+        assert!(!legacy.path().join("alpha.md").exists());
 
         // And a second run is quiet: the report must not keep claiming work it already did.
-        let again = check_skills(Some(src.path()), dst.path(), false);
+        let again = check_skills(Some(src.path()), &dirs, legacy.path(), false);
         assert_eq!(again[0].status, CheckStatus::Ok, "{again:?}");
     }
 
     /// Behavior: a source that cannot be located is a WARNING naming what to do, not a silent
     /// pass. Reporting "all current" while having found no skills at all would be the worst
     /// possible answer — indistinguishable from a healthy machine.
+    /// Behavior: a checkout from before the Agent Skills layout (`<name>/commands/<name>.md`) still installs — as a
+    /// directory with that file as its SKILL.md.
+    #[test]
+    fn the_old_layout_still_installs() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let d = src.path().join("old").join("commands");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("old.md"), "old body").unwrap();
+        assert_eq!(skill_states(src.path(), dst.path()), vec![("old".to_string(), SkillState::Missing)]);
+        install_skill(src.path(), dst.path(), "old").unwrap();
+        assert_eq!(std::fs::read_to_string(dst.path().join("old/SKILL.md")).unwrap(), "old body");
+        assert_eq!(skill_states(src.path(), dst.path()), vec![("old".to_string(), SkillState::Current)]);
+    }
+
     #[test]
     fn a_missing_plugin_source_is_reported_not_assumed_fine() {
         let dst = tempfile::tempdir().unwrap();
-        let none = check_skills(None, dst.path(), false);
+        let dirs = vec![dst.path().to_path_buf()];
+        let none = check_skills(None, &dirs, dst.path(), false);
         assert_eq!(none[0].status, CheckStatus::Warn);
         assert!(none[0].hint.as_deref().unwrap_or_default().contains("ROZUM_PLUGINS_DIR"));
 
         let empty = tempfile::tempdir().unwrap();
-        let no_skills = check_skills(Some(empty.path()), dst.path(), false);
+        let no_skills = check_skills(Some(empty.path()), &dirs, dst.path(), false);
         assert_eq!(no_skills[0].status, CheckStatus::Warn, "an empty source is not 'all current'");
     }
 

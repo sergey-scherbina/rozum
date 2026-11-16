@@ -120,7 +120,12 @@ Distinct from `rozum doctor`, which asks whether the DEMO path is ready. This as
 agent you started from a console sees the meeting rooms, the retrieval, and the skills that
 describe them.
 
-The gap it exists for is the quiet kind: a skill that was never copied into `~/.claude/commands`
+Skills are installed for every agent, not one: each is a directory with a `SKILL.md` (the open
+Agent Skills format), LINKED into `~/.agents/skills` (opencode, Codex and others) and
+`~/.claude/skills` (Claude Code) — a pull of the source is the update; a copy left in
+`~/.claude/commands` by the old installer is removed.
+
+The gap it exists for is the quiet kind: a skill that was never installed
 produces no error at all — the agent simply never learns the feature exists — and a STALE copy is
 worse, because the agent reads it and acts on instructions that have since changed. When this
 command was first run on the machine it was written on, three skills had never been installed and
